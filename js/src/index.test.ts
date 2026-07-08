@@ -23,11 +23,11 @@ function tmpArtifact(contents = "{\"ok\":true}\n"): string {
 
 function runInput(overrides: Partial<PerformanceIQRunInput> = {}): PerformanceIQRunInput {
   return {
-    sourceKind: "fresh-gamble-run",
+    sourceType: "fresh-run",
     confidentiality: "internal-full",
     producer: {
-      repo: "cfregly/gamble",
-      tool: "gamble",
+      repo: "producer-runner",
+      tool: "runner",
       commitSha: "1234567890abcdef",
     },
     campaign: {
@@ -59,16 +59,16 @@ describe("performance-iq-sdk js", () => {
   it("builds a manifest with artifact hashes and pending SDK row proof", async () => {
     const manifest = await buildManifest(runInput())
 
-    expect(manifest.schemaVersion).toBe("atlas-benchmark-evidence.producer-manifest.v1")
-    expect(manifest.producerEvidenceSource).toBe("fresh-gamble-run")
+    expect(manifest.schemaVersion).toBe("performance-iq.producer-manifest.v1")
+    expect(manifest.sourceType).toBe("fresh-run")
     expect(manifest.artifacts[0]).toMatchObject({
       kind: "normalized-summary",
       sha256: "e5f1eb4d806641698a35efe20e098efd20d7d57a9b90ee69079d5bb650920726",
       sizeBytes: 12,
     })
-    expect(manifest.perflake).toMatchObject({
+    expect(manifest.store).toMatchObject({
       sourceTables: ["performance_iq.sdk_submission"],
-      modelTables: ["model_perflake.sdk_pending_ingest"],
+      modelTables: ["model_store.sdk_pending_ingest"],
       rowProof: [{ campaignId: "campaign-sdk-test", rowCount: 1 }],
     })
   })
@@ -78,7 +78,7 @@ describe("performance-iq-sdk js", () => {
 
     expect(result.ok).toBe(true)
     expect(result.liveProofReady).toBe(true)
-    expect(result.freshProducer).toBe(true)
+    expect(result.freshRun).toBe(true)
     expect(result.snapshotBacked).toBe(false)
   })
 
@@ -91,7 +91,7 @@ describe("performance-iq-sdk js", () => {
 
   it("rejects arbitrary SQL/query keys anywhere in the payload", async () => {
     const result = await validateRun(runInput({
-      measurements: [{ sql: "SELECT * FROM model_perflake.secret" }],
+      measurements: [{ sql: "SELECT * FROM model_store.secret" }],
     }))
 
     expect(result.ok).toBe(false)
@@ -119,7 +119,7 @@ describe("performance-iq-sdk js", () => {
     const result = await client.submitRun(runInput(), { idempotencyKey: "idem-1" })
 
     expect(result).toEqual({ id: "run-sdk-test", status: "accepted" })
-    expect(fetchImpl).toHaveBeenCalledWith("https://performance-iq.example/api/v1/evidence/runs", expect.objectContaining({
+    expect(fetchImpl).toHaveBeenCalledWith("https://performance-iq.example/api/v1/runs", expect.objectContaining({
       method: "POST",
       headers: expect.objectContaining({
         authorization: "Bearer service-token",

@@ -22,11 +22,11 @@ class PerformanceIQSdkTest(unittest.TestCase):
 
     def input(self, **overrides):
         payload = {
-            "sourceKind": "fresh-gamble-run",
+            "sourceType": "fresh-run",
             "confidentiality": "internal-full",
             "producer": {
-                "repo": "cfregly/gamble",
-                "tool": "gamble",
+                "repo": "producer-runner",
+                "tool": "runner",
                 "commitSha": "1234567890abcdef",
             },
             "campaign": {
@@ -50,18 +50,18 @@ class PerformanceIQSdkTest(unittest.TestCase):
     def test_build_manifest_hashes_artifacts(self):
         manifest = build_manifest(self.input())
 
-        self.assertEqual(manifest["schemaVersion"], "atlas-benchmark-evidence.producer-manifest.v1")
-        self.assertEqual(manifest["producerEvidenceSource"], "fresh-gamble-run")
+        self.assertEqual(manifest["schemaVersion"], "performance-iq.producer-manifest.v1")
+        self.assertEqual(manifest["sourceType"], "fresh-run")
         self.assertEqual(manifest["artifacts"][0]["kind"], "normalized-summary")
         self.assertEqual(manifest["artifacts"][0]["sha256"], "e5f1eb4d806641698a35efe20e098efd20d7d57a9b90ee69079d5bb650920726")
-        self.assertEqual(manifest["perflake"]["rowProof"][0]["campaignId"], "campaign-python-test")
+        self.assertEqual(manifest["store"]["rowProof"][0]["campaignId"], "campaign-python-test")
 
     def test_validate_run_live_proof_classification(self):
         result = validate_run(self.input())
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["liveProofReady"])
-        self.assertTrue(result["freshProducer"])
+        self.assertTrue(result["freshRun"])
         self.assertFalse(result["snapshotBacked"])
 
     def test_customer_safe_fails_closed(self):
@@ -89,7 +89,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(result, {"id": "run-python-test", "status": "accepted"})
         method, url, headers, body = calls[0]
         self.assertEqual(method, "POST")
-        self.assertEqual(url, "https://performance-iq.example/api/v1/evidence/runs")
+        self.assertEqual(url, "https://performance-iq.example/api/v1/runs")
         self.assertEqual(headers["authorization"], "Bearer service-token")
         self.assertEqual(headers["idempotency-key"], "idem-python")
         self.assertEqual(body["schemaVersion"], "performance-iq.ingestion-request.v1")

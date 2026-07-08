@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto"
 import { readFile, stat } from "node:fs/promises"
 
-export const PRODUCER_MANIFEST_VERSION = "atlas-benchmark-evidence.producer-manifest.v1"
+export const PRODUCER_MANIFEST_VERSION = "performance-iq.producer-manifest.v1"
 export const INGESTION_REQUEST_VERSION = "performance-iq.ingestion-request.v1"
 
-export type SourceKind = "preserved-snapshot" | "fresh-gamble-run" | "other-measured-producer"
-export type EvidenceClass = "measured" | "rehearsal" | "simulated"
+export type SourceType = "preserved-snapshot" | "fresh-run" | "other-measured-producer"
+export type RunClass = "measured" | "rehearsal" | "simulated"
 export type Confidentiality = "internal-full" | "customer-safe" | "public-safe" | "redacted"
 export type RunStatus = "accepted" | "rejected" | "processing" | "quote-ready"
 
@@ -29,6 +29,10 @@ export interface CampaignIdentity {
 export interface WorkloadIdentity {
   model: string
   hardware: string
+  acceleratorVendor?: string
+  acceleratorModel?: string
+  acceleratorArchitecture?: string
+  interconnect?: string
   operatingPoint: string
   scenario?: string
   precision?: string
@@ -66,22 +70,22 @@ export interface RowProof {
   latestCapturedAtUtc?: string
 }
 
-export interface PerflakeProof {
+export interface StoreProof {
   sourceTables: string[]
   modelTables: string[]
   rowProof: RowProof[]
 }
 
-export interface AtlasEvidenceReference {
+export interface PlatformReference {
   dashboardUrl?: string
-  evidencePackPath: string
+  decisionBriefPath: string
   exportGeneratedAtUtc?: string
   preflightPath?: string
 }
 
 export interface PerformanceIQRunInput {
-  sourceKind: SourceKind
-  evidenceClass?: EvidenceClass
+  sourceType: SourceType
+  runClass?: RunClass
   confidentiality: Confidentiality
   producer: ProducerIdentity
   campaign: CampaignIdentity
@@ -89,16 +93,16 @@ export interface PerformanceIQRunInput {
   runtime: RuntimeIdentity
   artifacts: ArtifactInput[]
   measurements?: Record<string, unknown>[]
-  perflake?: PerflakeProof
-  atlasEvidence?: Partial<AtlasEvidenceReference>
+  store?: StoreProof
+  platform?: Partial<PlatformReference>
   methodology?: string
   limitations?: string[]
 }
 
-export interface ProducerEvidenceManifest {
+export interface ProducerRunManifest {
   schemaVersion: typeof PRODUCER_MANIFEST_VERSION
-  evidenceClass: EvidenceClass
-  producerEvidenceSource: SourceKind
+  runClass: RunClass
+  sourceType: SourceType
   generatedAtUtc: string
   producer: ProducerIdentity
   campaign: Required<Pick<CampaignIdentity, "campaignId" | "runId" | "capturedAtUtc" | "completedAtUtc">> &
@@ -106,28 +110,28 @@ export interface ProducerEvidenceManifest {
   workload: WorkloadIdentity
   runtime: RuntimeIdentity
   artifacts: ArtifactMetadata[]
-  perflake: PerflakeProof
-  atlasEvidence: AtlasEvidenceReference
+  store: StoreProof
+  platform: PlatformReference
   methodology: string
   limitations: string[]
   confidentiality: Confidentiality
 }
 
-export interface EvidenceSubmissionEnvelope {
+export interface RunSubmissionEnvelope {
   schemaVersion: typeof INGESTION_REQUEST_VERSION
-  manifest: ProducerEvidenceManifest
+  manifest: ProducerRunManifest
   measurements?: Record<string, unknown>[]
 }
 
 export interface ValidationResult {
   ok: boolean
   liveProofReady: boolean
-  sourceKind: SourceKind | undefined
+  sourceType: SourceType | undefined
   snapshotBacked: boolean
-  freshProducer: boolean
+  freshRun: boolean
   errors: string[]
   warnings: string[]
-  manifest?: ProducerEvidenceManifest
+  manifest?: ProducerRunManifest
 }
 
 export interface PerformanceIQClientOptions {
@@ -141,7 +145,7 @@ export interface SubmitOptions {
   dryRun?: boolean
 }
 
-export interface EvidenceStatusRequest {
+export interface PerformanceStatusRequest {
   consumer: "sales" | "support" | "agent"
   confidentialityMode: "internal_full" | "customer_safe" | "public_safe" | "redacted"
   question?: string
@@ -212,9 +216,9 @@ async function normalizeArtifact(input: ArtifactInput): Promise<ArtifactMetadata
   }
 }
 
-function defaultPerflakeProof(input: PerformanceIQRunInput): PerflakeProof {
+function defaultStoreProof(input: PerformanceIQRunInput): StoreProof {
   const rowCount = Math.max(input.measurements?.length ?? 0, 1)
-  const table = "model_perflake.sdk_pending_ingest"
+  const table = "model_store.sdk_pending_ingest"
   return {
     sourceTables: ["performance_iq.sdk_submission"],
     modelTables: [table],
@@ -229,17 +233,17 @@ function defaultPerflakeProof(input: PerformanceIQRunInput): PerflakeProof {
   }
 }
 
-export async function buildManifest(input: PerformanceIQRunInput): Promise<ProducerEvidenceManifest> {
+export async function buildManifest(input: PerformanceIQRunInput): Promise<ProducerRunManifest> {
   const generatedAtUtc = nowIso()
   const artifacts = await Promise.all(input.artifacts.map(normalizeArtifact))
   const capturedAtUtc = input.campaign.capturedAtUtc ?? generatedAtUtc
   const completedAtUtc = input.campaign.completedAtUtc ?? capturedAtUtc
-  const perflake = input.perflake ?? defaultPerflakeProof(input)
+  const store = input.store ?? defaultStoreProof(input)
 
   return {
     schemaVersion: PRODUCER_MANIFEST_VERSION,
-    evidenceClass: input.evidenceClass ?? "measured",
-    producerEvidenceSource: input.sourceKind,
+    runClass: input.runClass ?? "measured",
+    sourceType: input.sourceType,
     generatedAtUtc,
     producer: input.producer,
     campaign: {
@@ -250,18 +254,18 @@ export async function buildManifest(input: PerformanceIQRunInput): Promise<Produ
     workload: input.workload,
     runtime: input.runtime,
     artifacts,
-    perflake: {
-      ...perflake,
-      rowProof: perflake.rowProof.map((proof) => ({
+    store: {
+      ...store,
+      rowProof: store.rowProof.map((proof) => ({
         ...proof,
         campaignId: proof.campaignId ?? input.campaign.campaignId,
       })),
     },
-    atlasEvidence: {
-      evidencePackPath: input.atlasEvidence?.evidencePackPath ?? "performance-iq://pending/evidence-pack",
-      dashboardUrl: input.atlasEvidence?.dashboardUrl,
-      exportGeneratedAtUtc: input.atlasEvidence?.exportGeneratedAtUtc,
-      preflightPath: input.atlasEvidence?.preflightPath,
+    platform: {
+      decisionBriefPath: input.platform?.decisionBriefPath ?? "performance-iq://pending/decision-brief",
+      dashboardUrl: input.platform?.dashboardUrl,
+      exportGeneratedAtUtc: input.platform?.exportGeneratedAtUtc,
+      preflightPath: input.platform?.preflightPath,
     },
     methodology: input.methodology ?? "Submitted through the Performance IQ SDK.",
     limitations: input.limitations?.length ? input.limitations : ["No limitations were supplied by the producer."],
@@ -270,9 +274,9 @@ export async function buildManifest(input: PerformanceIQRunInput): Promise<Produ
 }
 
 export function buildEnvelope(
-  manifest: ProducerEvidenceManifest,
+  manifest: ProducerRunManifest,
   measurements?: Record<string, unknown>[],
-): EvidenceSubmissionEnvelope {
+): RunSubmissionEnvelope {
   return {
     schemaVersion: INGESTION_REQUEST_VERSION,
     manifest,
@@ -280,7 +284,7 @@ export function buildEnvelope(
   }
 }
 
-export function validateManifest(manifest: ProducerEvidenceManifest): ValidationResult {
+export function validateManifest(manifest: ProducerRunManifest): ValidationResult {
   const errors: string[] = []
   const warnings: string[] = []
   const disallowed = findDisallowedRequestKey(manifest)
@@ -292,14 +296,14 @@ export function validateManifest(manifest: ProducerEvidenceManifest): Validation
   if (manifest.schemaVersion !== PRODUCER_MANIFEST_VERSION) {
     errors.push(`schemaVersion must be ${PRODUCER_MANIFEST_VERSION}`)
   }
-  if (!["measured", "rehearsal", "simulated"].includes(manifest.evidenceClass)) {
-    errors.push("evidenceClass must be measured, rehearsal, or simulated")
+  if (!["measured", "rehearsal", "simulated"].includes(manifest.runClass)) {
+    errors.push("runClass must be measured, rehearsal, or simulated")
   }
-  if (manifest.evidenceClass !== "measured") {
-    warnings.push("manifest is accepted as non-live evidence only; live proof requires evidenceClass=measured")
+  if (manifest.runClass !== "measured") {
+    warnings.push("manifest is accepted as non-live results only; live proof requires runClass=measured")
   }
-  if (!["preserved-snapshot", "fresh-gamble-run", "other-measured-producer"].includes(manifest.producerEvidenceSource)) {
-    errors.push("producerEvidenceSource is not supported")
+  if (!["preserved-snapshot", "fresh-run", "other-measured-producer"].includes(manifest.sourceType)) {
+    errors.push("sourceType is not supported")
   }
   if (manifest.confidentiality !== "internal-full") {
     errors.push("only internal-full submissions are enabled; customer-safe, public-safe, and redacted remain fail-closed")
@@ -328,32 +332,32 @@ export function validateManifest(manifest: ProducerEvidenceManifest): Validation
       errors.push(`artifacts[${index}].sizeBytes must be >= 0`)
     }
   }
-  if (!manifest.perflake?.sourceTables?.length) errors.push("perflake.sourceTables must contain at least one table")
-  if (!manifest.perflake?.modelTables?.length) errors.push("perflake.modelTables must contain at least one table")
-  const modelTables = new Set(manifest.perflake?.modelTables ?? [])
-  for (const [index, proof] of (manifest.perflake?.rowProof ?? []).entries()) {
+  if (!manifest.store?.sourceTables?.length) errors.push("store.sourceTables must contain at least one table")
+  if (!manifest.store?.modelTables?.length) errors.push("store.modelTables must contain at least one table")
+  const modelTables = new Set(manifest.store?.modelTables ?? [])
+  for (const [index, proof] of (manifest.store?.rowProof ?? []).entries()) {
     if (proof.campaignId !== manifest.campaign.campaignId) {
-      errors.push(`perflake.rowProof[${index}].campaignId must match campaign.campaignId`)
+      errors.push(`store.rowProof[${index}].campaignId must match campaign.campaignId`)
     }
     if (!modelTables.has(proof.table)) {
-      errors.push(`perflake.rowProof[${index}].table must be listed in perflake.modelTables`)
+      errors.push(`store.rowProof[${index}].table must be listed in store.modelTables`)
     }
     if (!Number.isFinite(proof.rowCount) || proof.rowCount < 1) {
-      errors.push(`perflake.rowProof[${index}].rowCount must be >= 1`)
+      errors.push(`store.rowProof[${index}].rowCount must be >= 1`)
     }
   }
-  if (!manifest.perflake?.rowProof?.length) errors.push("perflake.rowProof must contain at least one row proof")
+  if (!manifest.store?.rowProof?.length) errors.push("store.rowProof must contain at least one row proof")
 
   const liveProofReady = errors.length === 0 &&
-    manifest.evidenceClass === "measured" &&
-    manifest.producerEvidenceSource === "fresh-gamble-run"
+    manifest.runClass === "measured" &&
+    manifest.sourceType === "fresh-run"
 
   return {
     ok: errors.length === 0,
     liveProofReady,
-    sourceKind: manifest.producerEvidenceSource,
-    snapshotBacked: manifest.producerEvidenceSource === "preserved-snapshot",
-    freshProducer: manifest.producerEvidenceSource === "fresh-gamble-run",
+    sourceType: manifest.sourceType,
+    snapshotBacked: manifest.sourceType === "preserved-snapshot",
+    freshRun: manifest.sourceType === "fresh-run",
     errors,
     warnings,
     manifest,
@@ -365,7 +369,7 @@ export async function validateRun(input: PerformanceIQRunInput): Promise<Validat
   const disallowed = findDisallowedRequestKey(input)
   if (disallowed) errors.push(`payload must not include ${disallowed}`)
 
-  let manifest: ProducerEvidenceManifest | undefined
+  let manifest: ProducerRunManifest | undefined
   try {
     manifest = await buildManifest(input)
   } catch (err) {
@@ -376,9 +380,9 @@ export async function validateRun(input: PerformanceIQRunInput): Promise<Validat
     return {
       ok: false,
       liveProofReady: false,
-      sourceKind: input.sourceKind,
-      snapshotBacked: input.sourceKind === "preserved-snapshot",
-      freshProducer: input.sourceKind === "fresh-gamble-run",
+      sourceType: input.sourceType,
+      snapshotBacked: input.sourceType === "preserved-snapshot",
+      freshRun: input.sourceType === "fresh-run",
       errors,
       warnings: [],
     }
@@ -436,33 +440,33 @@ export class PerformanceIQ {
     }
     if (options.dryRun) return local
 
-    return this.postJson("/api/v1/evidence/runs", buildEnvelope(local.manifest, input.measurements), {
+    return this.postJson("/api/v1/runs", buildEnvelope(local.manifest, input.measurements), {
       "idempotency-key": options.idempotencyKey ?? local.manifest.campaign.runId,
     })
   }
 
   async submitManifest(manifestPath: string, options: SubmitOptions = {}) {
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ProducerEvidenceManifest
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ProducerRunManifest
     const local = validateManifest(manifest)
     if (!local.ok) {
       throw new PerformanceIQError(`manifest failed local validation: ${local.errors.join("; ")}`)
     }
     if (options.dryRun) return local
-    return this.postJson("/api/v1/evidence/runs", buildEnvelope(manifest), {
+    return this.postJson("/api/v1/runs", buildEnvelope(manifest), {
       "idempotency-key": options.idempotencyKey ?? manifest.campaign.runId,
     })
   }
 
   async getRunStatus(runId: string) {
-    return this.getJson(`/api/v1/evidence/runs/${encodeURIComponent(runId)}`)
+    return this.getJson(`/api/v1/runs/${encodeURIComponent(runId)}`)
   }
 
-  async getEvidenceStatus(request: EvidenceStatusRequest) {
+  async getPerformanceStatus(request: PerformanceStatusRequest) {
     const disallowed = findDisallowedRequestKey(request)
     if (disallowed) {
-      throw new PerformanceIQError(`evidence status request must not include ${disallowed}`)
+      throw new PerformanceIQError(`performance status request must not include ${disallowed}`)
     }
-    return this.postJson("/api/downstream/evidence-status", request)
+    return this.postJson("/api/downstream/performance-status", request)
   }
 
   private headers(extra: Record<string, string> = {}): HeadersInit {

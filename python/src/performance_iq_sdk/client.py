@@ -35,7 +35,7 @@ class PerformanceIQ:
         manifest = local["manifest"]
         envelope = build_envelope(manifest, payload.get("measurements"))
         return self._post_json(
-            "/api/v1/evidence/runs",
+            "/api/v1/runs",
             envelope,
             {"idempotency-key": idempotency_key or manifest["campaign"]["runId"]},
         )
@@ -49,18 +49,18 @@ class PerformanceIQ:
         if dry_run:
             return local
         return self._post_json(
-            "/api/v1/evidence/runs",
+            "/api/v1/runs",
             build_envelope(manifest),
             {"idempotency-key": idempotency_key or manifest["campaign"]["runId"]},
         )
 
     def get_run_status(self, run_id: str) -> Any:
-        return self._get_json(f"/api/v1/evidence/runs/{urllib.parse.quote(run_id, safe='')}")
+        return self._get_json(f"/api/v1/runs/{urllib.parse.quote(run_id, safe='')}")
 
-    def get_evidence_status(self, request: dict[str, Any]) -> Any:
+    def get_performance_status(self, request: dict[str, Any]) -> Any:
         if _find_disallowed_key(request):
-            raise PerformanceIQError("evidence status request must not include SQL or query keys")
-        return self._post_json("/api/downstream/evidence-status", request)
+            raise PerformanceIQError("performance status request must not include SQL or query keys")
+        return self._post_json("/api/downstream/performance-status", request)
 
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         headers = {"content-type": "application/json"}

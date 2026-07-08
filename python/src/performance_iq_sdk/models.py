@@ -6,11 +6,11 @@ import os
 import re
 from typing import Any, Literal, NotRequired, TypedDict
 
-PRODUCER_MANIFEST_VERSION = "atlas-benchmark-evidence.producer-manifest.v1"
+PRODUCER_MANIFEST_VERSION = "performance-iq.producer-manifest.v1"
 INGESTION_REQUEST_VERSION = "performance-iq.ingestion-request.v1"
 
-SourceKind = Literal["preserved-snapshot", "fresh-gamble-run", "other-measured-producer"]
-EvidenceClass = Literal["measured", "rehearsal", "simulated"]
+SourceType = Literal["preserved-snapshot", "fresh-run", "other-measured-producer"]
+RunClass = Literal["measured", "rehearsal", "simulated"]
 Confidentiality = Literal["internal-full", "customer-safe", "public-safe", "redacted"]
 
 
@@ -34,6 +34,10 @@ class CampaignIdentity(TypedDict):
 class WorkloadIdentity(TypedDict):
     model: str
     hardware: str
+    acceleratorVendor: NotRequired[str]
+    acceleratorModel: NotRequired[str]
+    acceleratorArchitecture: NotRequired[str]
+    interconnect: NotRequired[str]
     operatingPoint: str
     scenario: NotRequired[str]
     precision: NotRequired[str]
@@ -64,31 +68,31 @@ class RowProof(TypedDict):
     latestCapturedAtUtc: NotRequired[str]
 
 
-class PerflakeProof(TypedDict):
+class StoreProof(TypedDict):
     sourceTables: list[str]
     modelTables: list[str]
     rowProof: list[RowProof]
 
 
-class AtlasEvidenceReference(TypedDict):
-    evidencePackPath: str
+class PlatformReference(TypedDict):
+    decisionBriefPath: str
     dashboardUrl: NotRequired[str]
     exportGeneratedAtUtc: NotRequired[str]
     preflightPath: NotRequired[str]
 
 
 class PerformanceIQRunInput(TypedDict):
-    sourceKind: SourceKind
+    sourceType: SourceType
     confidentiality: Confidentiality
     producer: ProducerIdentity
     campaign: CampaignIdentity
     workload: WorkloadIdentity
     runtime: RuntimeIdentity
     artifacts: list[str | dict[str, Any]]
-    evidenceClass: NotRequired[EvidenceClass]
+    runClass: NotRequired[RunClass]
     measurements: NotRequired[list[dict[str, Any]]]
-    perflake: NotRequired[PerflakeProof]
-    atlasEvidence: NotRequired[dict[str, Any]]
+    store: NotRequired[StoreProof]
+    platform: NotRequired[dict[str, Any]]
     methodology: NotRequired[str]
     limitations: NotRequired[list[str]]
 
@@ -160,9 +164,9 @@ def _normalize_artifact(artifact: str | dict[str, Any]) -> ArtifactMetadata:
     }
 
 
-def _default_perflake(input: PerformanceIQRunInput) -> PerflakeProof:
+def _default_store(input: PerformanceIQRunInput) -> StoreProof:
     row_count = max(len(input.get("measurements", [])), 1)
-    table = "model_perflake.sdk_pending_ingest"
+    table = "model_store.sdk_pending_ingest"
     return {
         "sourceTables": ["performance_iq.sdk_submission"],
         "modelTables": [table],
@@ -183,28 +187,28 @@ def build_manifest(input: PerformanceIQRunInput) -> dict[str, Any]:
     campaign.setdefault("capturedAtUtc", generated_at)
     campaign.setdefault("completedAtUtc", campaign["capturedAtUtc"])
 
-    perflake = input.get("perflake") or _default_perflake(input)
+    store = input.get("store") or _default_store(input)
     row_proof = []
-    for proof in perflake["rowProof"]:
+    for proof in store["rowProof"]:
         next_proof = dict(proof)
         next_proof.setdefault("campaignId", campaign["campaignId"])
         row_proof.append(next_proof)
 
-    atlas_evidence = dict(input.get("atlasEvidence", {}))
-    atlas_evidence.setdefault("evidencePackPath", "performance-iq://pending/evidence-pack")
+    platform = dict(input.get("platform", {}))
+    platform.setdefault("decisionBriefPath", "performance-iq://pending/decision-brief")
 
     return {
         "schemaVersion": PRODUCER_MANIFEST_VERSION,
-        "evidenceClass": input.get("evidenceClass", "measured"),
-        "producerEvidenceSource": input["sourceKind"],
+        "runClass": input.get("runClass", "measured"),
+        "sourceType": input["sourceType"],
         "generatedAtUtc": generated_at,
         "producer": dict(input["producer"]),
         "campaign": campaign,
         "workload": dict(input["workload"]),
         "runtime": dict(input["runtime"]),
         "artifacts": [_normalize_artifact(artifact) for artifact in input["artifacts"]],
-        "perflake": {**perflake, "rowProof": row_proof},
-        "atlasEvidence": atlas_evidence,
+        "store": {**store, "rowProof": row_proof},
+        "platform": platform,
         "methodology": input.get("methodology") or "Submitted through the Performance IQ SDK.",
         "limitations": input.get("limitations") or ["No limitations were supplied by the producer."],
         "confidentiality": input["confidentiality"],
@@ -232,12 +236,12 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         errors.append("manifest contains placeholder, template, or example-only markers")
     if manifest.get("schemaVersion") != PRODUCER_MANIFEST_VERSION:
         errors.append(f"schemaVersion must be {PRODUCER_MANIFEST_VERSION}")
-    if manifest.get("evidenceClass") not in {"measured", "rehearsal", "simulated"}:
-        errors.append("evidenceClass must be measured, rehearsal, or simulated")
-    if manifest.get("evidenceClass") != "measured":
-        warnings.append("manifest is accepted as non-live evidence only; live proof requires evidenceClass=measured")
-    if manifest.get("producerEvidenceSource") not in {"preserved-snapshot", "fresh-gamble-run", "other-measured-producer"}:
-        errors.append("producerEvidenceSource is not supported")
+    if manifest.get("runClass") not in {"measured", "rehearsal", "simulated"}:
+        errors.append("runClass must be measured, rehearsal, or simulated")
+    if manifest.get("runClass") != "measured":
+        warnings.append("manifest is accepted as non-live results only; live proof requires runClass=measured")
+    if manifest.get("sourceType") not in {"preserved-snapshot", "fresh-run", "other-measured-producer"}:
+        errors.append("sourceType is not supported")
     if manifest.get("confidentiality") != "internal-full":
         errors.append("only internal-full submissions are enabled; customer-safe, public-safe, and redacted remain fail-closed")
 
@@ -245,7 +249,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     campaign = manifest.get("campaign") or {}
     workload = manifest.get("workload") or {}
     runtime = manifest.get("runtime") or {}
-    perflake = manifest.get("perflake") or {}
+    store = manifest.get("store") or {}
 
     if not producer.get("repo"):
         errors.append("producer.repo is required")
@@ -283,31 +287,31 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(artifact.get("sizeBytes"), (int, float)) or artifact["sizeBytes"] < 0:
             errors.append(f"artifacts[{index}].sizeBytes must be >= 0")
 
-    source_tables = perflake.get("sourceTables") if isinstance(perflake.get("sourceTables"), list) else []
-    model_tables = perflake.get("modelTables") if isinstance(perflake.get("modelTables"), list) else []
-    row_proof = perflake.get("rowProof") if isinstance(perflake.get("rowProof"), list) else []
+    source_tables = store.get("sourceTables") if isinstance(store.get("sourceTables"), list) else []
+    model_tables = store.get("modelTables") if isinstance(store.get("modelTables"), list) else []
+    row_proof = store.get("rowProof") if isinstance(store.get("rowProof"), list) else []
     if not source_tables:
-        errors.append("perflake.sourceTables must contain at least one table")
+        errors.append("store.sourceTables must contain at least one table")
     if not model_tables:
-        errors.append("perflake.modelTables must contain at least one table")
+        errors.append("store.modelTables must contain at least one table")
     if not row_proof:
-        errors.append("perflake.rowProof must contain at least one row proof")
+        errors.append("store.rowProof must contain at least one row proof")
     for index, proof in enumerate(row_proof):
         if proof.get("campaignId") != campaign.get("campaignId"):
-            errors.append(f"perflake.rowProof[{index}].campaignId must match campaign.campaignId")
+            errors.append(f"store.rowProof[{index}].campaignId must match campaign.campaignId")
         if proof.get("table") not in model_tables:
-            errors.append(f"perflake.rowProof[{index}].table must be listed in perflake.modelTables")
+            errors.append(f"store.rowProof[{index}].table must be listed in store.modelTables")
         if not isinstance(proof.get("rowCount"), (int, float)) or proof["rowCount"] < 1:
-            errors.append(f"perflake.rowProof[{index}].rowCount must be >= 1")
+            errors.append(f"store.rowProof[{index}].rowCount must be >= 1")
 
-    source_kind = manifest.get("producerEvidenceSource")
-    live_proof_ready = not errors and manifest.get("evidenceClass") == "measured" and source_kind == "fresh-gamble-run"
+    source_kind = manifest.get("sourceType")
+    live_proof_ready = not errors and manifest.get("runClass") == "measured" and source_kind == "fresh-run"
     return {
         "ok": not errors,
         "liveProofReady": live_proof_ready,
-        "sourceKind": source_kind,
+        "sourceType": source_kind,
         "snapshotBacked": source_kind == "preserved-snapshot",
-        "freshProducer": source_kind == "fresh-gamble-run",
+        "freshRun": source_kind == "fresh-run",
         "errors": errors,
         "warnings": warnings,
         "manifest": manifest,
@@ -325,9 +329,9 @@ def validate_run(input: PerformanceIQRunInput) -> dict[str, Any]:
         return {
             "ok": False,
             "liveProofReady": False,
-            "sourceKind": input.get("sourceKind"),
-            "snapshotBacked": input.get("sourceKind") == "preserved-snapshot",
-            "freshProducer": input.get("sourceKind") == "fresh-gamble-run",
+            "sourceType": input.get("sourceType"),
+            "snapshotBacked": input.get("sourceType") == "preserved-snapshot",
+            "freshRun": input.get("sourceType") == "fresh-run",
             "errors": [*errors, str(exc)],
             "warnings": [],
         }

@@ -1,34 +1,34 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://performance-iq.example/schemas/producer-evidence-manifest.v1.json",
-  "title": "Performance IQ Producer Evidence Manifest",
+  "$id": "https://performance-iq.example/schemas/producer-run-manifest.v1.json",
+  "title": "Performance IQ Producer Run Manifest",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schemaVersion",
-    "evidenceClass",
-    "producerEvidenceSource",
+    "runClass",
+    "sourceType",
     "generatedAtUtc",
     "producer",
     "campaign",
     "workload",
     "runtime",
     "artifacts",
-    "perflake",
-    "atlasEvidence",
+    "store",
+    "platform",
     "methodology",
     "limitations",
     "confidentiality"
   ],
   "properties": {
     "schemaVersion": {
-      "const": "atlas-benchmark-evidence.producer-manifest.v1"
+      "const": "performance-iq.producer-manifest.v1"
     },
-    "evidenceClass": {
+    "runClass": {
       "enum": ["measured", "rehearsal", "simulated"]
     },
-    "producerEvidenceSource": {
-      "enum": ["preserved-snapshot", "fresh-gamble-run", "other-measured-producer"]
+    "sourceType": {
+      "enum": ["preserved-snapshot", "fresh-run", "other-measured-producer"]
     },
     "generatedAtUtc": {
       "type": "string",
@@ -66,6 +66,10 @@
       "properties": {
         "model": { "type": "string", "minLength": 1 },
         "hardware": { "type": "string", "minLength": 1 },
+        "acceleratorVendor": { "type": "string" },
+        "acceleratorModel": { "type": "string" },
+        "acceleratorArchitecture": { "type": "string" },
+        "interconnect": { "type": "string" },
         "operatingPoint": { "type": "string", "minLength": 1 },
         "scenario": { "type": "string" },
         "precision": { "type": "string" },
@@ -101,7 +105,7 @@
         }
       }
     },
-    "perflake": {
+    "store": {
       "type": "object",
       "additionalProperties": false,
       "required": ["sourceTables", "modelTables", "rowProof"],
@@ -133,13 +137,13 @@
         }
       }
     },
-    "atlasEvidence": {
+    "platform": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["evidencePackPath"],
+      "required": ["decisionBriefPath"],
       "properties": {
         "dashboardUrl": { "type": "string" },
-        "evidencePackPath": { "type": "string", "minLength": 1 },
+        "decisionBriefPath": { "type": "string", "minLength": 1 },
         "exportGeneratedAtUtc": { "type": "string", "format": "date-time" },
         "preflightPath": { "type": "string" }
       }

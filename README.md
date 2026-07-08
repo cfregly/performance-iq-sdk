@@ -1,9 +1,9 @@
 # performance-iq-sdk
 
-Customer-facing SDKs for submitting benchmark evidence into Performance IQ.
+Customer-facing SDKs for submitting benchmark results into Performance IQ.
 
 This repo is intentionally separate from Workbench. The SDKs help producers
-build, validate, hash, and submit evidence packets. Performance IQ server APIs
+build, validate, hash, and submit results packets. Performance IQ server APIs
 remain responsible for auth, SQL access, normalization, quote-readiness, and
 confidentiality gates.
 
@@ -27,7 +27,7 @@ const piq = new PerformanceIQ({
 })
 
 await piq.submitRun({
-  sourceKind: "other-measured-producer",
+  sourceType: "other-measured-producer",
   confidentiality: "internal-full",
   producer: { tool: "my-runner", repo: "acme/benchmarks", commitSha: "abc1234" },
   campaign: { campaignId: "campaign-123", runId: "run-123" },
@@ -56,7 +56,7 @@ piq = PerformanceIQ(
 )
 
 piq.submit_run({
-    "sourceKind": "other-measured-producer",
+    "sourceType": "other-measured-producer",
     "confidentiality": "internal-full",
     "producer": {"tool": "my-runner", "repo": "acme/benchmarks", "commitSha": "abc1234"},
     "campaign": {"campaignId": "campaign-123", "runId": "run-123"},
@@ -71,6 +71,6 @@ piq.submit_run({
 
 - SDKs never accept or forward caller-provided SQL, query names, or query lists.
 - `customer-safe`, `public-safe`, and `redacted` writes fail closed until server-side governance is implemented.
-- `preserved-snapshot`, `fresh-gamble-run`, and `other-measured-producer` are distinct source kinds and must not be collapsed into one proof label.
-- `fresh-gamble-run` is reserved for Gamble-owned proof; most customer integrations should start with `other-measured-producer`.
+- `preserved-snapshot`, `fresh-run`, and `other-measured-producer` are distinct source kinds and must not be collapsed into one proof label.
+- `fresh-run` is reserved for Runner-owned proof; most customer integrations should start with `other-measured-producer`.
 - Rehearsal packets can validate and submit, but cannot be promoted to live proof.

@@ -63,7 +63,7 @@ async function main() {
     const [manifestPath] = args
     if (!manifestPath) usage()
     const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"))
-    const result = await post("/api/v1/evidence/runs/validate", { manifest })
+    const result = await post("/api/v1/runs/validate", { manifest })
     console.log(JSON.stringify(result, null, 2))
     process.exit(result.ok ? 0 : 1)
   }
@@ -72,7 +72,7 @@ async function main() {
     if (!manifestPath) usage()
     const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"))
     const result = await post(
-      "/api/v1/evidence/runs",
+      "/api/v1/runs",
       { schemaVersion: "performance-iq.ingestion-request.v1", manifest },
       { "idempotency-key": manifest?.campaign?.runId ?? crypto.randomUUID() },
     )
@@ -82,7 +82,7 @@ async function main() {
   if (command === "status") {
     const [runId] = args
     if (!runId) usage()
-    console.log(JSON.stringify(await get(`/api/v1/evidence/runs/${encodeURIComponent(runId)}`), null, 2))
+    console.log(JSON.stringify(await get(`/api/v1/runs/${encodeURIComponent(runId)}`), null, 2))
     return
   }
   usage()
