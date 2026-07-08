@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://performance-iq.example/schemas/producer-evidence-manifest.v1.json",
+  "title": "Performance IQ Producer Evidence Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "evidenceClass",
+    "producerEvidenceSource",
+    "generatedAtUtc",
+    "producer",
+    "campaign",
+    "workload",
+    "runtime",
+    "artifacts",
+    "perflake",
+    "atlasEvidence",
+    "methodology",
+    "limitations",
+    "confidentiality"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "atlas-benchmark-evidence.producer-manifest.v1"
+    },
+    "evidenceClass": {
+      "enum": ["measured", "rehearsal", "simulated"]
+    },
+    "producerEvidenceSource": {
+      "enum": ["preserved-snapshot", "fresh-gamble-run", "other-measured-producer"]
+    },
+    "generatedAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "tool", "commitSha"],
+      "properties": {
+        "repo": { "type": "string", "minLength": 1 },
+        "tool": { "type": "string", "minLength": 1 },
+        "version": { "type": "string" },
+        "commitSha": { "type": "string", "minLength": 7 },
+        "operator": { "type": "string" }
+      }
+    },
+    "campaign": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["campaignId", "runId", "capturedAtUtc", "completedAtUtc"],
+      "properties": {
+        "campaignId": { "type": "string", "minLength": 1 },
+        "runId": { "type": "string", "minLength": 1 },
+        "slug": { "type": "string" },
+        "capturedAtUtc": { "type": "string", "format": "date-time" },
+        "completedAtUtc": { "type": "string", "format": "date-time" },
+        "publishedAtUtc": { "type": "string", "format": "date-time" }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "hardware", "operatingPoint"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "hardware": { "type": "string", "minLength": 1 },
+        "operatingPoint": { "type": "string", "minLength": 1 },
+        "scenario": { "type": "string" },
+        "precision": { "type": "string" },
+        "parallelism": { "type": "string" },
+        "datasetOrPromptSet": { "type": "string" }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["imageDigest"],
+      "properties": {
+        "imageDigest": { "type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$" },
+        "imageTag": { "type": "string" },
+        "cudaVersion": { "type": "string" },
+        "ncclVersion": { "type": "string" },
+        "driverVersion": { "type": "string" },
+        "framework": { "type": "string" }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path", "sha256", "sizeBytes"],
+        "properties": {
+          "kind": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+          "sizeBytes": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "perflake": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceTables", "modelTables", "rowProof"],
+      "properties": {
+        "sourceTables": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "modelTables": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "rowProof": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["table", "campaignId", "rowCount"],
+            "properties": {
+              "table": { "type": "string", "minLength": 1 },
+              "campaignId": { "type": "string", "minLength": 1 },
+              "rowCount": { "type": "number", "minimum": 1 },
+              "latestCapturedAtUtc": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
+    },
+    "atlasEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidencePackPath"],
+      "properties": {
+        "dashboardUrl": { "type": "string" },
+        "evidencePackPath": { "type": "string", "minLength": 1 },
+        "exportGeneratedAtUtc": { "type": "string", "format": "date-time" },
+        "preflightPath": { "type": "string" }
+      }
+    },
+    "methodology": {
+      "type": "string",
+      "minLength": 1
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "confidentiality": {
+      "enum": ["internal-full", "customer-safe", "public-safe", "redacted"]
+    }
+  }
+}
