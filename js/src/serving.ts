@@ -34,6 +34,7 @@ export interface ServingEngineConfig {
   hardwareTelemetry?: Record<string, unknown>
   tokenIdMap?: Record<string, number | string>
   tokenIdResolver?: (token: string, item: Record<string, unknown>, engine: ServingEngineConfig, request: ServingRequestConfig) => number | string | null | undefined
+  promptTokenIds?: Array<number | string>
   frameworkVersion?: string
   modelRevision?: string
   imageDigest?: string
@@ -60,6 +61,8 @@ export interface ServingRequestConfig {
   captureTokenDetails?: boolean
   logprobs?: boolean
   topLogprobs?: number
+  promptTokenIds?: Array<number | string>
+  tokenizerModel?: string
 }
 
 export interface ServingProducerConfig {
@@ -156,6 +159,12 @@ export interface ServingRequestSample {
   tokenDetailCount?: number
   tokenDetailSource?: string
   tokenIdSource?: string | null
+  promptTokenIdsAvailable?: boolean
+  promptTokenDetailCount?: number
+  promptTokenIdSource?: string | null
+  promptTokenIdsSha256?: string | null
+  promptTokenizationSource?: string | null
+  promptTokenizerModel?: string | null
   queueWaitMs?: number | null
   prefillMs?: number | null
   decodeMs?: number | null
@@ -175,7 +184,8 @@ export interface ServingRequestSample {
 
 export interface ServingTokenTimelineChunk {
   requestId: string
-  chunkIndex: number
+  tokenPhase?: string
+  chunkIndex: number | null
   receivedAtUtc: string
   relativeMs: number
   contentBytes: number
