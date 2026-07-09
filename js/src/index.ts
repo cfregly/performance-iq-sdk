@@ -6,7 +6,7 @@ export const INGESTION_REQUEST_VERSION = "performance-iq.ingestion-request.v1"
 
 export type SourceType = "preserved-snapshot" | "fresh-run" | "other-measured-producer"
 export type RunClass = "measured" | "rehearsal" | "simulated"
-export type Confidentiality = "internal-full" | "customer-safe" | "public-safe" | "redacted"
+export type Confidentiality = "operator-full" | "customer-safe" | "public-safe" | "redacted"
 export type RunStatus = "accepted" | "rejected" | "processing" | "quote-ready"
 
 export interface ProducerIdentity {
@@ -147,7 +147,7 @@ export interface SubmitOptions {
 
 export interface PerformanceStatusRequest {
   consumer: "sales" | "support" | "agent"
-  confidentialityMode: "internal_full" | "customer_safe" | "public_safe" | "redacted"
+  confidentialityMode: "operator_full" | "customer_safe" | "public_safe" | "redacted"
   question?: string
   filters?: {
     model?: string
@@ -305,8 +305,8 @@ export function validateManifest(manifest: ProducerRunManifest): ValidationResul
   if (!["preserved-snapshot", "fresh-run", "other-measured-producer"].includes(manifest.sourceType)) {
     errors.push("sourceType is not supported")
   }
-  if (manifest.confidentiality !== "internal-full") {
-    errors.push("only internal-full submissions are enabled; customer-safe, public-safe, and redacted remain fail-closed")
+  if (manifest.confidentiality !== "operator-full") {
+    errors.push("only operator-full submissions are enabled; customer-safe, public-safe, and redacted remain fail-closed")
   }
   if (!manifest.producer?.repo) errors.push("producer.repo is required")
   if (!manifest.producer?.tool) errors.push("producer.tool is required")
@@ -496,3 +496,16 @@ export class PerformanceIQ {
     return response.json()
   }
 }
+
+export {
+  laptopSmokeModel,
+  runServingProducer,
+  servingEngineLabel,
+  type ChatMessage,
+  type ServingEngineConfig,
+  type ServingEngineId,
+  type ServingProducerConfig,
+  type ServingProducerResult,
+  type ServingRequestConfig,
+  type ServingRequestSample,
+} from "./serving"

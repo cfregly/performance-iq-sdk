@@ -11,7 +11,7 @@ INGESTION_REQUEST_VERSION = "performance-iq.ingestion-request.v1"
 
 SourceType = Literal["preserved-snapshot", "fresh-run", "other-measured-producer"]
 RunClass = Literal["measured", "rehearsal", "simulated"]
-Confidentiality = Literal["internal-full", "customer-safe", "public-safe", "redacted"]
+Confidentiality = Literal["operator-full", "customer-safe", "public-safe", "redacted"]
 
 
 class ProducerIdentity(TypedDict):
@@ -242,8 +242,8 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         warnings.append("manifest is accepted as non-live results only; live proof requires runClass=measured")
     if manifest.get("sourceType") not in {"preserved-snapshot", "fresh-run", "other-measured-producer"}:
         errors.append("sourceType is not supported")
-    if manifest.get("confidentiality") != "internal-full":
-        errors.append("only internal-full submissions are enabled; customer-safe, public-safe, and redacted remain fail-closed")
+    if manifest.get("confidentiality") != "operator-full":
+        errors.append("only operator-full submissions are enabled; customer-safe, public-safe, and redacted remain fail-closed")
 
     producer = manifest.get("producer") or {}
     campaign = manifest.get("campaign") or {}

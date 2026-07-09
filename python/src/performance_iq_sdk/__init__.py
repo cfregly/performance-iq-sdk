@@ -7,6 +7,11 @@ from .models import (
     validate_manifest,
     validate_run,
 )
+from .producers.serving import (
+    laptop_smoke_model,
+    run_serving_producer,
+    serving_engine_label,
+)
 
 __all__ = [
     "INGESTION_REQUEST_VERSION",
@@ -15,6 +20,9 @@ __all__ = [
     "PerformanceIQError",
     "build_envelope",
     "build_manifest",
+    "laptop_smoke_model",
+    "run_serving_producer",
+    "serving_engine_label",
     "validate_manifest",
     "validate_run",
 ]

@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from performance_iq_sdk import PerformanceIQ, build_manifest, validate_run
+from performance_iq_sdk import PerformanceIQ, build_manifest, laptop_smoke_model, run_serving_producer, validate_run
 
 
 class PerformanceIQSdkTest(unittest.TestCase):
@@ -23,7 +23,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
     def input(self, **overrides):
         payload = {
             "sourceType": "fresh-run",
-            "confidentiality": "internal-full",
+            "confidentiality": "operator-full",
             "producer": {
                 "repo": "producer-runner",
                 "tool": "runner",
@@ -68,7 +68,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
         result = validate_run(self.input(confidentiality="customer-safe"))
 
         self.assertFalse(result["ok"])
-        self.assertIn("internal-full", " ".join(result["errors"]))
+        self.assertIn("operator-full", " ".join(result["errors"]))
 
     def test_rejects_sql_keys(self):
         result = validate_run(self.input(measurements=[{"sql": "SELECT * FROM secret"}]))
@@ -93,6 +93,48 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(headers["authorization"], "Bearer service-token")
         self.assertEqual(headers["idempotency-key"], "idem-python")
         self.assertEqual(body["schemaVersion"], "performance-iq.ingestion-request.v1")
+
+    def test_serving_producer_captures_openai_compatible_usage(self):
+        calls = []
+
+        def http_post_json(url, headers, payload):
+            calls.append((url, headers, payload))
+            return {
+                "status": 200,
+                "body": {
+                    "id": "chatcmpl-python-test",
+                    "model": laptop_smoke_model(),
+                    "choices": [{"finish_reason": "stop"}],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 7,
+                        "total_tokens": 17,
+                    },
+                },
+            }
+
+        result = run_serving_producer(
+            engine={"engine": "sglang", "baseUrl": "http://127.0.0.1:30000"},
+            request={
+                "model": laptop_smoke_model(),
+                "messages": [{"role": "user", "content": "Say ok."}],
+                "repetitions": 2,
+            },
+            artifact_dir=self.tmp_dir,
+            workload={"hardware": "local mock engine", "operatingPoint": "laptop-smoke"},
+            pricing={"usdPerGpuHour": 1, "gpuCount": 1},
+            http_post_json=http_post_json,
+        )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][2]["model"], laptop_smoke_model())
+        self.assertEqual(result["manifest"]["producer"]["tool"], "sglang-serving-producer")
+        self.assertEqual(result["manifest"]["runtime"]["framework"], "SGLang")
+        self.assertEqual(result["manifest"]["sourceType"], "other-measured-producer")
+        self.assertTrue(os.path.exists(result["artifactPath"]))
+        self.assertEqual(result["measurements"][0]["runtimeEngine"], "sglang")
+        self.assertEqual(result["measurements"][0]["completionTokens"], 14)
+        self.assertTrue(validate_run(result["runInput"])["ok"])
 
 
 if __name__ == "__main__":

@@ -6,7 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   buildManifest,
+  laptopSmokeModel,
   PerformanceIQ,
+  runServingProducer,
+  servingEngineLabel,
   validateRun,
   type PerformanceIQRunInput,
 } from "./index"
@@ -24,7 +27,7 @@ function tmpArtifact(contents = "{\"ok\":true}\n"): string {
 function runInput(overrides: Partial<PerformanceIQRunInput> = {}): PerformanceIQRunInput {
   return {
     sourceType: "fresh-run",
-    confidentiality: "internal-full",
+    confidentiality: "operator-full",
     producer: {
       repo: "producer-runner",
       tool: "runner",
@@ -86,7 +89,7 @@ describe("performance-iq-sdk js", () => {
     const result = await validateRun(runInput({ confidentiality: "customer-safe" }))
 
     expect(result.ok).toBe(false)
-    expect(result.errors.join(" ")).toContain("internal-full")
+    expect(result.errors.join(" ")).toContain("operator-full")
   })
 
   it("rejects arbitrary SQL/query keys anywhere in the payload", async () => {
@@ -126,5 +129,65 @@ describe("performance-iq-sdk js", () => {
         "idempotency-key": "idem-1",
       }),
     }))
+  })
+
+  it("captures OpenAI-compatible serving engine data as a producer run", async () => {
+    const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "piq-serving-test-"))
+    tmpDirs.push(artifactDir)
+    const requests: unknown[] = []
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body)))
+      return new Response(JSON.stringify({
+        id: "chatcmpl-test",
+        model: laptopSmokeModel(),
+        choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }],
+        usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 },
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    })
+
+    const result = await runServingProducer({
+      engine: { engine: "vllm", baseUrl: "http://127.0.0.1:8000", frameworkVersion: "test" },
+      request: {
+        model: laptopSmokeModel(),
+        messages: [{ role: "user", content: "Say ok." }],
+        repetitions: 2,
+      },
+      artifactDir,
+      sourceType: "other-measured-producer",
+      runClass: "measured",
+      workload: {
+        hardware: "local mock engine",
+        operatingPoint: "laptop-smoke",
+      },
+      pricing: { usdPerGpuHour: 1, gpuCount: 1 },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => new Date("2026-07-09T12:00:00Z"),
+    })
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(requests).toEqual([
+      expect.objectContaining({ model: laptopSmokeModel(), max_tokens: 64 }),
+      expect.objectContaining({ model: laptopSmokeModel(), max_tokens: 64 }),
+    ])
+    expect(result.engine).toBe("vllm")
+    expect(result.manifest.producer.tool).toBe("vllm-serving-producer")
+    expect(result.manifest.runtime.framework).toBe(servingEngineLabel("vllm"))
+    expect(result.manifest.sourceType).toBe("other-measured-producer")
+    expect(result.manifest.artifacts[0].path).toBe(result.artifactPath)
+    expect(result.samples.every((sample) => sample.ok)).toBe(true)
+    expect(result.measurements[0]).toMatchObject({
+      model: laptopSmokeModel(),
+      runtimeFramework: "vLLM",
+      runtimeEngine: "vllm",
+      requestCount: 2,
+      successCount: 2,
+      completionTokens: 16,
+      totalTokens: 40,
+    })
+    expect(fs.existsSync(result.artifactPath)).toBe(true)
+    expect((await validateRun(result.runInput)).ok).toBe(true)
   })
 })
