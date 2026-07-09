@@ -1091,6 +1091,7 @@ def run_serving_producer(
     pricing: dict[str, Any] | None = None,
     http_post_json: HttpPostJson | None = None,
     http_stream_json: HttpStreamJson | None = None,
+    http_get_text: HttpGetText | None = None,
     now: Callable[[], dt.datetime] | None = None,
 ) -> dict[str, Any]:
     if engine.get("engine") not in SERVING_ENGINE_LABELS:
@@ -1100,7 +1101,7 @@ def run_serving_producer(
     campaign_id = (campaign or {}).get("campaignId") or f"serving-{engine['engine']}-{request['model']}"
     run_id = (campaign or {}).get("runId") or f"{campaign_id}-{captured_at_utc.replace(':', '-')}"
     samples = [
-        _send_chat_completion(engine, request, index, campaign_id, run_id, http_post_json, http_stream_json)
+        _send_chat_completion(engine, request, index, campaign_id, run_id, http_post_json, http_stream_json, http_get_text)
         for index in range(repetitions)
     ]
     raw_captures = [

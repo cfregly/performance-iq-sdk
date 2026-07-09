@@ -21,6 +21,8 @@ export interface ServingEngineConfig {
   baseUrl: string
   apiKey?: string
   requestPath?: string
+  metricsUrl?: string
+  collectNativeMetrics?: boolean
   frameworkVersion?: string
   imageDigest?: string
   imageTag?: string
@@ -285,6 +287,208 @@ function nativeTelemetry(config: ServingProducerConfig, body?: Record<string, an
   }
 }
 
+function metricsUrl(config: ServingProducerConfig): string | null {
+  if (config.engine.metricsUrl?.trim()) return config.engine.metricsUrl.trim()
+  return config.engine.collectNativeMetrics ? `${normalizeBaseUrl(config.engine.baseUrl)}/metrics` : null
+}
+
+function parsePrometheusMetrics(text: string): Record<string, number> {
+  const metrics: Record<string, number> = {}
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith("#")) continue
+    const match = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{[^}]*\})?\s+([-+0-9.eE]+)/)
+    if (!match) continue
+    const value = Number(match[2])
+    if (!Number.isFinite(value)) continue
+    metrics[match[1]] = (metrics[match[1]] ?? 0) + value
+  }
+  return metrics
+}
+
+async function readNativeMetrics(config: ServingProducerConfig): Promise<Record<string, unknown>> {
+  const url = metricsUrl(config)
+  if (!url) return { available: false, source: "metrics-url-not-configured" }
+  const fetchImpl = config.fetchImpl ?? fetch
+  try {
+    const response = await fetchImpl(url, {
+      method: "GET",
+      headers: {
+        accept: "text/plain",
+        ...(config.engine.apiKey ? { authorization: `Bearer ${config.engine.apiKey}` } : {}),
+      },
+    })
+    if (!response.ok) {
+      return { available: false, source: "prometheus-unavailable", metricsUrl: url, status: response.status }
+    }
+    const metrics = parsePrometheusMetrics(await response.text())
+    if (!Object.keys(metrics).length) return { available: false, source: "prometheus-empty", metricsUrl: url }
+    return {
+      available: true,
+      source: "prometheus-snapshot",
+      metricsUrl: url,
+      metrics,
+      capturedAtUtc: new Date().toISOString(),
+    }
+  } catch (error) {
+    return {
+      available: false,
+      source: "prometheus-unavailable",
+      metricsUrl: url,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+function metricValue(metrics: Record<string, number>, candidates: string[]): number | null {
+  for (const name of candidates) {
+    const value = metrics[name]
+    if (Number.isFinite(value)) return value
+  }
+  return null
+}
+
+function counterDelta(before: Record<string, number>, after: Record<string, number>, candidates: string[]): number | null {
+  const beforeValue = metricValue(before, candidates)
+  const afterValue = metricValue(after, candidates)
+  if (beforeValue == null || afterValue == null) return null
+  const delta = afterValue - beforeValue
+  return delta >= 0 ? delta : null
+}
+
+function histogramDeltaMeanMs(before: Record<string, number>, after: Record<string, number>, bases: string[]): number | null {
+  for (const base of bases) {
+    const sumDelta = counterDelta(before, after, [`${base}_sum`])
+    const countDelta = counterDelta(before, after, [`${base}_count`])
+    if (sumDelta != null && countDelta != null && countDelta > 0) return (sumDelta / countDelta) * 1000
+  }
+  return null
+}
+
+function nativeMetricsDelta(
+  config: ServingProducerConfig,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!before.available || !after.available) {
+    return {
+      available: false,
+      source: "prometheus-delta-unavailable",
+      metricsUrl: before.metricsUrl ?? after.metricsUrl ?? metricsUrl(config),
+      before,
+      after,
+    }
+  }
+  const beforeMetrics = before.metrics && typeof before.metrics === "object" && !Array.isArray(before.metrics)
+    ? before.metrics as Record<string, number>
+    : {}
+  const afterMetrics = after.metrics && typeof after.metrics === "object" && !Array.isArray(after.metrics)
+    ? after.metrics as Record<string, number>
+    : {}
+  const prefixQueries = counterDelta(beforeMetrics, afterMetrics, [
+    "vllm:prefix_cache_queries_total",
+    "sglang:prefix_cache_queries_total",
+    "sglang_prefix_cache_queries_total",
+    "trtllm:prefix_cache_queries_total",
+    "trtllm_prefix_cache_queries_total",
+  ])
+  const prefixHits = counterDelta(beforeMetrics, afterMetrics, [
+    "vllm:prefix_cache_hits_total",
+    "sglang:prefix_cache_hits_total",
+    "sglang_prefix_cache_hits_total",
+    "trtllm:prefix_cache_hits_total",
+    "trtllm_prefix_cache_hits_total",
+  ])
+  const values: Record<string, number | null> = {
+    nativeTtftMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+      "vllm:time_to_first_token_seconds",
+      "sglang:time_to_first_token_seconds",
+      "sglang_time_to_first_token_seconds",
+      "trtllm:time_to_first_token_seconds",
+      "trtllm_time_to_first_token_seconds",
+    ]),
+    nativeTpotMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+      "vllm:request_time_per_output_token_seconds",
+      "sglang:request_time_per_output_token_seconds",
+      "sglang_request_time_per_output_token_seconds",
+      "trtllm:request_time_per_output_token_seconds",
+      "trtllm_request_time_per_output_token_seconds",
+    ]),
+    nativeInterTokenLatencyMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+      "vllm:inter_token_latency_seconds",
+      "sglang:inter_token_latency_seconds",
+      "sglang_inter_token_latency_seconds",
+      "trtllm:inter_token_latency_seconds",
+      "trtllm_inter_token_latency_seconds",
+    ]),
+    nativeE2eLatencyMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+      "vllm:e2e_request_latency_seconds",
+      "sglang:e2e_request_latency_seconds",
+      "sglang_e2e_request_latency_seconds",
+      "trtllm:e2e_request_latency_seconds",
+      "trtllm_e2e_request_latency_seconds",
+    ]),
+    queueWaitMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+      "vllm:request_queue_time_seconds",
+      "sglang:request_queue_time_seconds",
+      "sglang_request_queue_time_seconds",
+      "trtllm:request_queue_time_seconds",
+      "trtllm_request_queue_time_seconds",
+    ]),
+    prefillMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+      "vllm:request_prefill_time_seconds",
+      "sglang:request_prefill_time_seconds",
+      "sglang_request_prefill_time_seconds",
+      "trtllm:request_prefill_time_seconds",
+      "trtllm_request_prefill_time_seconds",
+    ]),
+    decodeMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+      "vllm:request_decode_time_seconds",
+      "sglang:request_decode_time_seconds",
+      "sglang_request_decode_time_seconds",
+      "trtllm:request_decode_time_seconds",
+      "trtllm_request_decode_time_seconds",
+    ]),
+    runningRequests: metricValue(afterMetrics, ["vllm:num_requests_running", "sglang:num_running_reqs", "sglang_num_running_reqs"]),
+    waitingRequests: metricValue(afterMetrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs"]),
+    kvCacheUsagePct: metricValue(afterMetrics, ["vllm:kv_cache_usage_perc", "sglang:token_usage", "sglang_token_usage"]),
+    prefixCacheQueriesDelta: prefixQueries,
+    prefixCacheHitsDelta: prefixHits,
+    cacheHitRate: prefixHits != null && prefixQueries != null && prefixQueries > 0 ? prefixHits / prefixQueries : null,
+    promptTokensCachedDelta: counterDelta(beforeMetrics, afterMetrics, [
+      "vllm:prompt_tokens_cached_total",
+      "sglang:prompt_tokens_cached_total",
+      "sglang_prompt_tokens_cached_total",
+    ]),
+    promptTokensComputedDelta: counterDelta(beforeMetrics, afterMetrics, [
+      "vllm:request_prefill_kv_computed_tokens_sum",
+      "sglang:request_prefill_kv_computed_tokens_sum",
+      "sglang_request_prefill_kv_computed_tokens_sum",
+    ]),
+  }
+  const availableValues = Object.fromEntries(Object.entries(values).filter(([, value]) => value != null))
+  return {
+    available: Object.keys(availableValues).length > 0,
+    source: "prometheus-delta",
+    metricsUrl: after.metricsUrl ?? before.metricsUrl,
+    beforeCapturedAtUtc: before.capturedAtUtc,
+    afterCapturedAtUtc: after.capturedAtUtc,
+    ...availableValues,
+  }
+}
+
+function combineNativeTelemetry(...items: Array<Record<string, unknown>>): Record<string, unknown> {
+  const combined: Record<string, unknown> = {}
+  const sources: string[] = []
+  for (const item of items) {
+    if (typeof item.source === "string") sources.push(item.source)
+    Object.assign(combined, item)
+  }
+  combined.available = items.some((item) => Boolean(item.available))
+  if (sources.length) combined.source = Array.from(new Set(sources)).join("+")
+  return combined
+}
+
 function numberFrom(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null
 }
@@ -349,10 +553,11 @@ async function sendChatCompletion(
   const fetchImpl = config.fetchImpl ?? fetch
   const endpoint = `${normalizeBaseUrl(config.engine.baseUrl)}${config.engine.requestPath ?? "/v1/chat/completions"}`
   const requestId = requestTraceId(config.engine, runId, requestIndex)
-  const started = performance.now()
-  const requestStartedAtUtc = new Date().toISOString()
   const stream = config.request.stream !== false
   const payload = requestPayload(config.request, stream)
+  const nativeBefore = await readNativeMetrics(config)
+  const started = performance.now()
+  const requestStartedAtUtc = new Date().toISOString()
   try {
     const response = await fetchImpl(endpoint, {
       method: "POST",
@@ -395,6 +600,8 @@ async function sendChatCompletion(
           })
         }
       }
+      const nativeAfter = await readNativeMetrics(config)
+      telemetry = combineNativeTelemetry(telemetry, nativeMetricsDelta(config, nativeBefore, nativeAfter))
       const firstChunk = events[0]
       const firstOutput = outputChunks[0]
       const lastOutput = outputChunks[outputChunks.length - 1]
@@ -473,7 +680,11 @@ async function sendChatCompletion(
     const body = await response.json().catch(() => ({})) as Record<string, any>
     const usage = body.usage ?? {}
     const outputText = choiceContent(body)
-    const telemetry = nativeTelemetry(config, body)
+    const nativeAfter = await readNativeMetrics(config)
+    const telemetry = combineNativeTelemetry(
+      nativeTelemetry(config, body),
+      nativeMetricsDelta(config, nativeBefore, nativeAfter),
+    )
     const redacted = redactedRequest(payload)
     return {
       requestId,

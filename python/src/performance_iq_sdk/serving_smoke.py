@@ -20,6 +20,7 @@ from typing import Any
 
 from performance_iq_sdk.client import PerformanceIQ
 from performance_iq_sdk.producers.serving import (
+    HttpGetText,
     HttpPostJson,
     HttpStreamJson,
     ServingEngineId,
@@ -43,6 +44,11 @@ ENGINE_API_KEY_ENV = {
     "vllm": "PIQ_VLLM_API_KEY",
     "sglang": "PIQ_SGLANG_API_KEY",
     "tensorrt-llm": "PIQ_TENSORRT_LLM_API_KEY",
+}
+ENGINE_METRICS_URL_ENV = {
+    "vllm": "PIQ_VLLM_METRICS_URL",
+    "sglang": "PIQ_SGLANG_METRICS_URL",
+    "tensorrt-llm": "PIQ_TENSORRT_LLM_METRICS_URL",
 }
 QUERY_NAMES = (
     "price_performance",
@@ -116,9 +122,11 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
         if not url:
             continue
         api_key = _env(ENGINE_API_KEY_ENV[engine])
+        metrics_url = _env(ENGINE_METRICS_URL_ENV[engine], f"{url.rstrip('/')}/metrics")
         configs.append({
             "engine": engine,
             "baseUrl": url,
+            "metricsUrl": metrics_url,
             **({"apiKey": api_key} if api_key else {}),
             **({"frameworkVersion": args.framework_version} if args.framework_version else {}),
             **({"imageDigest": args.image_digest} if args.image_digest else {}),
@@ -355,8 +363,11 @@ def environment_diagnostics() -> dict[str, Any]:
         "PIQ_TOKEN",
         "PIQ_SERVING_MODEL",
         "PIQ_VLLM_URL",
+        "PIQ_VLLM_METRICS_URL",
         "PIQ_SGLANG_URL",
+        "PIQ_SGLANG_METRICS_URL",
         "PIQ_TENSORRT_LLM_URL",
+        "PIQ_TENSORRT_LLM_METRICS_URL",
         "PIQ_TENSORRT_LLM_IMAGE",
         "PIQ_PYTHON_BIN",
         "PIQ_SERVING_BIN_DIR",
@@ -1412,6 +1423,7 @@ def run_serving_smoke(
     submit: bool = True,
     http_post_json: HttpPostJson | None = None,
     http_stream_json: HttpStreamJson | None = None,
+    http_get_text: HttpGetText | None = None,
 ) -> dict[str, Any]:
     suffix = run_suffix or _utc_slug()
     submissions: list[dict[str, Any]] = []
@@ -1442,6 +1454,7 @@ def run_serving_smoke(
             pricing=pricing,
             http_post_json=http_post_json,
             http_stream_json=http_stream_json,
+            http_get_text=http_get_text,
         )
         submissions.append({
             "engine": engine_id,
