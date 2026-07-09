@@ -15,6 +15,8 @@ the server shape continues to evolve.
 - `js/` - TypeScript/JavaScript SDK and `piq` CLI.
 - `python/` - Python SDK.
 - `contracts/` - shared producer manifest schema.
+- `ops/serving-producers/` - repeatable vLLM, SGLang, and TensorRT-LLM
+  endpoint launch/smoke templates for producer proof runs.
 
 ## TypeScript
 
@@ -232,6 +234,9 @@ Host notes:
 - TensorRT-LLM requires a Linux x86_64/aarch64 target with supported NVIDIA
   GPUs. From a Mac, point `PIQ_TENSORRT_LLM_URL` at a reachable remote
   OpenAI-compatible TensorRT-LLM server.
+
+Operational templates for NVIDIA hosts, Kubernetes jobs, and remote endpoint
+proof runs live in `ops/serving-producers/`.
 
 ## Safety Rules
 

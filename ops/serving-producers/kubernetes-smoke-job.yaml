@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: performance-iq-serving-producer-smoke
+  labels:
+    app.kubernetes.io/name: performance-iq-serving-producer-smoke
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: performance-iq-serving-producer-smoke
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: performance-iq-sdk:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PIQ_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: performance-iq-serving-producer
+                  key: base-url
+            - name: PIQ_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: performance-iq-serving-producer
+                  key: token
+                  optional: true
+            - name: PIQ_SERVING_MODEL
+              value: Qwen/Qwen2.5-0.5B-Instruct
+            - name: PIQ_VLLM_URL
+              value: http://vllm:8000
+            - name: PIQ_SGLANG_URL
+              value: http://sglang:30000
+            - name: PIQ_TENSORRT_LLM_URL
+              value: http://tensorrt-llm:8001
+            - name: PIQ_ARTIFACT_DIR
+              value: /tmp/performance-iq-serving-producers
+          command:
+            - python
+            - -m
+            - performance_iq_sdk.serving_smoke
+          args:
+            - --query-dashboard
+            - --repetitions
+            - "3"

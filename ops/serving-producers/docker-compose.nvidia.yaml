@@ -1,0 +1,75 @@
+name: performance-iq-serving-producers
+
+services:
+  vllm:
+    image: ${PIQ_VLLM_IMAGE:-vllm/vllm-openai:latest}
+    command:
+      - --model
+      - ${PIQ_SERVING_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
+      - --served-model-name
+      - ${PIQ_SERVING_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      - ${HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  sglang:
+    image: ${PIQ_SGLANG_IMAGE:-lmsysorg/sglang:latest}
+    command: >
+      python -m sglang.launch_server
+      --model-path ${PIQ_SERVING_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
+      --served-model-name ${PIQ_SERVING_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
+      --host 0.0.0.0
+      --port 30000
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      - ${HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
+    ports:
+      - "30000:30000"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  tensorrt-llm:
+    image: ${PIQ_TENSORRT_LLM_IMAGE:?Set PIQ_TENSORRT_LLM_IMAGE to a TensorRT-LLM image with trtllm-serve installed}
+    command: >
+      trtllm-serve ${PIQ_SERVING_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
+      --host 0.0.0.0
+      --port 8001
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      - ${HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
+    ports:
+      - "8001:8001"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
