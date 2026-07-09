@@ -270,8 +270,13 @@ describe("performance-iq-sdk js", () => {
         'vllm:request_prefill_time_seconds_sum{model_name="qwen"} 0.20',
         'vllm:request_decode_time_seconds_count{model_name="qwen"} 2',
         'vllm:request_decode_time_seconds_sum{model_name="qwen"} 0.30',
+        'vllm:num_requests_running{model_name="qwen"} 1',
+        'vllm:num_requests_waiting{model_name="qwen"} 0',
+        'vllm:kv_cache_usage_perc{model_name="qwen"} 0.125',
         'vllm:prefix_cache_queries_total{model_name="qwen"} 10',
         'vllm:prefix_cache_hits_total{model_name="qwen"} 1',
+        'vllm:prompt_tokens_cached_total{model_name="qwen"} 3',
+        'vllm:request_prefill_kv_computed_tokens_sum{model_name="qwen"} 8',
       ].join("\n"),
       [
         'vllm:time_to_first_token_seconds_count{model_name="qwen"} 3',
@@ -284,8 +289,13 @@ describe("performance-iq-sdk js", () => {
         'vllm:request_prefill_time_seconds_sum{model_name="qwen"} 0.26',
         'vllm:request_decode_time_seconds_count{model_name="qwen"} 3',
         'vllm:request_decode_time_seconds_sum{model_name="qwen"} 0.42',
+        'vllm:num_requests_running{model_name="qwen"} 1',
+        'vllm:num_requests_waiting{model_name="qwen"} 0',
+        'vllm:kv_cache_usage_perc{model_name="qwen"} 0.25',
         'vllm:prefix_cache_queries_total{model_name="qwen"} 15',
         'vllm:prefix_cache_hits_total{model_name="qwen"} 2',
+        'vllm:prompt_tokens_cached_total{model_name="qwen"} 6',
+        'vllm:request_prefill_kv_computed_tokens_sum{model_name="qwen"} 16',
       ].join("\n"),
     ]
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -312,6 +322,16 @@ describe("performance-iq-sdk js", () => {
         engine: "vllm",
         baseUrl: "http://127.0.0.1:8000",
         metricsUrl: "http://127.0.0.1:8000/metrics",
+        frameworkVersion: "vllm-test",
+        modelRevision: "revision-a",
+        imageTag: "vllm:test",
+        imageDigest: "sha256:abc",
+        serverArgs: ["vllm", "serve", laptopSmokeModel()],
+        processId: "1234",
+        containerId: "container-a",
+        podName: "pod-a",
+        nodeName: "node-a",
+        hostName: "host-a",
       },
       request: {
         model: laptopSmokeModel(),
@@ -339,6 +359,21 @@ describe("performance-iq-sdk js", () => {
     expect(sample.nativeTelemetry?.prefixCacheQueriesDelta).toBe(5)
     expect(sample.nativeTelemetry?.prefixCacheHitsDelta).toBe(1)
     expect(sample.nativeTelemetry?.cacheHitRate as number).toBeCloseTo(0.2)
+    expect(sample.runningRequests).toBe(1)
+    expect(sample.waitingRequests).toBe(0)
+    expect(sample.kvCacheUsagePct).toBeCloseTo(0.25)
+    expect(sample.promptTokensCachedDelta).toBe(3)
+    expect(sample.promptTokensComputedDelta).toBe(8)
+    expect(sample.engineVersion).toBe("vllm-test")
+    expect(sample.modelRevision).toBe("revision-a")
+    expect(sample.imageTag).toBe("vllm:test")
+    expect(sample.imageDigest).toBe("sha256:abc")
+    expect(sample.serverArgsSha256).toEqual(expect.any(String))
+    expect(sample.processId).toBe("1234")
+    expect(sample.containerId).toBe("container-a")
+    expect(sample.podName).toBe("pod-a")
+    expect(sample.nodeName).toBe("node-a")
+    expect(sample.hostName).toBe("host-a")
     expect(sample.queueWaitMs).toBeCloseTo(2)
     expect(sample.prefillMs).toBeCloseTo(60)
     expect(sample.decodeMs).toBeCloseTo(120)
@@ -346,6 +381,12 @@ describe("performance-iq-sdk js", () => {
     expect(result.measurements[0].avgQueueWaitMs as number).toBeCloseTo(2)
     expect(result.measurements[0].avgPrefillMs as number).toBeCloseTo(60)
     expect(result.measurements[0].avgDecodeMs as number).toBeCloseTo(120)
+    const sampleRows = result.measurements.filter((row) => row.surface === "serving_request_sample")
+    expect(sampleRows[0].nativeTtftMs).toBeCloseTo(250)
+    expect(sampleRows[0].runningRequests).toBe(1)
+    expect(sampleRows[0].promptTokensCachedDelta).toBe(3)
+    expect(sampleRows[0].engineVersion).toBe("vllm-test")
+    expect(sampleRows[0].containerId).toBe("container-a")
   })
 
   it("captures response token logprobs and DCGM hardware metrics", async () => {
@@ -356,12 +397,22 @@ describe("performance-iq-sdk js", () => {
         'DCGM_FI_DEV_POWER_USAGE{gpu="0"} 100',
         'DCGM_FI_DEV_GPU_UTIL{gpu="0"} 40',
         'DCGM_FI_DEV_MEM_COPY_UTIL{gpu="0"} 12',
+        'DCGM_FI_DEV_GPU_TEMP{gpu="0"} 60',
+        'DCGM_FI_DEV_SM_CLOCK{gpu="0"} 1800',
+        'DCGM_FI_DEV_MEM_CLOCK{gpu="0"} 5000',
+        'DCGM_FI_DEV_FB_USED{gpu="0"} 4096',
+        'DCGM_FI_DEV_FB_FREE{gpu="0"} 8192',
         'DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 1000',
       ].join("\n"),
       [
         'DCGM_FI_DEV_POWER_USAGE{gpu="0"} 120',
         'DCGM_FI_DEV_GPU_UTIL{gpu="0"} 50',
         'DCGM_FI_DEV_MEM_COPY_UTIL{gpu="0"} 20',
+        'DCGM_FI_DEV_GPU_TEMP{gpu="0"} 61',
+        'DCGM_FI_DEV_SM_CLOCK{gpu="0"} 1801',
+        'DCGM_FI_DEV_MEM_CLOCK{gpu="0"} 5001',
+        'DCGM_FI_DEV_FB_USED{gpu="0"} 4097',
+        'DCGM_FI_DEV_FB_FREE{gpu="0"} 8191',
         'DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500',
       ].join("\n"),
     ]
@@ -447,6 +498,12 @@ describe("performance-iq-sdk js", () => {
     expect(sample.avgPowerWatts).toBeCloseTo(120)
     expect(sample.avgPowerWattsPerGpu).toBeCloseTo(120)
     expect(sample.gpuUtilizationPct).toBeCloseTo(50)
+    expect(sample.memoryCopyUtilizationPct).toBeCloseTo(20)
+    expect(sample.gpuTemperatureC).toBeCloseTo(61)
+    expect(sample.smClockMHz).toBeCloseTo(1801)
+    expect(sample.memoryClockMHz).toBeCloseTo(5001)
+    expect(sample.fbUsedMiB).toBeCloseTo(4097)
+    expect(sample.fbFreeMiB).toBeCloseTo(8191)
     expect(sample.energyJoules).toBeCloseTo(1.5)
     expect(result.measurements[0].dcgmGrounded).toBe(true)
     expect(result.measurements[0].hardwareTelemetryAvailableCount).toBe(1)
@@ -457,5 +514,9 @@ describe("performance-iq-sdk js", () => {
     const timelineRows = result.measurements.filter((row) => row.surface === "serving_token_timeline")
     expect(timelineRows[0].tokenId).toBe(101)
     expect(timelineRows[1].tokenLogprob as number).toBeCloseTo(-0.2)
+    const sampleRows = result.measurements.filter((row) => row.surface === "serving_request_sample")
+    expect(sampleRows[0].gpuTemperatureC).toBeCloseTo(61)
+    expect(sampleRows[0].smClockMHz).toBeCloseTo(1801)
+    expect(sampleRows[0].fbUsedMiB).toBeCloseTo(4097)
   })
 })

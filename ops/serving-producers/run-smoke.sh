@@ -8,7 +8,9 @@ Usage:
   bash ops/serving-producers/run-smoke.sh diagnostics [extra args...]
   bash ops/serving-producers/run-smoke.sh preflight [extra args...]
   bash ops/serving-producers/run-smoke.sh smoke [extra args...]
+  bash ops/serving-producers/run-smoke.sh strict-smoke [extra args...]
   bash ops/serving-producers/run-smoke.sh recorded-smoke [extra args...]
+  bash ops/serving-producers/run-smoke.sh strict-recorded-smoke [extra args...]
   bash ops/serving-producers/run-smoke.sh no-submit [extra args...]
   bash ops/serving-producers/run-smoke.sh verify-proof <proof-summary.json>
   bash ops/serving-producers/run-smoke.sh receipt-proxy [proxy args...]
@@ -18,8 +20,12 @@ Modes:
   diagnostics  Print read-only host, cache, port, and endpoint diagnostics.
   preflight    Check all configured /v1/models endpoints for the smoke model.
   smoke        Submit producer runs and verify dashboard query surfaces.
+  strict-smoke Submit runs with token, native telemetry, and DCGM proof gates.
   recorded-smoke
                Start receipt proxies, submit runs, and verify dashboards.
+  strict-recorded-smoke
+               Start receipt proxies and require token, native telemetry, and
+               DCGM proof gates.
   no-submit    Send requests and write artifacts without submitting runs.
   verify-proof Verify a saved full three-engine proof bundle offline.
   receipt-proxy
@@ -29,7 +35,7 @@ USAGE
 
 mode="${1:-preflight}"
 case "$mode" in
-  launch-plan|diagnostics|preflight|smoke|recorded-smoke|no-submit|verify-proof|receipt-proxy)
+  launch-plan|diagnostics|preflight|smoke|strict-smoke|recorded-smoke|strict-recorded-smoke|no-submit|verify-proof|receipt-proxy)
     shift || true
     ;;
   -h|--help|help)
@@ -78,6 +84,13 @@ common=(
   --model "$model"
   --artifact-dir "$artifact_dir"
 )
+strict_common=(
+  --capture-token-details
+  --top-logprobs "${PIQ_SERVING_TOP_LOGPROBS:-5}"
+  --collect-hardware-metrics
+  --require-native-telemetry
+  --require-hardware-telemetry
+)
 
 allow_partial_defaults=false
 case "${PIQ_SERVING_ALLOW_PARTIAL:-false}" in
@@ -103,6 +116,25 @@ add_engine_url_arg --vllm-url PIQ_VLLM_URL http://127.0.0.1:8000
 add_engine_url_arg --sglang-url PIQ_SGLANG_URL http://127.0.0.1:30000
 add_engine_url_arg --tensorrt-llm-url PIQ_TENSORRT_LLM_URL http://127.0.0.1:8001
 
+has_cli_arg() {
+  local needle="$1"
+  shift
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "$needle" || "$arg" == "$needle="* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+require_strict_pricing() {
+  if [[ -z "${PIQ_SERVING_USD_PER_GPU_HOUR:-}" ]] && ! has_cli_arg --usd-per-gpu-hour "$@"; then
+    echo "strict smoke requires PIQ_SERVING_USD_PER_GPU_HOUR or --usd-per-gpu-hour so cost completeness is auditable." >&2
+    exit 2
+  fi
+}
+
 case "$mode" in
   launch-plan)
     exec "$python_bin" -m performance_iq_sdk.serving_smoke --launch-plan-only --model "$model" "$@"
@@ -116,8 +148,16 @@ case "$mode" in
   smoke)
     exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard "$@"
     ;;
+  strict-smoke)
+    require_strict_pricing "$@"
+    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard "${strict_common[@]}" "$@"
+    ;;
   recorded-smoke)
     exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --record-receipts --receipt-log "$receipt_log" "$@"
+    ;;
+  strict-recorded-smoke)
+    require_strict_pricing "$@"
+    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --record-receipts --receipt-log "$receipt_log" "${strict_common[@]}" "$@"
     ;;
   no-submit)
     exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --no-submit "$@"

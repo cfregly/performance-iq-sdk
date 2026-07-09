@@ -82,6 +82,32 @@ PRODUCER_MANIFEST_SCHEMA_VERSION = "performance-iq.producer-manifest.v1"
 LOW_FREE_SPACE_BYTES = 30 * 1024 * 1024 * 1024
 SIZE_TIMEOUT_SECONDS = 15
 COMMAND_PROBE_TIMEOUT_SECONDS = 30
+REQUIRED_HARDWARE_SAMPLE_COUNTERS = (
+    "avgPowerWatts",
+    "avgPowerWattsPerGpu",
+    "gpuUtilizationPct",
+    "memoryCopyUtilizationPct",
+    "gpuTemperatureC",
+    "smClockMHz",
+    "memoryClockMHz",
+    "fbUsedMiB",
+    "fbFreeMiB",
+    "energyJoules",
+)
+REQUIRED_NATIVE_SAMPLE_FIELDS = (
+    "nativeTtftMs",
+    "nativeTpotMs",
+    "nativeE2eLatencyMs",
+    "queueWaitMs",
+    "prefillMs",
+    "decodeMs",
+    "runningRequests",
+    "waitingRequests",
+    "kvCacheUsagePct",
+    "cacheHitRate",
+    "promptTokensCachedDelta",
+    "promptTokensComputedDelta",
+)
 
 
 def _utc_slug() -> str:
@@ -101,6 +127,30 @@ def _env(name: str, fallback: str | None = None) -> str | None:
     if value is None or not value.strip():
         return fallback
     return value.strip()
+
+
+def _engine_env_name(engine: str, suffix: str) -> str:
+    return f"PIQ_{engine.upper().replace('-', '_')}_{suffix}"
+
+
+def _json_or_text_env(name: str) -> Any:
+    value = _env(name)
+    if value is None:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _float_env(name: str, fallback: float | None = None) -> float | None:
+    value = _env(name)
+    if value is None:
+        return fallback
+    try:
+        return float(value)
+    except ValueError:
+        return fallback
 
 
 def command_probe_timeout_seconds() -> float:
@@ -131,16 +181,36 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
         hardware_metrics_url = _env(ENGINE_HARDWARE_METRICS_URL_ENV[engine])
         if getattr(args, "collect_hardware_metrics", False) and not hardware_metrics_url:
             hardware_metrics_url = metrics_url
+        framework_version = _env(_engine_env_name(engine, "FRAMEWORK_VERSION"), args.framework_version)
+        model_revision = _env(_engine_env_name(engine, "MODEL_REVISION"), getattr(args, "model_revision", None))
+        image_digest = _env(_engine_env_name(engine, "IMAGE_DIGEST"), args.image_digest)
+        image_tag = _env(_engine_env_name(engine, "IMAGE_TAG"), args.image_tag)
+        server_args = _json_or_text_env(_engine_env_name(engine, "SERVER_ARGS"))
+        if server_args is None:
+            server_args = getattr(args, "server_args", None)
+        process_id = _env(_engine_env_name(engine, "PROCESS_ID"), getattr(args, "process_id", None))
+        container_id = _env(_engine_env_name(engine, "CONTAINER_ID"), getattr(args, "container_id", None))
+        pod_name = _env(_engine_env_name(engine, "POD_NAME"), getattr(args, "pod_name", None))
+        node_name = _env(_engine_env_name(engine, "NODE_NAME"), getattr(args, "node_name", None))
+        host_name = _env(_engine_env_name(engine, "HOST_NAME"), getattr(args, "host_name", None))
         configs.append({
             "engine": engine,
             "baseUrl": url,
             "metricsUrl": metrics_url,
             **({"hardwareMetricsUrl": hardware_metrics_url} if hardware_metrics_url else {}),
+            **({"requireNativeTelemetry": True} if getattr(args, "require_native_telemetry", False) else {}),
             **({"requireHardwareTelemetry": True} if getattr(args, "require_hardware_telemetry", False) else {}),
             **({"apiKey": api_key} if api_key else {}),
-            **({"frameworkVersion": args.framework_version} if args.framework_version else {}),
-            **({"imageDigest": args.image_digest} if args.image_digest else {}),
-            **({"imageTag": args.image_tag} if args.image_tag else {}),
+            **({"frameworkVersion": framework_version} if framework_version else {}),
+            **({"modelRevision": model_revision} if model_revision else {}),
+            **({"imageDigest": image_digest} if image_digest else {}),
+            **({"imageTag": image_tag} if image_tag else {}),
+            **({"serverArgs": server_args} if server_args is not None else {}),
+            **({"processId": process_id} if process_id else {}),
+            **({"containerId": container_id} if container_id else {}),
+            **({"podName": pod_name} if pod_name else {}),
+            **({"nodeName": node_name} if node_name else {}),
+            **({"hostName": host_name} if host_name else {}),
         })
     return configs, missing
 
@@ -546,6 +616,29 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
             "PIQ_VLLM_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['vllm']}",
             "PIQ_SGLANG_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['sglang']}",
             "PIQ_TENSORRT_LLM_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}",
+        },
+        "strictProof": {
+            "mode": "strict-recorded-smoke",
+            "requires": [
+                "OpenAI-compatible streaming chat completions for all configured engines",
+                "OpenAI-compatible token logprobs/token IDs",
+                "native engine Prometheus metrics",
+                "DCGM exporter Prometheus metrics",
+                "configured per-GPU hourly cost",
+                "Performance IQ dashboard query access",
+            ],
+            "dashboardSurfaces": list(QUERY_NAMES),
+            "command": (
+                f"PIQ_SERVING_MODEL={quoted_model} "
+                "PIQ_SERVING_USD_PER_GPU_HOUR=<actual-blended-gpu-hourly-cost> "
+                "PIQ_SERVING_CAPTURE_TOKEN_DETAILS=true "
+                "PIQ_SERVING_TOP_LOGPROBS=5 "
+                "PIQ_SERVING_COLLECT_HARDWARE_METRICS=true "
+                "PIQ_SERVING_REQUIRE_NATIVE_TELEMETRY=true "
+                "PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true "
+                "bash ops/serving-producers/run-smoke.sh strict-recorded-smoke"
+            ),
+            "verify": "bash ops/serving-producers/run-smoke.sh verify-proof $PIQ_ARTIFACT_DIR/serving-smoke-proof-<suffix>.json",
         },
         "engines": {
             "vllm": {
@@ -1295,13 +1388,30 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                         success_count=success_count if isinstance(success_count, int) else None,
                         errors=errors,
                     )
+                    if first_measurement.get("nativeTelemetryRequired") is True:
+                        for index, sample in enumerate(samples):
+                            if not isinstance(sample, dict):
+                                continue
+                            if sample.get("nativeTelemetryAvailable") is not True:
+                                errors.append(f"{engine} samples[{index}].nativeTelemetryAvailable must be true when native telemetry is required.")
+                            for key in REQUIRED_NATIVE_SAMPLE_FIELDS:
+                                if not _is_number(sample.get(key)):
+                                    errors.append(f"{engine} samples[{index}].{key} must be numeric when native telemetry is required.")
                     if first_measurement.get("hardwareTelemetryRequired") is True:
                         for index, sample in enumerate(samples):
                             if isinstance(sample, dict) and sample.get("hardwareTelemetryAvailable") is not True:
                                 errors.append(f"{engine} samples[{index}].hardwareTelemetryAvailable must be true when hardware telemetry is required.")
+                            if isinstance(sample, dict):
+                                for key in REQUIRED_HARDWARE_SAMPLE_COUNTERS:
+                                    if not _is_number(sample.get(key)):
+                                        errors.append(f"{engine} samples[{index}].{key} must be numeric when hardware telemetry is required.")
                         for index, telemetry in enumerate(hardware_telemetry if isinstance(hardware_telemetry, list) else []):
                             if isinstance(telemetry, dict) and telemetry.get("available") is not True:
                                 errors.append(f"{engine} hardwareTelemetry[{index}].available must be true when hardware telemetry is required.")
+                            if isinstance(telemetry, dict):
+                                for key in ["powerWatts", "powerWattsPerGpu", "gpuUtilizationPct", "memoryCopyUtilizationPct", "gpuTemperatureC", "smClockMHz", "memoryClockMHz", "fbUsedMiB", "fbFreeMiB", "energyJoules"]:
+                                    if not _is_number(telemetry.get(key)):
+                                        errors.append(f"{engine} hardwareTelemetry[{index}].{key} must be numeric when hardware telemetry is required.")
                     if first_measurement.get("tokenDetailsRequired") is True:
                         for index, sample in enumerate(samples):
                             if not isinstance(sample, dict):
@@ -1579,16 +1689,24 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tokens", type=int, default=int(_env("PIQ_SERVING_MAX_TOKENS", "64") or "64"))
     parser.add_argument("--hardware", default=_env("PIQ_SERVING_HARDWARE", "local serving endpoint"))
     parser.add_argument("--operating-point", default=_env("PIQ_SERVING_OPERATING_POINT", "serving-smoke"))
-    parser.add_argument("--usd-per-gpu-hour", type=float)
-    parser.add_argument("--gpu-count", type=float, default=1)
-    parser.add_argument("--power-watts-per-gpu", type=float)
+    parser.add_argument("--usd-per-gpu-hour", type=float, default=_float_env("PIQ_SERVING_USD_PER_GPU_HOUR"))
+    parser.add_argument("--gpu-count", type=float, default=_float_env("PIQ_SERVING_GPU_COUNT", 1.0) or 1.0)
+    parser.add_argument("--power-watts-per-gpu", type=float, default=_float_env("PIQ_SERVING_POWER_WATTS_PER_GPU"))
     parser.add_argument("--capture-token-details", action="store_true", default=_env("PIQ_SERVING_CAPTURE_TOKEN_DETAILS", "false").lower() == "true", help="Request response token logprobs/top-logprobs when the serving engine supports them.")
     parser.add_argument("--top-logprobs", type=int, default=int(_env("PIQ_SERVING_TOP_LOGPROBS", "0") or "0"), help="Number of top logprobs to request when token detail capture is enabled.")
     parser.add_argument("--collect-hardware-metrics", action="store_true", default=_env("PIQ_SERVING_COLLECT_HARDWARE_METRICS", "false").lower() == "true", help="Read DCGM metrics from PIQ_*_HARDWARE_METRICS_URL, or engine /metrics when no dedicated URL is set.")
+    parser.add_argument("--require-native-telemetry", action="store_true", default=_env("PIQ_SERVING_REQUIRE_NATIVE_TELEMETRY", "false").lower() == "true", help="Make proof completeness require native serving Prometheus telemetry for configured engines.")
     parser.add_argument("--require-hardware-telemetry", action="store_true", default=_env("PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY", "false").lower() == "true", help="Make proof completeness require DCGM hardware telemetry for configured engines.")
     parser.add_argument("--framework-version")
+    parser.add_argument("--model-revision")
     parser.add_argument("--image-digest")
     parser.add_argument("--image-tag")
+    parser.add_argument("--server-args", help="Global serving-engine launch args or command line; per-engine PIQ_<ENGINE>_SERVER_ARGS overrides it.")
+    parser.add_argument("--process-id", help="Global serving-engine process ID; per-engine PIQ_<ENGINE>_PROCESS_ID overrides it.")
+    parser.add_argument("--container-id", help="Global serving-engine container ID; per-engine PIQ_<ENGINE>_CONTAINER_ID overrides it.")
+    parser.add_argument("--pod-name", help="Global serving-engine pod name; per-engine PIQ_<ENGINE>_POD_NAME overrides it.")
+    parser.add_argument("--node-name", help="Global serving-engine node name; per-engine PIQ_<ENGINE>_NODE_NAME overrides it.")
+    parser.add_argument("--host-name", help="Global serving-engine host name; per-engine PIQ_<ENGINE>_HOST_NAME overrides it.")
     parser.add_argument("--run-suffix", default=_env("PIQ_SERVING_RUN_SUFFIX"))
     parser.add_argument("--summary-out", default=_env("PIQ_SERVING_SUMMARY_OUT"), help="Write the overall smoke proof summary to this JSON path.")
     parser.add_argument("--receipt-log", default=_env("PIQ_SERVING_RECEIPT_LOG"), help="JSONL receipt log produced by the serving request recorder.")

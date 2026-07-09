@@ -52,6 +52,23 @@ engine `/metrics` endpoint when DCGM is exposed there. Use
 `PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true` for a strict proof gate that fails
 metric completeness if configured engines do not produce hardware telemetry.
 
+Native serving metrics are read from each engine Prometheus endpoint and are
+promoted into queryable `serving_request_samples` rows when exposed: native
+TTFT/TPOT/E2E/inter-token latency, queue/prefill/decode time, running/waiting
+request counts, KV-cache usage, prefix-cache hit rate, cached/computed prompt
+token deltas, and the metrics URL/source. Use
+`PIQ_SERVING_REQUIRE_NATIVE_TELEMETRY=true` for a strict proof gate that fails
+when configured engines do not produce these native timing/cache/concurrency
+fields. DCGM sensor counters promoted into the same request rows include power,
+GPU/memory-copy utilization, temperature, SM and memory clocks, framebuffer
+used/free, and energy.
+
+Runtime provenance has two layers. Dashboard rows get safe identifiers and
+hashes: framework version, model revision, image tag/digest, server-args hash,
+process/container/pod/node/host identifiers, and raw artifact links. Operator
+artifacts retain the full raw request/response, token details, native telemetry,
+hardware telemetry, and full runtime provenance for internal audit.
+
 ## Files
 
 - `performance-iq-serving.env.example` - environment contract for engines and
@@ -73,13 +90,13 @@ cp ops/serving-producers/performance-iq-serving.env.example .env.serving-produce
 $EDITOR .env.serving-producers
 ```
 
-Start the three engines:
+Start DCGM plus the three engines:
 
 ```bash
 docker compose \
   --env-file .env.serving-producers \
   -f ops/serving-producers/docker-compose.nvidia.yaml \
-  up -d vllm sglang tensorrt-llm
+  up -d dcgm-exporter vllm sglang tensorrt-llm
 ```
 
 Run the model-aware endpoint preflight:
@@ -90,6 +107,15 @@ set -a
 set +a
 
 bash ops/serving-producers/run-smoke.sh preflight
+```
+
+Set the actual per-GPU hourly cost before a strict proof run. The strict wrapper
+refuses to run without this because cost-per-token rows would otherwise be
+incomplete:
+
+```bash
+export PIQ_SERVING_USD_PER_GPU_HOUR=<actual-blended-gpu-hourly-cost>
+export PIQ_SERVING_GPU_COUNT=1
 ```
 
 When the serving frameworks are installed in a non-default Python environment,
@@ -154,16 +180,19 @@ export PIQ_SGLANG_URL=http://127.0.0.1:18001
 export PIQ_TENSORRT_LLM_URL=http://127.0.0.1:18002
 ```
 
-Submit producer runs and verify dashboard materialization:
+Submit strict producer runs and verify dashboard materialization:
 
 ```bash
-bash ops/serving-producers/run-smoke.sh recorded-smoke
+bash ops/serving-producers/run-smoke.sh strict-recorded-smoke
 ```
 
 Use `smoke` only when request receipts are being captured by another layer.
 `recorded-smoke` starts in-process receipt proxies, routes all engine traffic
 through them, writes `PIQ_SERVING_RECEIPT_LOG`, submits the producer runs,
 queries the dashboard surfaces, and writes the proof summary.
+Use `strict-smoke` or `strict-recorded-smoke` for product proof: these require
+token IDs/logprobs, native engine telemetry, DCGM hardware counters, dashboard
+rows, request receipts, and configured GPU cost.
 
 Verify the saved proof bundle offline:
 
@@ -190,17 +219,19 @@ Success requires:
   normalized summary artifact and producer manifest;
 - each request ID has a matching receipt in `PIQ_SERVING_RECEIPT_LOG`;
 - Performance IQ accepts all three producer runs;
-- `price_performance`, `capacity_best`, `campaign_provenance`, and
-  `run_details` row counts increase;
+- `price_performance`, `capacity_best`, `campaign_provenance`, `run_details`,
+  `serving_request_samples`, and `serving_token_timeline` row counts increase;
 - the proof summary preserves row snapshots for those dashboard surfaces;
 - submitted campaign IDs appear in both `campaign_provenance` and
-  `run_details`.
+  `run_details`, and request IDs appear in `serving_request_samples` and
+  `serving_token_timeline`.
 - `serving-smoke-proof-<suffix>.json` exists under `PIQ_ARTIFACT_DIR` and
   preserves preflight, per-engine artifact and manifest paths, submissions,
   and dashboard row proof.
 - `verify-proof` succeeds against that file, recomputing artifact hashes and
   checking the manifests, endpoint preflight, submitted campaigns, dashboard
-  surfaces, and runtime framework provenance.
+  surfaces, token timeline, native telemetry, DCGM counters, and runtime
+  framework provenance.
 
 ## Mac / Apple Silicon
 
@@ -292,6 +323,11 @@ PIQ_SGLANG_URL=http://127.0.0.1:30000 \
   --allow-missing-engines
 ```
 
+That Mac-local command is intentionally partial unless a remote TensorRT-LLM
+endpoint and DCGM metrics endpoint are also configured. Full product proof uses
+`strict-recorded-smoke` with all three engine URLs, native metrics URLs,
+hardware metrics URLs, and token logprobs enabled.
+
 Before installing or deleting anything, run diagnostics to see port listeners,
 local runtime availability, free disk, and Hugging Face cache candidates for
 the smoke model:
@@ -316,7 +352,7 @@ export PIQ_TENSORRT_LLM_URL=https://trtllm.example.com
 export PIQ_SERVING_MODEL=Qwen/Qwen2.5-0.5B-Instruct
 
 bash ops/serving-producers/run-smoke.sh preflight
-bash ops/serving-producers/run-smoke.sh smoke
+bash ops/serving-producers/run-smoke.sh strict-recorded-smoke
 ```
 
 Do not use `--skip-preflight` for proof runs. It exists only for targeted
@@ -334,7 +370,10 @@ docker build \
 
 For a remote cluster, retag and push that image to the cluster registry, update
 `kubernetes-smoke-job.yaml`, and apply the job in the namespace that can reach
-the three engine services. The job uses `--record-receipts` by default and
-writes `/tmp/performance-iq-serving-producers/serving-smoke-proof.json`, so a
+the three engine services. The `performance-iq-serving-producer` secret must
+include `base-url` and `usd-per-gpu-hour`; `token` is optional. The job uses
+`--record-receipts` by default and writes
+`/tmp/performance-iq-serving-producers/serving-smoke-proof.json`, so a
 successful pod preserves endpoint preflight, request receipts, submitted
-campaign IDs, artifact paths, and dashboard row evidence.
+campaign IDs, artifact paths, fine-grain dashboard rows, and strict telemetry
+evidence.

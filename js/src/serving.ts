@@ -31,8 +31,17 @@ export interface ServingEngineConfig {
   nativeTelemetry?: Record<string, unknown>
   hardwareTelemetry?: Record<string, unknown>
   frameworkVersion?: string
+  modelRevision?: string
   imageDigest?: string
   imageTag?: string
+  serverArgs?: unknown
+  processId?: string | number
+  pid?: string | number
+  containerId?: string
+  podName?: string
+  nodeName?: string
+  hostName?: string
+  hostname?: string
   endpointPreflight?: Record<string, unknown>
 }
 
@@ -107,10 +116,31 @@ export interface ServingRequestSample {
   nativeTelemetryAvailable?: boolean
   hardwareTelemetry?: Record<string, unknown>
   hardwareTelemetryAvailable?: boolean
+  nativeTelemetrySource?: string | null
+  nativeMetricsUrl?: string | null
+  nativeTtftMs?: number | null
+  nativeTpotMs?: number | null
+  nativeE2eLatencyMs?: number | null
+  nativeInterTokenLatencyMs?: number | null
+  runningRequests?: number | null
+  waitingRequests?: number | null
+  kvCacheUsagePct?: number | null
+  cacheHitRate?: number | null
+  prefixCacheQueriesDelta?: number | null
+  prefixCacheHitsDelta?: number | null
+  promptTokensCachedDelta?: number | null
+  promptTokensComputedDelta?: number | null
+  hardwareTelemetrySource?: string | null
+  hardwareMetricsUrl?: string | null
   avgPowerWatts?: number | null
   avgPowerWattsPerGpu?: number | null
   gpuUtilizationPct?: number | null
   memoryCopyUtilizationPct?: number | null
+  gpuTemperatureC?: number | null
+  smClockMHz?: number | null
+  memoryClockMHz?: number | null
+  fbUsedMiB?: number | null
+  fbFreeMiB?: number | null
   energyJoules?: number | null
   tokenDetailsAvailable?: boolean
   tokenIdsAvailable?: boolean
@@ -120,6 +150,16 @@ export interface ServingRequestSample {
   queueWaitMs?: number | null
   prefillMs?: number | null
   decodeMs?: number | null
+  engineVersion?: unknown
+  modelRevision?: unknown
+  imageTag?: unknown
+  imageDigest?: unknown
+  serverArgsSha256?: string | null
+  processId?: unknown
+  containerId?: unknown
+  podName?: unknown
+  nodeName?: unknown
+  hostName?: unknown
   tokenTimeline?: ServingTokenTimelineChunk[]
   error?: string
 }
@@ -192,6 +232,44 @@ function sha256Text(value: string): string {
 
 function sha256Json(value: unknown): string {
   return sha256Text(JSON.stringify(value))
+}
+
+function sha256OptionalJson(value: unknown): string | null {
+  return value == null ? null : sha256Json(value)
+}
+
+function nestedValue(source: Record<string, unknown>, parent: string, keys: string[]): unknown {
+  const candidate = source[parent]
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined
+  const nested = candidate as Record<string, unknown>
+  for (const key of keys) {
+    if (nested[key] != null) return nested[key]
+  }
+  return undefined
+}
+
+function firstDefined(source: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    if (source[key] != null) return source[key]
+  }
+  return undefined
+}
+
+function runtimeProvenance(config: ServingProducerConfig, telemetry: Record<string, unknown> = {}): Record<string, unknown> {
+  const engine = config.engine as unknown as Record<string, unknown>
+  const serverArgs = telemetry.serverArgs ?? engine.serverArgs
+  return {
+    engineVersion: telemetry.engineVersion ?? engine.frameworkVersion,
+    modelRevision: telemetry.modelRevision ?? engine.modelRevision,
+    imageTag: firstDefined(engine, ["imageTag", "containerImageTag"]),
+    imageDigest: firstDefined(engine, ["imageDigest", "containerImageDigest"]),
+    serverArgsSha256: sha256OptionalJson(serverArgs),
+    processId: firstDefined(engine, ["processId", "pid"]) ?? nestedValue(engine, "process", ["pid", "processId"]),
+    containerId: firstDefined(engine, ["containerId"]) ?? nestedValue(engine, "container", ["id", "containerId"]),
+    podName: firstDefined(engine, ["podName"]) ?? nestedValue(engine, "container", ["podName"]),
+    nodeName: firstDefined(engine, ["nodeName"]) ?? nestedValue(engine, "container", ["nodeName"]),
+    hostName: firstDefined(engine, ["hostName", "hostname"]) ?? nestedValue(engine, "process", ["hostName", "hostname"]),
+  }
 }
 
 function metricCompleteness(row: Record<string, unknown>): number {
@@ -573,9 +651,9 @@ function nativeMetricsDelta(
     queueWaitMs,
     prefillMs,
     decodeMs,
-    runningRequests: metricValue(afterMetrics, ["vllm:num_requests_running", "sglang:num_running_reqs", "sglang_num_running_reqs"]),
-    waitingRequests: metricValue(afterMetrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs"]),
-    kvCacheUsagePct: metricValue(afterMetrics, ["vllm:kv_cache_usage_perc", "sglang:token_usage", "sglang_token_usage"]),
+    runningRequests: metricValue(afterMetrics, ["vllm:num_requests_running", "sglang:num_running_reqs", "sglang_num_running_reqs", "trtllm:num_requests_running", "trtllm_num_requests_running"]),
+    waitingRequests: metricValue(afterMetrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs", "trtllm:num_requests_waiting", "trtllm_num_requests_waiting"]),
+    kvCacheUsagePct: metricValue(afterMetrics, ["vllm:kv_cache_usage_perc", "sglang:token_usage", "sglang_token_usage", "trtllm:kv_cache_usage_perc", "trtllm_kv_cache_usage_perc"]),
     prefixCacheQueriesDelta: prefixQueries,
     prefixCacheHitsDelta: prefixHits,
     cacheHitRate: prefixHits != null && prefixQueries != null && prefixQueries > 0 ? prefixHits / prefixQueries : null,
@@ -583,11 +661,15 @@ function nativeMetricsDelta(
       "vllm:prompt_tokens_cached_total",
       "sglang:prompt_tokens_cached_total",
       "sglang_prompt_tokens_cached_total",
+      "trtllm:prompt_tokens_cached_total",
+      "trtllm_prompt_tokens_cached_total",
     ]),
     promptTokensComputedDelta: counterDelta(beforeMetrics, afterMetrics, [
       "vllm:request_prefill_kv_computed_tokens_sum",
       "sglang:request_prefill_kv_computed_tokens_sum",
       "sglang_request_prefill_kv_computed_tokens_sum",
+      "trtllm:request_prefill_kv_computed_tokens_sum",
+      "trtllm_request_prefill_kv_computed_tokens_sum",
     ]),
   }
   const availableValues = Object.fromEntries(Object.entries(values).filter(([, value]) => value != null))
@@ -907,6 +989,7 @@ async function sendChatCompletion(
         }
       }
       const redacted = redactedRequest(payload)
+      const provenance = runtimeProvenance(config, telemetry)
       return {
         requestId,
         requestIndex,
@@ -944,10 +1027,31 @@ async function sendChatCompletion(
         nativeTelemetryAvailable: Boolean(telemetry.available),
         hardwareTelemetry: hwTelemetry,
         hardwareTelemetryAvailable: Boolean(hwTelemetry.available),
+        nativeTelemetrySource: typeof telemetry.source === "string" ? telemetry.source : null,
+        nativeMetricsUrl: typeof telemetry.metricsUrl === "string" ? telemetry.metricsUrl : null,
+        nativeTtftMs: numberFrom(telemetry.nativeTtftMs),
+        nativeTpotMs: numberFrom(telemetry.nativeTpotMs),
+        nativeE2eLatencyMs: numberFrom(telemetry.nativeE2eLatencyMs),
+        nativeInterTokenLatencyMs: numberFrom(telemetry.nativeInterTokenLatencyMs),
+        runningRequests: numberFrom(telemetry.runningRequests),
+        waitingRequests: numberFrom(telemetry.waitingRequests),
+        kvCacheUsagePct: numberFrom(telemetry.kvCacheUsagePct),
+        cacheHitRate: numberFrom(telemetry.cacheHitRate),
+        prefixCacheQueriesDelta: numberFrom(telemetry.prefixCacheQueriesDelta),
+        prefixCacheHitsDelta: numberFrom(telemetry.prefixCacheHitsDelta),
+        promptTokensCachedDelta: numberFrom(telemetry.promptTokensCachedDelta),
+        promptTokensComputedDelta: numberFrom(telemetry.promptTokensComputedDelta),
+        hardwareTelemetrySource: typeof hwTelemetry.source === "string" ? hwTelemetry.source : null,
+        hardwareMetricsUrl: typeof hwTelemetry.metricsUrl === "string" ? hwTelemetry.metricsUrl : null,
         avgPowerWatts: numberFrom(hwTelemetry.powerWatts),
         avgPowerWattsPerGpu: numberFrom(hwTelemetry.powerWattsPerGpu),
         gpuUtilizationPct: numberFrom(hwTelemetry.gpuUtilizationPct),
         memoryCopyUtilizationPct: numberFrom(hwTelemetry.memoryCopyUtilizationPct),
+        gpuTemperatureC: numberFrom(hwTelemetry.gpuTemperatureC),
+        smClockMHz: numberFrom(hwTelemetry.smClockMHz),
+        memoryClockMHz: numberFrom(hwTelemetry.memoryClockMHz),
+        fbUsedMiB: numberFrom(hwTelemetry.fbUsedMiB),
+        fbFreeMiB: numberFrom(hwTelemetry.fbFreeMiB),
         energyJoules: numberFrom(hwTelemetry.energyJoules),
         ...(tokenSummary as {
           tokenDetailsAvailable: boolean
@@ -959,6 +1063,7 @@ async function sendChatCompletion(
         queueWaitMs: numberFrom(telemetry.queueWaitMs),
         prefillMs: numberFrom(telemetry.prefillMs),
         decodeMs: numberFrom(telemetry.decodeMs),
+        ...provenance,
         tokenTimeline,
         error: response.ok ? undefined : JSON.stringify(lastBody),
         rawCapture: {
@@ -968,7 +1073,9 @@ async function sendChatCompletion(
           responseEvents: events,
           outputText,
           tokenDetails: rawTokenDetails,
+          nativeTelemetry: telemetry,
           hardwareTelemetry: hwTelemetry,
+          runtimeProvenance: provenance,
         },
       }
     }
@@ -1003,6 +1110,7 @@ async function sendChatCompletion(
       tokenDetailSource: String(tokenSummary.tokenDetailSource),
     }))
     const redacted = redactedRequest(payload)
+    const provenance = runtimeProvenance(config, telemetry)
     return {
       requestId,
       requestIndex,
@@ -1037,10 +1145,31 @@ async function sendChatCompletion(
       nativeTelemetryAvailable: Boolean(telemetry.available),
       hardwareTelemetry: hwTelemetry,
       hardwareTelemetryAvailable: Boolean(hwTelemetry.available),
+      nativeTelemetrySource: typeof telemetry.source === "string" ? telemetry.source : null,
+      nativeMetricsUrl: typeof telemetry.metricsUrl === "string" ? telemetry.metricsUrl : null,
+      nativeTtftMs: numberFrom(telemetry.nativeTtftMs),
+      nativeTpotMs: numberFrom(telemetry.nativeTpotMs),
+      nativeE2eLatencyMs: numberFrom(telemetry.nativeE2eLatencyMs),
+      nativeInterTokenLatencyMs: numberFrom(telemetry.nativeInterTokenLatencyMs),
+      runningRequests: numberFrom(telemetry.runningRequests),
+      waitingRequests: numberFrom(telemetry.waitingRequests),
+      kvCacheUsagePct: numberFrom(telemetry.kvCacheUsagePct),
+      cacheHitRate: numberFrom(telemetry.cacheHitRate),
+      prefixCacheQueriesDelta: numberFrom(telemetry.prefixCacheQueriesDelta),
+      prefixCacheHitsDelta: numberFrom(telemetry.prefixCacheHitsDelta),
+      promptTokensCachedDelta: numberFrom(telemetry.promptTokensCachedDelta),
+      promptTokensComputedDelta: numberFrom(telemetry.promptTokensComputedDelta),
+      hardwareTelemetrySource: typeof hwTelemetry.source === "string" ? hwTelemetry.source : null,
+      hardwareMetricsUrl: typeof hwTelemetry.metricsUrl === "string" ? hwTelemetry.metricsUrl : null,
       avgPowerWatts: numberFrom(hwTelemetry.powerWatts),
       avgPowerWattsPerGpu: numberFrom(hwTelemetry.powerWattsPerGpu),
       gpuUtilizationPct: numberFrom(hwTelemetry.gpuUtilizationPct),
       memoryCopyUtilizationPct: numberFrom(hwTelemetry.memoryCopyUtilizationPct),
+      gpuTemperatureC: numberFrom(hwTelemetry.gpuTemperatureC),
+      smClockMHz: numberFrom(hwTelemetry.smClockMHz),
+      memoryClockMHz: numberFrom(hwTelemetry.memoryClockMHz),
+      fbUsedMiB: numberFrom(hwTelemetry.fbUsedMiB),
+      fbFreeMiB: numberFrom(hwTelemetry.fbFreeMiB),
       energyJoules: numberFrom(hwTelemetry.energyJoules),
       ...(tokenSummary as {
         tokenDetailsAvailable: boolean
@@ -1052,6 +1181,7 @@ async function sendChatCompletion(
       queueWaitMs: numberFrom(telemetry.queueWaitMs),
       prefillMs: numberFrom(telemetry.prefillMs),
       decodeMs: numberFrom(telemetry.decodeMs),
+      ...provenance,
       tokenTimeline,
       error: response.ok ? undefined : JSON.stringify(body),
       rawCapture: {
@@ -1061,11 +1191,15 @@ async function sendChatCompletion(
         responseBody: body,
         outputText,
         tokenDetails: rawTokenDetails,
+        nativeTelemetry: telemetry,
         hardwareTelemetry: hwTelemetry,
+        runtimeProvenance: provenance,
       },
     }
   } catch (error) {
     const latencyMs = performance.now() - started
+    const telemetry = nativeTelemetry(config)
+    const hwTelemetry = hardwareTelemetry(config)
     return {
       requestId,
       requestIndex,
@@ -1089,10 +1223,13 @@ async function sendChatCompletion(
       tokenCountSource: "none",
       ttftSource: stream ? "client-stream-content" : "not-streamed",
       streaming: stream,
-      nativeTelemetry: nativeTelemetry(config),
+      nativeTelemetry: telemetry,
       nativeTelemetryAvailable: false,
-      hardwareTelemetry: hardwareTelemetry(config),
+      hardwareTelemetry: hwTelemetry,
       hardwareTelemetryAvailable: false,
+      nativeTelemetrySource: typeof telemetry.source === "string" ? telemetry.source : null,
+      hardwareTelemetrySource: typeof hwTelemetry.source === "string" ? hwTelemetry.source : null,
+      ...runtimeProvenance(config, telemetry),
       tokenDetailsAvailable: false,
       tokenIdsAvailable: false,
       logprobsAvailable: false,
@@ -1236,10 +1373,31 @@ function buildMeasurements(
     outputSha256: sample.outputSha256,
     nativeTelemetryAvailable: sample.nativeTelemetryAvailable,
     hardwareTelemetryAvailable: sample.hardwareTelemetryAvailable,
+    nativeTelemetrySource: sample.nativeTelemetrySource,
+    nativeMetricsUrl: sample.nativeMetricsUrl,
+    nativeTtftMs: sample.nativeTtftMs,
+    nativeTpotMs: sample.nativeTpotMs,
+    nativeE2eLatencyMs: sample.nativeE2eLatencyMs,
+    nativeInterTokenLatencyMs: sample.nativeInterTokenLatencyMs,
+    runningRequests: sample.runningRequests,
+    waitingRequests: sample.waitingRequests,
+    kvCacheUsagePct: sample.kvCacheUsagePct,
+    cacheHitRate: sample.cacheHitRate,
+    prefixCacheQueriesDelta: sample.prefixCacheQueriesDelta,
+    prefixCacheHitsDelta: sample.prefixCacheHitsDelta,
+    promptTokensCachedDelta: sample.promptTokensCachedDelta,
+    promptTokensComputedDelta: sample.promptTokensComputedDelta,
+    hardwareTelemetrySource: sample.hardwareTelemetrySource,
+    hardwareMetricsUrl: sample.hardwareMetricsUrl,
     avgPowerWatts: sample.avgPowerWatts,
     avgPowerWattsPerGpu: sample.avgPowerWattsPerGpu,
     gpuUtilizationPct: sample.gpuUtilizationPct,
     memoryCopyUtilizationPct: sample.memoryCopyUtilizationPct,
+    gpuTemperatureC: sample.gpuTemperatureC,
+    smClockMHz: sample.smClockMHz,
+    memoryClockMHz: sample.memoryClockMHz,
+    fbUsedMiB: sample.fbUsedMiB,
+    fbFreeMiB: sample.fbFreeMiB,
     energyJoules: sample.energyJoules,
     tokenDetailsAvailable: sample.tokenDetailsAvailable,
     tokenIdsAvailable: sample.tokenIdsAvailable,
@@ -1249,6 +1407,16 @@ function buildMeasurements(
     queueWaitMs: sample.queueWaitMs,
     prefillMs: sample.prefillMs,
     decodeMs: sample.decodeMs,
+    engineVersion: sample.engineVersion,
+    modelRevision: sample.modelRevision,
+    imageTag: sample.imageTag,
+    imageDigest: sample.imageDigest,
+    serverArgsSha256: sample.serverArgsSha256,
+    processId: sample.processId,
+    containerId: sample.containerId,
+    podName: sample.podName,
+    nodeName: sample.nodeName,
+    hostName: sample.hostName,
     latestCapturedAtUtc: capturedAtUtc,
   }))
   const timelineRows = samples.flatMap((sample) => (sample.tokenTimeline ?? []).map((chunk): Record<string, unknown> => ({

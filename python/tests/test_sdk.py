@@ -20,6 +20,7 @@ from performance_iq_sdk.serving_smoke import (
     endpoint_probe,
     huggingface_model_cache_name,
     main as serving_smoke_main,
+    parser as serving_smoke_parser,
     query_dashboard,
     run_serving_smoke,
     runtime_diagnostics,
@@ -49,8 +50,52 @@ class PerformanceIQSdkTest(unittest.TestCase):
         "PIQ_SERVING_MODEL",
         "PIQ_SERVING_REPETITIONS",
         "PIQ_SERVING_MAX_TOKENS",
+        "PIQ_SERVING_USD_PER_GPU_HOUR",
+        "PIQ_SERVING_GPU_COUNT",
+        "PIQ_SERVING_POWER_WATTS_PER_GPU",
         "PIQ_ARTIFACT_DIR",
         "PIQ_SERVING_SUMMARY_OUT",
+        "PIQ_SERVING_CAPTURE_TOKEN_DETAILS",
+        "PIQ_SERVING_TOP_LOGPROBS",
+        "PIQ_SERVING_COLLECT_HARDWARE_METRICS",
+        "PIQ_SERVING_REQUIRE_NATIVE_TELEMETRY",
+        "PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY",
+        "PIQ_VLLM_METRICS_URL",
+        "PIQ_SGLANG_METRICS_URL",
+        "PIQ_TENSORRT_LLM_METRICS_URL",
+        "PIQ_VLLM_HARDWARE_METRICS_URL",
+        "PIQ_SGLANG_HARDWARE_METRICS_URL",
+        "PIQ_TENSORRT_LLM_HARDWARE_METRICS_URL",
+        "PIQ_VLLM_FRAMEWORK_VERSION",
+        "PIQ_SGLANG_FRAMEWORK_VERSION",
+        "PIQ_TENSORRT_LLM_FRAMEWORK_VERSION",
+        "PIQ_VLLM_MODEL_REVISION",
+        "PIQ_SGLANG_MODEL_REVISION",
+        "PIQ_TENSORRT_LLM_MODEL_REVISION",
+        "PIQ_VLLM_IMAGE_TAG",
+        "PIQ_SGLANG_IMAGE_TAG",
+        "PIQ_TENSORRT_LLM_IMAGE_TAG",
+        "PIQ_VLLM_IMAGE_DIGEST",
+        "PIQ_SGLANG_IMAGE_DIGEST",
+        "PIQ_TENSORRT_LLM_IMAGE_DIGEST",
+        "PIQ_VLLM_SERVER_ARGS",
+        "PIQ_SGLANG_SERVER_ARGS",
+        "PIQ_TENSORRT_LLM_SERVER_ARGS",
+        "PIQ_VLLM_PROCESS_ID",
+        "PIQ_SGLANG_PROCESS_ID",
+        "PIQ_TENSORRT_LLM_PROCESS_ID",
+        "PIQ_VLLM_CONTAINER_ID",
+        "PIQ_SGLANG_CONTAINER_ID",
+        "PIQ_TENSORRT_LLM_CONTAINER_ID",
+        "PIQ_VLLM_POD_NAME",
+        "PIQ_SGLANG_POD_NAME",
+        "PIQ_TENSORRT_LLM_POD_NAME",
+        "PIQ_VLLM_NODE_NAME",
+        "PIQ_SGLANG_NODE_NAME",
+        "PIQ_TENSORRT_LLM_NODE_NAME",
+        "PIQ_VLLM_HOST_NAME",
+        "PIQ_SGLANG_HOST_NAME",
+        "PIQ_TENSORRT_LLM_HOST_NAME",
         "PIQ_TENSORRT_LLM_IMAGE",
         "PIQ_PYTHON_BIN",
         "PIQ_SERVING_BIN_DIR",
@@ -544,9 +589,13 @@ vllm:request_prefill_time_seconds_count{model_name="qwen"} 7
 vllm:request_prefill_time_seconds_sum{model_name="qwen"} 0.35
 vllm:request_decode_time_seconds_count{model_name="qwen"} 7
 vllm:request_decode_time_seconds_sum{model_name="qwen"} 0.7
+vllm:num_requests_running{model_name="qwen"} 1
+vllm:num_requests_waiting{model_name="qwen"} 0
 vllm:kv_cache_usage_perc{model_name="qwen"} 0.125
 vllm:prefix_cache_queries_total{model_name="qwen"} 20
 vllm:prefix_cache_hits_total{model_name="qwen"} 5
+vllm:prompt_tokens_cached_total{model_name="qwen"} 3
+vllm:request_prefill_kv_computed_tokens_sum{model_name="qwen"} 8
 """,
             """
 vllm:time_to_first_token_seconds_count{model_name="qwen"} 8
@@ -561,9 +610,13 @@ vllm:request_prefill_time_seconds_count{model_name="qwen"} 8
 vllm:request_prefill_time_seconds_sum{model_name="qwen"} 0.41
 vllm:request_decode_time_seconds_count{model_name="qwen"} 8
 vllm:request_decode_time_seconds_sum{model_name="qwen"} 0.82
+vllm:num_requests_running{model_name="qwen"} 1
+vllm:num_requests_waiting{model_name="qwen"} 0
 vllm:kv_cache_usage_perc{model_name="qwen"} 0.25
 vllm:prefix_cache_queries_total{model_name="qwen"} 30
 vllm:prefix_cache_hits_total{model_name="qwen"} 7
+vllm:prompt_tokens_cached_total{model_name="qwen"} 6
+vllm:request_prefill_kv_computed_tokens_sum{model_name="qwen"} 16
 """,
         ]
 
@@ -599,6 +652,16 @@ vllm:prefix_cache_hits_total{model_name="qwen"} 7
                 "engine": "vllm",
                 "baseUrl": "http://127.0.0.1:8000",
                 "metricsUrl": "http://127.0.0.1:8000/metrics",
+                "frameworkVersion": "vllm-test",
+                "modelRevision": "revision-a",
+                "imageTag": "vllm:test",
+                "imageDigest": "sha256:abc",
+                "serverArgs": ["vllm", "serve", laptop_smoke_model()],
+                "processId": "1234",
+                "containerId": "container-a",
+                "podName": "pod-a",
+                "nodeName": "node-a",
+                "hostName": "host-a",
             },
             request={
                 "model": laptop_smoke_model(),
@@ -624,6 +687,27 @@ vllm:prefix_cache_hits_total{model_name="qwen"} 7
         self.assertEqual(sample["nativeTelemetry"]["prefixCacheQueriesDelta"], 10)
         self.assertEqual(sample["nativeTelemetry"]["prefixCacheHitsDelta"], 2)
         self.assertAlmostEqual(sample["nativeTelemetry"]["cacheHitRate"], 0.2)
+        self.assertEqual(sample["runningRequests"], 1)
+        self.assertEqual(sample["waitingRequests"], 0)
+        self.assertAlmostEqual(sample["kvCacheUsagePct"], 0.25)
+        self.assertEqual(sample["promptTokensCachedDelta"], 3)
+        self.assertEqual(sample["promptTokensComputedDelta"], 8)
+        self.assertEqual(sample["engineVersion"], "vllm-test")
+        self.assertEqual(sample["modelRevision"], "revision-a")
+        self.assertEqual(sample["imageTag"], "vllm:test")
+        self.assertEqual(sample["imageDigest"], "sha256:abc")
+        self.assertIsInstance(sample["serverArgsSha256"], str)
+        self.assertEqual(sample["processId"], "1234")
+        self.assertEqual(sample["containerId"], "container-a")
+        self.assertEqual(sample["podName"], "pod-a")
+        self.assertEqual(sample["nodeName"], "node-a")
+        self.assertEqual(sample["hostName"], "host-a")
+        sample_rows = [row for row in result["measurements"] if row.get("surface") == "serving_request_sample"]
+        self.assertEqual(sample_rows[0]["nativeTtftMs"], 250)
+        self.assertEqual(sample_rows[0]["runningRequests"], 1)
+        self.assertEqual(sample_rows[0]["promptTokensCachedDelta"], 3)
+        self.assertEqual(sample_rows[0]["engineVersion"], "vllm-test")
+        self.assertEqual(sample_rows[0]["containerId"], "container-a")
         aggregate = result["measurements"][0]
         self.assertEqual(aggregate["nativeTelemetryAvailableCount"], 1)
         self.assertAlmostEqual(aggregate["avgQueueWaitMs"], 3)
@@ -636,12 +720,22 @@ vllm:prefix_cache_hits_total{model_name="qwen"} 7
 DCGM_FI_DEV_POWER_USAGE{gpu="0"} 100
 DCGM_FI_DEV_GPU_UTIL{gpu="0"} 40
 DCGM_FI_DEV_MEM_COPY_UTIL{gpu="0"} 12
+DCGM_FI_DEV_GPU_TEMP{gpu="0"} 60
+DCGM_FI_DEV_SM_CLOCK{gpu="0"} 1800
+DCGM_FI_DEV_MEM_CLOCK{gpu="0"} 5000
+DCGM_FI_DEV_FB_USED{gpu="0"} 4096
+DCGM_FI_DEV_FB_FREE{gpu="0"} 8192
 DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 1000
 """,
             """
 DCGM_FI_DEV_POWER_USAGE{gpu="0"} 120
 DCGM_FI_DEV_GPU_UTIL{gpu="0"} 50
 DCGM_FI_DEV_MEM_COPY_UTIL{gpu="0"} 20
+DCGM_FI_DEV_GPU_TEMP{gpu="0"} 61
+DCGM_FI_DEV_SM_CLOCK{gpu="0"} 1801
+DCGM_FI_DEV_MEM_CLOCK{gpu="0"} 5001
+DCGM_FI_DEV_FB_USED{gpu="0"} 4097
+DCGM_FI_DEV_FB_FREE{gpu="0"} 8191
 DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
 """,
         ]
@@ -730,6 +824,12 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertAlmostEqual(sample["avgPowerWatts"], 120)
         self.assertAlmostEqual(sample["avgPowerWattsPerGpu"], 120)
         self.assertAlmostEqual(sample["gpuUtilizationPct"], 50)
+        self.assertAlmostEqual(sample["memoryCopyUtilizationPct"], 20)
+        self.assertAlmostEqual(sample["gpuTemperatureC"], 61)
+        self.assertAlmostEqual(sample["smClockMHz"], 1801)
+        self.assertAlmostEqual(sample["memoryClockMHz"], 5001)
+        self.assertAlmostEqual(sample["fbUsedMiB"], 4097)
+        self.assertAlmostEqual(sample["fbFreeMiB"], 8191)
         self.assertAlmostEqual(sample["energyJoules"], 1.5)
         aggregate = result["measurements"][0]
         self.assertTrue(aggregate["dcgmGrounded"])
@@ -741,6 +841,10 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         token_rows = [row for row in result["measurements"] if row.get("surface") == "serving_token_timeline"]
         self.assertEqual(token_rows[0]["tokenId"], 101)
         self.assertAlmostEqual(token_rows[1]["tokenLogprob"], -0.2)
+        sample_rows = [row for row in result["measurements"] if row.get("surface") == "serving_request_sample"]
+        self.assertAlmostEqual(sample_rows[0]["gpuTemperatureC"], 61)
+        self.assertAlmostEqual(sample_rows[0]["smClockMHz"], 1801)
+        self.assertAlmostEqual(sample_rows[0]["fbUsedMiB"], 4097)
 
     def test_serving_smoke_runs_all_configured_engines(self):
         calls = []
@@ -957,6 +1061,34 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertIn("hardwareTelemetryAvailableCount must equal successCount", joined)
         self.assertIn("dcgmGrounded must be true", joined)
 
+    def test_serving_smoke_verify_proof_rejects_missing_required_native_telemetry(self):
+        proof_path, summary = self.write_full_serving_proof()
+        artifact_path = summary["submissions"][0]["artifactPath"]
+        with open(artifact_path, encoding="utf-8") as handle:
+            artifact = json.load(handle)
+        artifact["measurements"][0].update({
+            "nativeTelemetryRequired": True,
+            "nativeTelemetryAvailableCount": 0,
+            "metricCompleteness": 0.9,
+        })
+        artifact["samples"][0].update({
+            "nativeTelemetryAvailable": False,
+            "nativeTtftMs": None,
+            "queueWaitMs": None,
+            "kvCacheUsagePct": None,
+        })
+        with open(artifact_path, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2)
+            handle.write("\n")
+
+        verification = verify_proof_summary(proof_path)
+
+        self.assertFalse(verification["ok"])
+        joined = " ".join(verification["errors"])
+        self.assertIn("nativeTelemetryAvailableCount must equal successCount", joined)
+        self.assertIn("nativeTelemetryAvailable must be true", joined)
+        self.assertIn("nativeTtftMs must be numeric", joined)
+
     def test_serving_smoke_verify_proof_rejects_missing_required_token_details(self):
         proof_path, summary = self.write_full_serving_proof()
         artifact_path = summary["submissions"][0]["artifactPath"]
@@ -1129,6 +1261,24 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertIn("trtllm-serve", plan["engines"]["tensorrt-llm"]["serve"])
         self.assertIn("freeGiB", plan["storage"])
         self.assertEqual(plan["endpointEnv"]["PIQ_SGLANG_URL"], "http://127.0.0.1:30000")
+        self.assertEqual(plan["strictProof"]["mode"], "strict-recorded-smoke")
+        self.assertIn("strict-recorded-smoke", plan["strictProof"]["command"])
+        self.assertIn("PIQ_SERVING_USD_PER_GPU_HOUR", plan["strictProof"]["command"])
+        self.assertIn("PIQ_SERVING_REQUIRE_NATIVE_TELEMETRY=true", plan["strictProof"]["command"])
+        self.assertIn("PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true", plan["strictProof"]["command"])
+        self.assertIn("serving_request_samples", plan["strictProof"]["dashboardSurfaces"])
+        self.assertIn("serving_token_timeline", plan["strictProof"]["dashboardSurfaces"])
+
+    def test_serving_smoke_parser_reads_pricing_env(self):
+        os.environ["PIQ_SERVING_USD_PER_GPU_HOUR"] = "2.5"
+        os.environ["PIQ_SERVING_GPU_COUNT"] = "4"
+        os.environ["PIQ_SERVING_POWER_WATTS_PER_GPU"] = "700"
+
+        args = serving_smoke_parser().parse_args([])
+
+        self.assertEqual(args.usd_per_gpu_hour, 2.5)
+        self.assertEqual(args.gpu_count, 4)
+        self.assertEqual(args.power_watts_per_gpu, 700)
 
     def test_serving_smoke_diagnostics_reports_cache_ports_and_blockers(self):
         old_home = os.environ.get("HOME")

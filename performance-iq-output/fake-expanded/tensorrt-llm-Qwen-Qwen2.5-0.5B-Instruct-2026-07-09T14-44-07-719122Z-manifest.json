@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "performance-iq.producer-manifest.v1",
+  "runClass": "measured",
+  "sourceType": "other-measured-producer",
+  "generatedAtUtc": "2026-07-09T14:44:07.722609Z",
+  "producer": {
+    "repo": "performance-iq-sdk",
+    "tool": "tensorrt-llm-serving-producer",
+    "commitSha": "localservingproducer"
+  },
+  "campaign": {
+    "campaignId": "serving-tensorrt-llm-fake-expanded-20260709T144407Z",
+    "runId": "serving-tensorrt-llm-fake-expanded-20260709T144407Z-run",
+    "capturedAtUtc": "2026-07-09T14:44:07.719122Z",
+    "completedAtUtc": "2026-07-09T14:44:07.722601Z"
+  },
+  "workload": {
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "hardware": "local serving endpoint",
+    "operatingPoint": "serving-smoke",
+    "scenario": "Real endpoint smoke for TensorRT-LLM"
+  },
+  "runtime": {
+    "imageDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "imageTag": "fake-serving:latest",
+    "framework": "TensorRT-LLM"
+  },
+  "artifacts": [
+    {
+      "kind": "normalized-summary",
+      "path": "./performance-iq-output/fake-expanded/tensorrt-llm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T14-44-07-719122Z.json",
+      "sha256": "de1e0fb19fb2a2b29fa8f7384cde183c63cd480fd16c7bad1fe7aa8d9100cc2d",
+      "sizeBytes": 23592
+    },
+    {
+      "kind": "operator-full-serving-raw",
+      "path": "./performance-iq-output/fake-expanded/tensorrt-llm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T14-44-07-719122Z-operator-full.json",
+      "sha256": "d24353617752f9c956a575a3073307e0ce6bc67bf79622f08e75ed5dfe5df128",
+      "sizeBytes": 12415
+    }
+  ],
+  "store": {
+    "sourceTables": [
+      "platform_store.object_store.producer_runner_result_bundles",
+      "platform_store.iceberg.intake_store.producer_runner_results"
+    ],
+    "modelTables": [
+      "model_store.sdk_pending_ingest"
+    ],
+    "rowProof": [
+      {
+        "table": "model_store.sdk_pending_ingest",
+        "campaignId": "serving-tensorrt-llm-fake-expanded-20260709T144407Z",
+        "rowCount": 5,
+        "latestCapturedAtUtc": "2026-07-09T14:44:07.719122Z"
+      }
+    ]
+  },
+  "platform": {
+    "decisionBriefPath": "performance-iq://serving-producer",
+    "requestTraceIds": [
+      "piq-tensorrt-llm-serving-tensorrt-llm-fake-expanded-20260709T144407Z-run-request-1"
+    ]
+  },
+  "methodology": "TensorRT-LLM producer sent 1 OpenAI-compatible chat completion request(s) with x-performance-iq-* trace headers; default metrics come from client-side streaming SSE timings, response usage fields, response token logprobs/IDs when exposed, native telemetry when exposed, and DCGM hardware metrics when a hardware metrics endpoint is configured.",
+  "limitations": [
+    "Serving producer captures client stream timing, request-path, usage, latency, token logprobs/IDs when exposed, and provenance; hardware-level DCGM counters require a reachable DCGM/Prometheus metrics endpoint or configured hardware telemetry."
+  ],
+  "confidentiality": "operator-full"
+}

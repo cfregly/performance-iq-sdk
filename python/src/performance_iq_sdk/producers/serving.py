@@ -34,6 +34,7 @@ HttpGetText = Callable[[str, dict[str, str]], str]
 
 PROMETHEUS_SAMPLE_RE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+([-+0-9.eE]+)")
 PROMETHEUS_LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"')
+_TOKENIZER_CACHE: dict[str, Any] = {}
 
 
 def laptop_smoke_model() -> str:
@@ -69,6 +70,46 @@ def _sha256_text(value: str) -> str:
 
 def _sha256_json(value: Any) -> str:
     return _sha256_text(_stable_json(value))
+
+
+def _sha256_optional_json(value: Any) -> str | None:
+    return _sha256_json(value) if value is not None else None
+
+
+def _nested_value(source: dict[str, Any], parent: str, *keys: str) -> Any:
+    candidate = source.get(parent)
+    if not isinstance(candidate, dict):
+        return None
+    for key in keys:
+        value = candidate.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _engine_provenance_value(engine: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = engine.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _runtime_provenance(engine: dict[str, Any], native_telemetry: dict[str, Any] | None = None) -> dict[str, Any]:
+    telemetry = native_telemetry if isinstance(native_telemetry, dict) else {}
+    server_args = telemetry.get("serverArgs", engine.get("serverArgs"))
+    return {
+        "engineVersion": telemetry.get("engineVersion", engine.get("frameworkVersion")),
+        "modelRevision": telemetry.get("modelRevision", engine.get("modelRevision")),
+        "imageTag": _engine_provenance_value(engine, "imageTag", "containerImageTag"),
+        "imageDigest": _engine_provenance_value(engine, "imageDigest", "containerImageDigest"),
+        "serverArgsSha256": _sha256_optional_json(server_args),
+        "processId": _engine_provenance_value(engine, "processId", "pid") or _nested_value(engine, "process", "pid", "processId"),
+        "containerId": _engine_provenance_value(engine, "containerId") or _nested_value(engine, "container", "id", "containerId"),
+        "podName": _engine_provenance_value(engine, "podName") or _nested_value(engine, "container", "podName"),
+        "nodeName": _engine_provenance_value(engine, "nodeName") or _nested_value(engine, "container", "nodeName"),
+        "hostName": _engine_provenance_value(engine, "hostName", "hostname") or _nested_value(engine, "process", "hostName", "hostname"),
+    }
 
 
 def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> ServingPostResult:
@@ -482,9 +523,9 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         "queueWaitMs": queue_wait_ms,
         "prefillMs": prefill_ms,
         "decodeMs": decode_ms,
-        "runningRequests": _metric_value(after_metrics, ["vllm:num_requests_running", "sglang:num_running_reqs", "sglang_num_running_reqs"]),
-        "waitingRequests": _metric_value(after_metrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs"]),
-        "kvCacheUsagePct": _metric_value(after_metrics, ["vllm:kv_cache_usage_perc", "sglang:token_usage", "sglang_token_usage"]),
+        "runningRequests": _metric_value(after_metrics, ["vllm:num_requests_running", "sglang:num_running_reqs", "sglang_num_running_reqs", "trtllm:num_requests_running", "trtllm_num_requests_running"]),
+        "waitingRequests": _metric_value(after_metrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs", "trtllm:num_requests_waiting", "trtllm_num_requests_waiting"]),
+        "kvCacheUsagePct": _metric_value(after_metrics, ["vllm:kv_cache_usage_perc", "sglang:token_usage", "sglang_token_usage", "trtllm:kv_cache_usage_perc", "trtllm_kv_cache_usage_perc"]),
         "prefixCacheQueriesDelta": prefix_queries,
         "prefixCacheHitsDelta": prefix_hits,
         "cacheHitRate": cache_hit_rate,
@@ -492,11 +533,15 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
             "vllm:prompt_tokens_cached_total",
             "sglang:prompt_tokens_cached_total",
             "sglang_prompt_tokens_cached_total",
+            "trtllm:prompt_tokens_cached_total",
+            "trtllm_prompt_tokens_cached_total",
         ]),
         "promptTokensComputedDelta": _counter_delta(before_metrics, after_metrics, [
             "vllm:request_prefill_kv_computed_tokens_sum",
             "sglang:request_prefill_kv_computed_tokens_sum",
             "sglang_request_prefill_kv_computed_tokens_sum",
+            "trtllm:request_prefill_kv_computed_tokens_sum",
+            "trtllm_request_prefill_kv_computed_tokens_sum",
         ]),
     }
     available_values = {key: value for key, value in values.items() if value is not None}
@@ -575,7 +620,91 @@ def _extract_token_id(item: dict[str, Any]) -> int | None:
     return None
 
 
-def _sanitize_top_logprobs(value: Any) -> list[dict[str, Any]]:
+def _extract_token_id_with_source(item: dict[str, Any], token: str, engine: dict[str, Any], request: dict[str, Any]) -> tuple[int | None, str | None]:
+    token_id = _extract_token_id(item)
+    if token_id is not None:
+        return token_id, "response-logprobs"
+
+    token_id_map = engine.get("tokenIdMap") or engine.get("token_id_map")
+    if isinstance(token_id_map, dict) and token in token_id_map:
+        mapped = token_id_map[token]
+        if isinstance(mapped, int):
+            return mapped, "configured-token-id-map"
+        if isinstance(mapped, str) and mapped.isdigit():
+            return int(mapped), "configured-token-id-map"
+
+    resolver = engine.get("tokenIdResolver") or engine.get("token_id_resolver")
+    if callable(resolver):
+        resolved = resolver(token, item, engine, request)
+        if isinstance(resolved, int):
+            return resolved, "configured-token-id-resolver"
+        if isinstance(resolved, str) and resolved.isdigit():
+            return int(resolved), "configured-token-id-resolver"
+
+    tokenizer = engine.get("tokenizer")
+    if tokenizer is not None:
+        resolved = _token_id_from_tokenizer(tokenizer, token)
+        if resolved is not None:
+            return resolved, "configured-tokenizer"
+
+    tokenizer_model = engine.get("tokenizerModel") or engine.get("tokenizer_model") or request.get("tokenizerModel")
+    if not tokenizer_model and (engine.get("resolveTokenIdsWithTokenizer") or request.get("resolveTokenIdsWithTokenizer")):
+        tokenizer_model = request.get("model")
+    if isinstance(tokenizer_model, str) and tokenizer_model:
+        tokenizer = _load_hf_tokenizer(tokenizer_model, engine)
+        if tokenizer is not None:
+            resolved = _token_id_from_tokenizer(tokenizer, token)
+            if resolved is not None:
+                return resolved, "hf-tokenizer"
+    return None, None
+
+
+def _load_hf_tokenizer(model: str, engine: dict[str, Any]) -> Any | None:
+    if model in _TOKENIZER_CACHE:
+        return _TOKENIZER_CACHE[model]
+    try:
+        from transformers import AutoTokenizer  # type: ignore[import-not-found]
+    except Exception:
+        return None
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model,
+            trust_remote_code=bool(engine.get("tokenizerTrustRemoteCode") or engine.get("trustRemoteCode")),
+        )
+    except Exception:
+        return None
+    _TOKENIZER_CACHE[model] = tokenizer
+    return tokenizer
+
+
+def _token_id_from_tokenizer(tokenizer: Any, token: str) -> int | None:
+    if not token:
+        return None
+    try:
+        if hasattr(tokenizer, "convert_tokens_to_ids"):
+            value = tokenizer.convert_tokens_to_ids(token)
+            unknown_id = getattr(tokenizer, "unk_token_id", None)
+            if isinstance(value, int) and value >= 0 and value != unknown_id:
+                return value
+    except Exception:
+        pass
+    try:
+        encoded = tokenizer.encode(token, add_special_tokens=False)
+        if isinstance(encoded, list) and len(encoded) == 1 and isinstance(encoded[0], int):
+            return encoded[0]
+    except Exception:
+        pass
+    try:
+        encoded = tokenizer(token, add_special_tokens=False)
+        input_ids = encoded.get("input_ids") if isinstance(encoded, dict) else None
+        if isinstance(input_ids, list) and len(input_ids) == 1 and isinstance(input_ids[0], int):
+            return input_ids[0]
+    except Exception:
+        pass
+    return None
+
+
+def _sanitize_top_logprobs(value: Any, engine: dict[str, Any], request: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     sanitized = []
@@ -583,16 +712,18 @@ def _sanitize_top_logprobs(value: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         token = item.get("token") if isinstance(item.get("token"), str) else ""
+        token_id, token_id_source = _extract_token_id_with_source(item, token, engine, request)
         sanitized.append({
             "tokenSha256": _sha256_text(token) if token else None,
             "tokenBytes": len(token.encode("utf-8")) if token else None,
-            "tokenId": _extract_token_id(item),
+            "tokenId": token_id,
+            "tokenIdSource": token_id_source,
             "logprob": item.get("logprob") if isinstance(item.get("logprob"), (int, float)) else None,
         })
     return sanitized
 
 
-def _choice_token_details(body: dict[str, Any]) -> list[dict[str, Any]]:
+def _choice_token_details(body: dict[str, Any], engine: dict[str, Any], request: dict[str, Any]) -> list[dict[str, Any]]:
     logprobs = _choice(body).get("logprobs")
     if not isinstance(logprobs, dict):
         return []
@@ -605,13 +736,15 @@ def _choice_token_details(body: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         token = item.get("token") if isinstance(item.get("token"), str) else ""
         token_bytes = item.get("bytes") if isinstance(item.get("bytes"), list) else None
+        token_id, token_id_source = _extract_token_id_with_source(item, token, engine, request)
         details.append({
             "tokenText": token,
             "tokenSha256": _sha256_text(token) if token else None,
             "tokenBytes": len(token.encode("utf-8")) if token else (len(token_bytes) if token_bytes else None),
-            "tokenId": _extract_token_id(item),
+            "tokenId": token_id,
+            "tokenIdSource": token_id_source,
             "logprob": item.get("logprob") if isinstance(item.get("logprob"), (int, float)) else None,
-            "topLogprobs": _sanitize_top_logprobs(item.get("top_logprobs", item.get("topLogprobs"))),
+            "topLogprobs": _sanitize_top_logprobs(item.get("top_logprobs", item.get("topLogprobs")), engine, request),
         })
     return details
 
@@ -635,6 +768,7 @@ def _token_detail_summary(details: list[dict[str, Any]], requested: bool) -> dic
             "logprobsAvailable": False,
             "tokenDetailCount": 0,
             "tokenDetailSource": "requested-not-exposed" if requested else "not-requested",
+            "tokenIdSource": None,
         }
     return {
         "tokenDetailsAvailable": True,
@@ -642,6 +776,11 @@ def _token_detail_summary(details: list[dict[str, Any]], requested: bool) -> dic
         "logprobsAvailable": any(detail.get("logprob") is not None for detail in details),
         "tokenDetailCount": len(details),
         "tokenDetailSource": "response-logprobs",
+        "tokenIdSource": "+".join(dict.fromkeys(
+            str(detail.get("tokenIdSource"))
+            for detail in details
+            if detail.get("tokenId") is not None and detail.get("tokenIdSource")
+        )) or None,
     }
 
 
@@ -741,6 +880,7 @@ def _send_streaming_chat_completion(
             _native_metrics_delta(engine, native_before, native_after),
         )
         hardware_telemetry = _hardware_metrics_delta(engine, hardware_before, hardware_after)
+        runtime_provenance = _runtime_provenance(engine, native_telemetry)
         first_chunk = events[0] if events else None
         first_output = output_chunks[0] if output_chunks else None
         last_output = output_chunks[-1] if output_chunks else None
@@ -841,14 +981,36 @@ def _send_streaming_chat_completion(
             "nativeTelemetryAvailable": bool(native_telemetry.get("available")),
             "hardwareTelemetry": hardware_telemetry,
             "hardwareTelemetryAvailable": bool(hardware_telemetry.get("available")),
+            "nativeTelemetrySource": native_telemetry.get("source"),
+            "nativeMetricsUrl": native_telemetry.get("metricsUrl"),
+            "nativeTtftMs": native_telemetry.get("nativeTtftMs"),
+            "nativeTpotMs": native_telemetry.get("nativeTpotMs"),
+            "nativeE2eLatencyMs": native_telemetry.get("nativeE2eLatencyMs"),
+            "nativeInterTokenLatencyMs": native_telemetry.get("nativeInterTokenLatencyMs"),
+            "runningRequests": native_telemetry.get("runningRequests"),
+            "waitingRequests": native_telemetry.get("waitingRequests"),
+            "kvCacheUsagePct": native_telemetry.get("kvCacheUsagePct"),
+            "cacheHitRate": native_telemetry.get("cacheHitRate"),
+            "prefixCacheQueriesDelta": native_telemetry.get("prefixCacheQueriesDelta"),
+            "prefixCacheHitsDelta": native_telemetry.get("prefixCacheHitsDelta"),
+            "promptTokensCachedDelta": native_telemetry.get("promptTokensCachedDelta"),
+            "promptTokensComputedDelta": native_telemetry.get("promptTokensComputedDelta"),
+            "hardwareTelemetrySource": hardware_telemetry.get("source"),
+            "hardwareMetricsUrl": hardware_telemetry.get("metricsUrl"),
             "avgPowerWatts": hardware_telemetry.get("powerWatts"),
             "avgPowerWattsPerGpu": hardware_telemetry.get("powerWattsPerGpu"),
             "gpuUtilizationPct": hardware_telemetry.get("gpuUtilizationPct"),
             "memoryCopyUtilizationPct": hardware_telemetry.get("memoryCopyUtilizationPct"),
+            "gpuTemperatureC": hardware_telemetry.get("gpuTemperatureC"),
+            "smClockMHz": hardware_telemetry.get("smClockMHz"),
+            "memoryClockMHz": hardware_telemetry.get("memoryClockMHz"),
+            "fbUsedMiB": hardware_telemetry.get("fbUsedMiB"),
+            "fbFreeMiB": hardware_telemetry.get("fbFreeMiB"),
             "energyJoules": hardware_telemetry.get("energyJoules"),
             "queueWaitMs": native_telemetry.get("queueWaitMs"),
             "prefillMs": native_telemetry.get("prefillMs"),
             "decodeMs": native_telemetry.get("decodeMs"),
+            **runtime_provenance,
             **token_summary,
             "tokenTimeline": token_timeline,
             "error": None if 200 <= status < 300 else json.dumps(last_body),
@@ -859,11 +1021,15 @@ def _send_streaming_chat_completion(
                 "responseEvents": events,
                 "outputText": output_text,
                 "tokenDetails": raw_token_details,
+                "nativeTelemetry": native_telemetry,
                 "hardwareTelemetry": hardware_telemetry,
+                "runtimeProvenance": runtime_provenance,
             },
         }
     except Exception as exc:
         e2e_latency_ms = (time.perf_counter() - started) * 1000
+        native_telemetry = _native_telemetry(engine)
+        hardware_telemetry = _hardware_telemetry(engine)
         return {
             "requestId": request_id,
             "requestIndex": request_index,
@@ -886,10 +1052,13 @@ def _send_streaming_chat_completion(
             "totalTokens": 0,
             "ttftSource": "client-stream-content",
             "streaming": True,
-            "nativeTelemetry": _native_telemetry(engine),
+            "nativeTelemetry": native_telemetry,
             "nativeTelemetryAvailable": False,
-            "hardwareTelemetry": _hardware_telemetry(engine),
+            "hardwareTelemetry": hardware_telemetry,
             "hardwareTelemetryAvailable": False,
+            "nativeTelemetrySource": native_telemetry.get("source"),
+            "hardwareTelemetrySource": hardware_telemetry.get("source"),
+            **_runtime_provenance(engine, native_telemetry),
             "tokenDetailsAvailable": False,
             "tokenIdsAvailable": False,
             "logprobsAvailable": False,
@@ -937,6 +1106,7 @@ def _send_non_streaming_chat_completion(
             _native_metrics_delta(engine, native_before, native_after),
         )
         hardware_telemetry = _hardware_metrics_delta(engine, hardware_before, hardware_after)
+        runtime_provenance = _runtime_provenance(engine, native_telemetry)
         raw_token_details = _choice_token_details(body)
         token_summary = _token_detail_summary(raw_token_details, token_details_requested)
         token_timeline = [
@@ -991,14 +1161,36 @@ def _send_non_streaming_chat_completion(
             "nativeTelemetryAvailable": bool(native_telemetry.get("available")),
             "hardwareTelemetry": hardware_telemetry,
             "hardwareTelemetryAvailable": bool(hardware_telemetry.get("available")),
+            "nativeTelemetrySource": native_telemetry.get("source"),
+            "nativeMetricsUrl": native_telemetry.get("metricsUrl"),
+            "nativeTtftMs": native_telemetry.get("nativeTtftMs"),
+            "nativeTpotMs": native_telemetry.get("nativeTpotMs"),
+            "nativeE2eLatencyMs": native_telemetry.get("nativeE2eLatencyMs"),
+            "nativeInterTokenLatencyMs": native_telemetry.get("nativeInterTokenLatencyMs"),
+            "runningRequests": native_telemetry.get("runningRequests"),
+            "waitingRequests": native_telemetry.get("waitingRequests"),
+            "kvCacheUsagePct": native_telemetry.get("kvCacheUsagePct"),
+            "cacheHitRate": native_telemetry.get("cacheHitRate"),
+            "prefixCacheQueriesDelta": native_telemetry.get("prefixCacheQueriesDelta"),
+            "prefixCacheHitsDelta": native_telemetry.get("prefixCacheHitsDelta"),
+            "promptTokensCachedDelta": native_telemetry.get("promptTokensCachedDelta"),
+            "promptTokensComputedDelta": native_telemetry.get("promptTokensComputedDelta"),
+            "hardwareTelemetrySource": hardware_telemetry.get("source"),
+            "hardwareMetricsUrl": hardware_telemetry.get("metricsUrl"),
             "avgPowerWatts": hardware_telemetry.get("powerWatts"),
             "avgPowerWattsPerGpu": hardware_telemetry.get("powerWattsPerGpu"),
             "gpuUtilizationPct": hardware_telemetry.get("gpuUtilizationPct"),
             "memoryCopyUtilizationPct": hardware_telemetry.get("memoryCopyUtilizationPct"),
+            "gpuTemperatureC": hardware_telemetry.get("gpuTemperatureC"),
+            "smClockMHz": hardware_telemetry.get("smClockMHz"),
+            "memoryClockMHz": hardware_telemetry.get("memoryClockMHz"),
+            "fbUsedMiB": hardware_telemetry.get("fbUsedMiB"),
+            "fbFreeMiB": hardware_telemetry.get("fbFreeMiB"),
             "energyJoules": hardware_telemetry.get("energyJoules"),
             "queueWaitMs": native_telemetry.get("queueWaitMs"),
             "prefillMs": native_telemetry.get("prefillMs"),
             "decodeMs": native_telemetry.get("decodeMs"),
+            **runtime_provenance,
             **token_summary,
             "tokenTimeline": token_timeline,
             "error": None if 200 <= status < 300 else json.dumps(body),
@@ -1009,11 +1201,15 @@ def _send_non_streaming_chat_completion(
                 "responseBody": body,
                 "outputText": output_text,
                 "tokenDetails": raw_token_details,
+                "nativeTelemetry": native_telemetry,
                 "hardwareTelemetry": hardware_telemetry,
+                "runtimeProvenance": runtime_provenance,
             },
         }
     except Exception as exc:
         latency_ms = (time.perf_counter() - started) * 1000
+        native_telemetry = _native_telemetry(engine)
+        hardware_telemetry = _hardware_telemetry(engine)
         return {
             "requestId": request_id,
             "requestIndex": request_index,
@@ -1037,10 +1233,13 @@ def _send_non_streaming_chat_completion(
             "tokenCountSource": "none",
             "ttftSource": "not-streamed",
             "streaming": False,
-            "nativeTelemetry": _native_telemetry(engine),
+            "nativeTelemetry": native_telemetry,
             "nativeTelemetryAvailable": False,
-            "hardwareTelemetry": _hardware_telemetry(engine),
+            "hardwareTelemetry": hardware_telemetry,
             "hardwareTelemetryAvailable": False,
+            "nativeTelemetrySource": native_telemetry.get("source"),
+            "hardwareTelemetrySource": hardware_telemetry.get("source"),
+            **_runtime_provenance(engine, native_telemetry),
             "tokenDetailsAvailable": False,
             "tokenIdsAvailable": False,
             "logprobsAvailable": False,
@@ -1247,10 +1446,31 @@ def _build_measurements(
             "outputSha256": sample.get("outputSha256"),
             "nativeTelemetryAvailable": sample.get("nativeTelemetryAvailable"),
             "hardwareTelemetryAvailable": sample.get("hardwareTelemetryAvailable"),
+            "nativeTelemetrySource": sample.get("nativeTelemetrySource"),
+            "nativeMetricsUrl": sample.get("nativeMetricsUrl"),
+            "nativeTtftMs": sample.get("nativeTtftMs"),
+            "nativeTpotMs": sample.get("nativeTpotMs"),
+            "nativeE2eLatencyMs": sample.get("nativeE2eLatencyMs"),
+            "nativeInterTokenLatencyMs": sample.get("nativeInterTokenLatencyMs"),
+            "runningRequests": sample.get("runningRequests"),
+            "waitingRequests": sample.get("waitingRequests"),
+            "kvCacheUsagePct": sample.get("kvCacheUsagePct"),
+            "cacheHitRate": sample.get("cacheHitRate"),
+            "prefixCacheQueriesDelta": sample.get("prefixCacheQueriesDelta"),
+            "prefixCacheHitsDelta": sample.get("prefixCacheHitsDelta"),
+            "promptTokensCachedDelta": sample.get("promptTokensCachedDelta"),
+            "promptTokensComputedDelta": sample.get("promptTokensComputedDelta"),
+            "hardwareTelemetrySource": sample.get("hardwareTelemetrySource"),
+            "hardwareMetricsUrl": sample.get("hardwareMetricsUrl"),
             "avgPowerWatts": sample.get("avgPowerWatts"),
             "avgPowerWattsPerGpu": sample.get("avgPowerWattsPerGpu"),
             "gpuUtilizationPct": sample.get("gpuUtilizationPct"),
             "memoryCopyUtilizationPct": sample.get("memoryCopyUtilizationPct"),
+            "gpuTemperatureC": sample.get("gpuTemperatureC"),
+            "smClockMHz": sample.get("smClockMHz"),
+            "memoryClockMHz": sample.get("memoryClockMHz"),
+            "fbUsedMiB": sample.get("fbUsedMiB"),
+            "fbFreeMiB": sample.get("fbFreeMiB"),
             "energyJoules": sample.get("energyJoules"),
             "tokenDetailsAvailable": sample.get("tokenDetailsAvailable"),
             "tokenIdsAvailable": sample.get("tokenIdsAvailable"),
@@ -1260,6 +1480,16 @@ def _build_measurements(
             "queueWaitMs": sample.get("queueWaitMs"),
             "prefillMs": sample.get("prefillMs"),
             "decodeMs": sample.get("decodeMs"),
+            "engineVersion": sample.get("engineVersion"),
+            "modelRevision": sample.get("modelRevision"),
+            "imageTag": sample.get("imageTag"),
+            "imageDigest": sample.get("imageDigest"),
+            "serverArgsSha256": sample.get("serverArgsSha256"),
+            "processId": sample.get("processId"),
+            "containerId": sample.get("containerId"),
+            "podName": sample.get("podName"),
+            "nodeName": sample.get("nodeName"),
+            "hostName": sample.get("hostName"),
             "latestCapturedAtUtc": captured_at_utc,
         })
         for chunk in sample.get("tokenTimeline") or []:
