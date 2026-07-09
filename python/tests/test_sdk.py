@@ -933,6 +933,63 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertFalse(verification["ok"])
         self.assertIn("measurement runtimeFramework must be vLLM", " ".join(verification["errors"]))
 
+    def test_serving_smoke_verify_proof_rejects_missing_required_hardware_telemetry(self):
+        proof_path, summary = self.write_full_serving_proof()
+        artifact_path = summary["submissions"][0]["artifactPath"]
+        with open(artifact_path, encoding="utf-8") as handle:
+            artifact = json.load(handle)
+        artifact["measurements"][0].update({
+            "hardwareTelemetryRequired": True,
+            "hardwareTelemetryAvailableCount": 0,
+            "dcgmGrounded": False,
+            "metricCompleteness": 0.9,
+        })
+        artifact["samples"][0]["hardwareTelemetryAvailable"] = False
+        artifact["hardwareTelemetry"] = [{"requestId": artifact["samples"][0]["requestId"], "available": False}]
+        with open(artifact_path, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2)
+            handle.write("\n")
+
+        verification = verify_proof_summary(proof_path)
+
+        self.assertFalse(verification["ok"])
+        joined = " ".join(verification["errors"])
+        self.assertIn("hardwareTelemetryAvailableCount must equal successCount", joined)
+        self.assertIn("dcgmGrounded must be true", joined)
+
+    def test_serving_smoke_verify_proof_rejects_missing_required_token_details(self):
+        proof_path, summary = self.write_full_serving_proof()
+        artifact_path = summary["submissions"][0]["artifactPath"]
+        with open(artifact_path, encoding="utf-8") as handle:
+            artifact = json.load(handle)
+        artifact["measurements"][0].update({
+            "tokenDetailsRequired": True,
+            "tokenDetailsAvailableCount": 0,
+            "tokenIdsAvailableCount": 0,
+            "logprobsAvailableCount": 0,
+            "metricCompleteness": 0.9,
+        })
+        artifact["samples"][0].update({
+            "tokenDetailsAvailable": False,
+            "tokenIdsAvailable": False,
+            "logprobsAvailable": False,
+            "tokenDetailSource": "requested-not-exposed",
+        })
+        for row in artifact["tokenTimeline"]:
+            row["tokenId"] = None
+            row["tokenLogprob"] = None
+            row["tokenDetailSource"] = "requested-not-exposed"
+        with open(artifact_path, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2)
+            handle.write("\n")
+
+        verification = verify_proof_summary(proof_path)
+
+        self.assertFalse(verification["ok"])
+        joined = " ".join(verification["errors"])
+        self.assertIn("tokenIdsAvailableCount must equal successCount", joined)
+        self.assertIn("tokenTimeline[0].tokenId must be an integer", joined)
+
     def test_serving_smoke_verify_proof_rejects_missing_dashboard_rows(self):
         proof_path, _summary = self.write_full_serving_proof()
         self.rewrite_proof_dashboard(proof_path, lambda dashboard: dashboard["rows"].pop("price_performance"))
