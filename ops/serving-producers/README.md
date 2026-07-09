@@ -243,9 +243,11 @@ queries the dashboard surfaces, writes `PIQ_SERVING_EVENT_LOG`, and writes the
 proof summary.
 Use `strict-smoke` or `strict-recorded-smoke` for product proof: these require
 token IDs/logprobs, token ID provenance, native engine telemetry, DCGM hardware
-counters, dashboard rows, request receipts, and configured GPU cost. These
-strict wrapper modes also run the saved-proof verifier after capture and fail
-unless `telemetryCoverage.allProven` is true.
+counters, dashboard rows, request receipts, and configured GPU cost. Use
+`strict-smoke` when another gateway/proxy writes receipts to
+`PIQ_SERVING_RECEIPT_LOG`; use `strict-recorded-smoke` to start managed
+in-process receipt proxies. These strict wrapper modes also run the saved-proof
+verifier after capture and fail unless `telemetryCoverage.allProven` is true.
 
 For CI and local contract checks without real runtimes, use deterministic fake
 engines:

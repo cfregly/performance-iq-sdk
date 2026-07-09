@@ -21,7 +21,7 @@ Modes:
   diagnostics  Print read-only host, cache, port, and endpoint diagnostics.
   preflight    Check all configured /v1/models endpoints for the smoke model.
   smoke        Submit producer runs and verify dashboard query surfaces.
-  strict-smoke Submit runs with token, native telemetry, and DCGM proof gates.
+  strict-smoke Submit strict runs using an external receipt log.
   recorded-smoke
                Start receipt proxies, submit runs, and verify dashboards.
   strict-recorded-smoke
@@ -161,7 +161,7 @@ case "$mode" in
     ;;
   strict-smoke)
     require_strict_pricing "$@"
-    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --event-log "$event_log" "${strict_common[@]}" "${strict_proof_gate[@]}" "$@"
+    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --receipt-log "$receipt_log" --event-log "$event_log" "${strict_common[@]}" "${strict_proof_gate[@]}" "$@"
     ;;
   recorded-smoke)
     exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --record-receipts --receipt-log "$receipt_log" --event-log "$event_log" "$@"
