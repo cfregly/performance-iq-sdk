@@ -204,6 +204,18 @@ PYTHONPATH=python/src python -m performance_iq_sdk.serving_smoke \
   --model Qwen/Qwen2.5-0.5B-Instruct
 ```
 
+To print read-only setup diagnostics before installing or deleting anything:
+
+```bash
+PYTHONPATH=python/src python -m performance_iq_sdk.serving_smoke \
+  --diagnostics-only \
+  --model Qwen/Qwen2.5-0.5B-Instruct
+```
+
+Diagnostics include local runtime availability, default port listeners, free
+disk, environment presence flags, and Hugging Face cache candidates for the
+configured smoke model.
+
 Reference launch shapes for the same smoke model:
 
 ```bash

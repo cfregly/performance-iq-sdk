@@ -5,12 +5,14 @@ usage() {
   cat <<'USAGE'
 Usage:
   bash ops/serving-producers/run-smoke.sh launch-plan [extra args...]
+  bash ops/serving-producers/run-smoke.sh diagnostics [extra args...]
   bash ops/serving-producers/run-smoke.sh preflight [extra args...]
   bash ops/serving-producers/run-smoke.sh smoke [extra args...]
   bash ops/serving-producers/run-smoke.sh no-submit [extra args...]
 
 Modes:
   launch-plan  Print host-aware launch commands.
+  diagnostics  Print read-only host, cache, port, and endpoint diagnostics.
   preflight    Check all configured /v1/models endpoints for the smoke model.
   smoke        Submit producer runs and verify dashboard query surfaces.
   no-submit    Send requests and write artifacts without submitting runs.
@@ -19,7 +21,7 @@ USAGE
 
 mode="${1:-preflight}"
 case "$mode" in
-  launch-plan|preflight|smoke|no-submit)
+  launch-plan|diagnostics|preflight|smoke|no-submit)
     shift || true
     ;;
   -h|--help|help)
@@ -50,6 +52,9 @@ common=(
 case "$mode" in
   launch-plan)
     exec python -m performance_iq_sdk.serving_smoke --launch-plan-only --model "$model" "$@"
+    ;;
+  diagnostics)
+    exec python -m performance_iq_sdk.serving_smoke --diagnostics-only "${common[@]}" "$@"
     ;;
   preflight)
     exec python -m performance_iq_sdk.serving_smoke --preflight-only "${common[@]}" "$@"

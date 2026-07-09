@@ -79,6 +79,14 @@ Use the launch plan for local vLLM and SGLang source-build commands:
 bash ops/serving-producers/run-smoke.sh launch-plan
 ```
 
+Before installing or deleting anything, run diagnostics to see port listeners,
+local runtime availability, free disk, and Hugging Face cache candidates for
+the smoke model:
+
+```bash
+bash ops/serving-producers/run-smoke.sh diagnostics
+```
+
 TensorRT-LLM requires a Linux x86_64/aarch64 target with supported NVIDIA GPUs.
 For a Mac workflow, run TensorRT-LLM remotely and set
 `PIQ_TENSORRT_LLM_URL` to the reachable OpenAI-compatible endpoint.

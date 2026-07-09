@@ -8,6 +8,7 @@ import os
 import platform
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import urllib.error
@@ -45,6 +46,7 @@ ENGINE_DEFAULT_PORT = {
     "tensorrt-llm": 8001,
 }
 LOW_FREE_SPACE_BYTES = 30 * 1024 * 1024 * 1024
+SIZE_TIMEOUT_SECONDS = 15
 
 
 def _utc_slug() -> str:
@@ -134,6 +136,204 @@ def storage_probe(path: str | None = None) -> dict[str, Any]:
         "freeBytes": usage.free,
         "freeGiB": round(usage.free / (1024 ** 3), 2),
         "lowFreeSpace": usage.free < LOW_FREE_SPACE_BYTES,
+    }
+
+
+def directory_size(path: str) -> dict[str, Any]:
+    if not os.path.exists(path):
+        return {"path": path, "exists": False}
+    if not os.path.isdir(path):
+        return {"path": path, "exists": True, "directory": False}
+    try:
+        result = subprocess.run(
+            ["du", "-sk", path],
+            text=True,
+            capture_output=True,
+            timeout=SIZE_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        return {"path": path, "exists": True, "directory": True, "error": str(exc)}
+    if result.returncode != 0:
+        return {
+            "path": path,
+            "exists": True,
+            "directory": True,
+            "error": (result.stderr or result.stdout).strip(),
+        }
+    size_kib = int((result.stdout.strip().split() or ["0"])[0])
+    return {
+        "path": path,
+        "exists": True,
+        "directory": True,
+        "sizeBytes": size_kib * 1024,
+        "sizeGiB": round(size_kib / (1024 ** 2), 2),
+    }
+
+
+def directory_children(path: str, limit: int = 12) -> list[dict[str, Any]]:
+    if not os.path.isdir(path):
+        return []
+    children: list[dict[str, Any]] = []
+    try:
+        names = sorted(os.listdir(path))
+    except OSError:
+        return []
+    for name in names[:limit]:
+        child_path = os.path.join(path, name)
+        children.append(directory_size(child_path))
+    return children
+
+
+def huggingface_cache_roots() -> list[str]:
+    roots: list[str] = []
+    hf_home = _env("HF_HOME")
+    if hf_home:
+        roots.append(os.path.join(os.path.expanduser(hf_home), "hub"))
+    roots.append(os.path.expanduser("~/.cache/huggingface/hub"))
+    seen: set[str] = set()
+    unique_roots: list[str] = []
+    for root in roots:
+        absolute = os.path.abspath(root)
+        if absolute not in seen:
+            unique_roots.append(absolute)
+            seen.add(absolute)
+    return unique_roots
+
+
+def huggingface_model_cache_name(model: str) -> str:
+    return "models--" + model.replace("/", "--")
+
+
+def model_cache_diagnostics(model: str) -> dict[str, Any]:
+    cache_name = huggingface_model_cache_name(model)
+    candidates = [os.path.join(root, cache_name) for root in huggingface_cache_roots()]
+    return {
+        "model": model,
+        "huggingFaceCacheName": cache_name,
+        "candidates": [directory_size(path) for path in candidates],
+    }
+
+
+def cache_diagnostics(model: str) -> dict[str, Any]:
+    cache_roots = huggingface_cache_roots()
+    roots = [
+        *cache_roots,
+        os.path.expanduser("~/.cache/pip"),
+        os.path.expanduser("~/.cache/uv"),
+    ]
+    return {
+        "modelCache": model_cache_diagnostics(model),
+        "roots": [
+            {
+                **directory_size(root),
+                "children": directory_children(root, limit=8),
+            }
+            for root in roots
+        ],
+    }
+
+
+def port_diagnostics(port: int) -> dict[str, Any]:
+    connected = False
+    error: str | None = None
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            connected = True
+    except OSError as exc:
+        error = str(exc)
+    owner: dict[str, Any] | None = None
+    lsof = shutil.which("lsof")
+    if lsof:
+        try:
+            result = subprocess.run(
+                [lsof, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            output = (result.stdout or result.stderr).strip()
+            owner = {
+                "command": "lsof",
+                "status": "ok" if result.returncode == 0 else "not-listening",
+                "output": output.splitlines()[:8],
+            }
+        except Exception as exc:
+            owner = {"command": "lsof", "status": "error", "error": str(exc)}
+    return {
+        "port": port,
+        "connects": connected,
+        **({"error": error} if error else {}),
+        **({"owner": owner} if owner is not None else {}),
+    }
+
+
+def engine_port_diagnostics() -> dict[str, Any]:
+    return {
+        engine: port_diagnostics(port)
+        for engine, port in ENGINE_DEFAULT_PORT.items()
+    }
+
+
+def environment_diagnostics() -> dict[str, Any]:
+    names = [
+        "PIQ_BASE_URL",
+        "PIQ_TOKEN",
+        "PIQ_SERVING_MODEL",
+        "PIQ_VLLM_URL",
+        "PIQ_SGLANG_URL",
+        "PIQ_TENSORRT_LLM_URL",
+        "PIQ_TENSORRT_LLM_IMAGE",
+        "HF_HOME",
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+    ]
+    return {
+        name: {"set": bool(_env(name))}
+        for name in names
+    }
+
+
+def real_engine_blockers(preflight: dict[str, Any], diagnostics: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    storage = preflight.get("storage", {})
+    if storage.get("lowFreeSpace"):
+        blockers.append(
+            f"Only {storage.get('freeGiB')} GiB free under {storage.get('path')}; source builds and model downloads are likely to fail."
+        )
+    local = preflight.get("localRuntime", {})
+    if not local.get("vllmModule", {}).get("available"):
+        blockers.append("Python module 'vllm' is not importable in the smoke-runner Python environment.")
+    if not local.get("sglangModule", {}).get("available"):
+        blockers.append("Python module 'sglang' is not importable in the smoke-runner Python environment.")
+    if not local.get("tensorrtLlmServeCommand", {}).get("available"):
+        blockers.append("'trtllm-serve' is not available on PATH.")
+    if not local.get("nvidiaSmiCommand", {}).get("available"):
+        blockers.append("'nvidia-smi' is not available; this host cannot prove local TensorRT-LLM on NVIDIA hardware.")
+    for item in preflight.get("endpoints", []):
+        if not item.get("ok"):
+            blockers.append(
+                f"{item.get('engine')} endpoint is not ready at {item.get('url')}: "
+                f"{item.get('status', item.get('error', 'unknown error'))}."
+            )
+    for engine, detail in diagnostics.get("ports", {}).items():
+        if detail.get("connects") and engine in {"vllm", "tensorrt-llm"}:
+            owner_output = detail.get("owner", {}).get("output", [])
+            if owner_output:
+                blockers.append(f"Default {engine} port {detail.get('port')} is already occupied: {owner_output[-1]}")
+    return blockers
+
+
+def runtime_diagnostics(engines: list[dict[str, Any]], missing_urls: list[str], model: str) -> dict[str, Any]:
+    preflight = runtime_preflight(engines, missing_urls, model=model)
+    diagnostics = {
+        "environment": environment_diagnostics(),
+        "ports": engine_port_diagnostics(),
+        "caches": cache_diagnostics(model),
+    }
+    return {
+        "preflight": preflight,
+        "diagnostics": diagnostics,
+        "blockers": real_engine_blockers(preflight, diagnostics),
     }
 
 
@@ -470,6 +670,7 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--query-dashboard", action="store_true", help="Query fixed dashboard surfaces after submission.")
     parser.add_argument("--allow-missing-engines", action="store_true", help="Run configured engines only instead of requiring all three URLs.")
     parser.add_argument("--preflight-only", action="store_true", help="Report local runtime and endpoint readiness without sending completion requests.")
+    parser.add_argument("--diagnostics-only", action="store_true", help="Report read-only host, cache, port, and endpoint diagnostics for real engine setup.")
     parser.add_argument("--launch-plan-only", action="store_true", help="Print host-aware launch commands for the three serving engines.")
     parser.add_argument("--skip-preflight", action="store_true", help="Skip the default /v1/models readiness check before sending completion requests.")
     return parser
@@ -480,6 +681,9 @@ def main(argv: list[str] | None = None) -> int:
     engines, missing = engine_configs_from_env(args)
     if args.launch_plan_only:
         print(json.dumps(runtime_launch_plan(args.model), indent=2))
+        return 0
+    if args.diagnostics_only:
+        print(json.dumps(runtime_diagnostics(engines, missing, model=args.model), indent=2))
         return 0
     if args.preflight_only:
         preflight = runtime_preflight(engines, missing, model=args.model)

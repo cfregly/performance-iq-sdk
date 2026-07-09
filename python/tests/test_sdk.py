@@ -15,22 +15,48 @@ from performance_iq_sdk import PerformanceIQ, build_manifest, laptop_smoke_model
 from performance_iq_sdk.serving_smoke import (
     engine_configs_from_env,
     endpoint_probe,
+    huggingface_model_cache_name,
     main as serving_smoke_main,
     query_dashboard,
     run_serving_smoke,
+    runtime_diagnostics,
     runtime_launch_plan,
     runtime_preflight,
 )
 
 
 class PerformanceIQSdkTest(unittest.TestCase):
+    SERVING_ENV_NAMES = [
+        "PIQ_VLLM_URL",
+        "PIQ_SGLANG_URL",
+        "PIQ_TENSORRT_LLM_URL",
+        "PIQ_VLLM_API_KEY",
+        "PIQ_SGLANG_API_KEY",
+        "PIQ_TENSORRT_LLM_API_KEY",
+        "PIQ_TOKEN",
+        "PIQ_BASE_URL",
+        "PIQ_SERVING_MODEL",
+        "PIQ_SERVING_REPETITIONS",
+        "PIQ_SERVING_MAX_TOKENS",
+        "PIQ_ARTIFACT_DIR",
+        "PIQ_TENSORRT_LLM_IMAGE",
+    ]
+
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="piq-python-test-")
         self.artifact_path = os.path.join(self.tmp_dir, "summary.json")
         with open(self.artifact_path, "w", encoding="utf-8") as handle:
             handle.write('{"ok":true}\n')
+        self.old_serving_env = {name: os.environ.get(name) for name in self.SERVING_ENV_NAMES}
+        for name in self.SERVING_ENV_NAMES:
+            os.environ.pop(name, None)
 
     def tearDown(self):
+        for name, value in self.old_serving_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         shutil.rmtree(self.tmp_dir)
 
     def input(self, **overrides):
@@ -269,6 +295,37 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertIn("trtllm-serve", plan["engines"]["tensorrt-llm"]["serve"])
         self.assertIn("freeGiB", plan["storage"])
         self.assertEqual(plan["endpointEnv"]["PIQ_SGLANG_URL"], "http://127.0.0.1:30000")
+
+    def test_serving_smoke_diagnostics_reports_cache_ports_and_blockers(self):
+        old_home = os.environ.get("HOME")
+        old_hf_home = os.environ.get("HF_HOME")
+        hf_home = os.path.join(self.tmp_dir, "hf")
+        os.makedirs(os.path.join(hf_home, "hub", huggingface_model_cache_name(laptop_smoke_model())))
+        os.makedirs(os.path.join(self.tmp_dir, ".cache", "huggingface", "hub"))
+        try:
+            os.environ["HOME"] = self.tmp_dir
+            os.environ["HF_HOME"] = hf_home
+
+            report = runtime_diagnostics([], ["vllm (PIQ_VLLM_URL)"], laptop_smoke_model())
+        finally:
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
+            if old_hf_home is None:
+                os.environ.pop("HF_HOME", None)
+            else:
+                os.environ["HF_HOME"] = old_hf_home
+
+        self.assertFalse(report["preflight"]["ready"])
+        self.assertEqual(
+            report["diagnostics"]["caches"]["modelCache"]["huggingFaceCacheName"],
+            "models--Qwen--Qwen2.5-0.5B-Instruct",
+        )
+        self.assertTrue(report["diagnostics"]["caches"]["modelCache"]["candidates"][0]["exists"])
+        self.assertEqual(set(report["diagnostics"]["ports"].keys()), {"vllm", "sglang", "tensorrt-llm"})
+        self.assertFalse(report["diagnostics"]["environment"]["PIQ_TOKEN"]["set"])
+        self.assertTrue(report["blockers"])
 
     def test_serving_smoke_endpoint_preflight_rejects_not_found_models_route(self):
         class Handler(BaseHTTPRequestHandler):
