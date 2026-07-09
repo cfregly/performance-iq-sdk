@@ -1493,6 +1493,12 @@ def _send_streaming_chat_completion(
         ]
         token_summary = _token_detail_summary(raw_token_details, token_details_requested)
         token_timeline = _prompt_token_timeline(request_id, prompt_token_details, request_started_at_utc)
+        tokenizer_provenance = {
+            "tokenizerModel": runtime_provenance.get("tokenizerModel"),
+            "tokenizerPythonBinSha256": runtime_provenance.get("tokenizerPythonBinSha256"),
+        }
+        for row in token_timeline:
+            row.update(tokenizer_provenance)
         token_index = 0
         for chunk in output_chunks:
             chunk_details = chunk.get("tokenDetails") or []
@@ -1515,6 +1521,7 @@ def _send_streaming_chat_completion(
                         "tokenTextSha256": detail.get("tokenSha256"),
                         "topLogprobsJson": _stable_json(top_logprobs) if top_logprobs else None,
                         "tokenDetailSource": token_summary["tokenDetailSource"],
+                        **tokenizer_provenance,
                     })
                     token_index += 1
             else:
@@ -1534,6 +1541,7 @@ def _send_streaming_chat_completion(
                     "tokenTextSha256": None,
                     "topLogprobsJson": None,
                     "tokenDetailSource": token_summary["tokenDetailSource"],
+                    **tokenizer_provenance,
                 })
         return {
             "requestId": request_id,
@@ -1722,6 +1730,10 @@ def _send_non_streaming_chat_completion(
         runtime_provenance = _runtime_provenance(engine, native_telemetry)
         raw_token_details = _choice_token_details(body, engine, request)
         token_summary = _token_detail_summary(raw_token_details, token_details_requested)
+        tokenizer_provenance = {
+            "tokenizerModel": runtime_provenance.get("tokenizerModel"),
+            "tokenizerPythonBinSha256": runtime_provenance.get("tokenizerPythonBinSha256"),
+        }
         token_timeline = _prompt_token_timeline(request_id, prompt_token_details, request_started_at_utc) + [
             {
                 "requestId": request_id,
@@ -1739,9 +1751,12 @@ def _send_non_streaming_chat_completion(
                 "tokenTextSha256": detail.get("tokenSha256"),
                 "topLogprobsJson": _stable_json(detail.get("topLogprobs")) if detail.get("topLogprobs") else None,
                 "tokenDetailSource": token_summary["tokenDetailSource"],
+                **tokenizer_provenance,
             }
             for index, detail in enumerate(raw_token_details)
         ]
+        for row in token_timeline:
+            row.update(tokenizer_provenance)
         return {
             "requestId": request_id,
             "requestIndex": request_index,
@@ -2210,6 +2225,8 @@ def _build_measurements(
             "tokenIdSource": sample.get("tokenIdSource"),
             "tokenDetailsCapabilityStatus": sample.get("tokenDetailsCapabilityStatus"),
             "tokenDetailsUnsupportedReason": sample.get("tokenDetailsUnsupportedReason"),
+            "tokenizerModel": sample.get("tokenizerModel"),
+            "tokenizerPythonBinSha256": sample.get("tokenizerPythonBinSha256"),
             "promptTokenIdsAvailable": sample.get("promptTokenIdsAvailable"),
             "promptTokenDetailCount": sample.get("promptTokenDetailCount"),
             "promptTokenIdSource": sample.get("promptTokenIdSource"),
@@ -2255,6 +2272,10 @@ def _build_measurements(
                 "tokenTextSha256": chunk.get("tokenTextSha256"),
                 "topLogprobsJson": chunk.get("topLogprobsJson"),
                 "tokenDetailSource": chunk.get("tokenDetailSource"),
+                "tokenizerModel": chunk.get("tokenizerModel") or sample.get("tokenizerModel"),
+                "tokenizerPythonBinSha256": (
+                    chunk.get("tokenizerPythonBinSha256") or sample.get("tokenizerPythonBinSha256")
+                ),
                 "latestCapturedAtUtc": captured_at_utc,
             })
     return [row, *sample_rows, *timeline_rows]
