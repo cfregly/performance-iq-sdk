@@ -165,6 +165,65 @@ Example endpoints:
 - SGLang: `http://127.0.0.1:30000/v1/chat/completions`
 - TensorRT-LLM: configure the OpenAI-compatible server URL for your deployment.
 
+### Streaming collection and Kafka
+
+Streaming collection means the producer sends OpenAI-compatible `stream: true`
+requests to the serving engine, reads each SSE `data:` frame as it arrives, and
+timestamps first byte, first output token/content, each output chunk/token row,
+and request completion from the measuring client. These client-side stream
+timestamps are what make TTFT, TTFOT, TPOT, inter-token latency, and E2E
+latency portable across vLLM, SGLang, and TensorRT-LLM.
+
+Kafka should not sit between the producer and the serving engine for those
+measurements, because that would change the request path being measured.
+Kafka is supported as a post-capture ingestion/export boundary: the smoke
+runner writes Kafka-ready JSONL events after it has already captured request
+timings, token details, raw operator artifacts, DCGM/native metrics, request
+receipts, hashes, and provenance.
+
+Use these knobs for strict product proof:
+
+```bash
+export PIQ_SERVING_CAPTURE_TOKEN_DETAILS=true
+export PIQ_SERVING_TOP_LOGPROBS=5
+export PIQ_SERVING_RESOLVE_TOKEN_IDS_WITH_TOKENIZER=true
+export PIQ_SERVING_COLLECT_HARDWARE_METRICS=true
+export PIQ_SERVING_REQUIRE_NATIVE_TELEMETRY=true
+export PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true
+export PIQ_SERVING_EVENT_LOG=./performance-iq-output/serving-producers/serving-events.jsonl
+```
+
+Enable Kafka publication only after local event-log capture is working:
+
+```bash
+export PIQ_SERVING_PUBLISH_KAFKA=true
+export PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS=kafka-1:9092,kafka-2:9092
+export PIQ_SERVING_KAFKA_TOPIC=performance-iq.serving.telemetry.v1
+```
+
+The finest-grain dashboard surfaces are `serving_request_samples` and
+`serving_token_timeline`. The former is one row per request with latency,
+native/DCGM, token-summary, provenance, and artifact fields. The latter is
+prompt and output token/chunk detail with `tokenPhase`, token IDs, logprobs,
+hashes, timing, and provenance.
+
+To exercise the full telemetry contract without real serving runtimes, use the
+deterministic fake strict path:
+
+```bash
+bash ops/serving-producers/run-smoke.sh fake-strict-smoke \
+  --repetitions 1 \
+  --max-tokens 8 \
+  --artifact-dir ./performance-iq-output/fake-strict-serving
+```
+
+This starts local fake OpenAI-compatible vLLM, SGLang, and TensorRT-LLM
+endpoints, routes them through receipt proxies, captures stream timings,
+token IDs/logprobs, native metrics, DCGM counters, prompt token IDs, raw
+operator artifacts, Kafka-ready events, and proof rows, then verifies
+`telemetryCoverage.allProven`. It is CI/local contract proof only; real product
+proof still requires `strict-recorded-smoke` against actual serving engines.
+
 ### Three-engine smoke
 
 Use the Python smoke runner when you have real serving endpoints and want one
@@ -230,6 +289,13 @@ bash ops/serving-producers/run-smoke.sh verify-proof \
 The verifier requires all three producers, accepted submissions, matching
 artifact hashes, producer manifests, model-aware endpoint preflight, dashboard
 campaign rows, and runtime framework provenance.
+Its JSON output also includes `telemetryCoverage`: `ok: true` means the proof
+bundle is internally valid, while `telemetryCoverage.allProven: true` means the
+bundle has the full product telemetry set across all required engines. Coverage
+categories include client stream timing, request receipts, dashboard fine-grain
+rows, native runtime telemetry, DCGM hardware telemetry, prompt token IDs,
+output token IDs/logprobs, operator-full artifacts, runtime provenance, and
+Kafka-ready event rows.
 It fails fast unless all three URLs are configured and the configured endpoints
 pass the model-aware `/v1/models` preflight. Use `--allow-missing-engines` only
 for partial local debugging and `--skip-preflight` only when debugging a

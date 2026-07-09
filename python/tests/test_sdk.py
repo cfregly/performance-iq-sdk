@@ -592,6 +592,82 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(len(raw_artifacts), 1)
         self.assertTrue(os.path.exists(raw_artifacts[0]["path"]))
 
+    def test_serving_producer_captures_tokenizer_prompt_token_rows(self):
+        class FakePromptTokenizer:
+            def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True):
+                self.messages = messages
+                self.tokenize = tokenize
+                self.add_generation_prompt = add_generation_prompt
+                return [11, 22, 33]
+
+            def convert_ids_to_tokens(self, token_id):
+                return f"tok-{token_id}"
+
+        tokenizer = FakePromptTokenizer()
+
+        def http_stream_json(url, headers, payload):
+            return {
+                "status": 200,
+                "events": [
+                    {
+                        "receivedMs": 5,
+                        "receivedAtUtc": "2026-07-09T12:00:00.005Z",
+                        "body": {"id": "chatcmpl-stream", "model": laptop_smoke_model(), "choices": [{"delta": {"content": "ok"}}]},
+                    },
+                    {
+                        "receivedMs": 15,
+                        "receivedAtUtc": "2026-07-09T12:00:00.015Z",
+                        "body": {
+                            "id": "chatcmpl-stream",
+                            "model": laptop_smoke_model(),
+                            "choices": [{"delta": {}, "finish_reason": "stop"}],
+                            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+                        },
+                    },
+                ],
+            }
+
+        result = run_serving_producer(
+            engine={
+                "engine": "vllm",
+                "baseUrl": "http://127.0.0.1:8000",
+                "tokenizer": tokenizer,
+                "tokenizerModel": "unit-tokenizer",
+            },
+            request={
+                "model": laptop_smoke_model(),
+                "messages": [{"role": "user", "content": "Say ok."}],
+                "maxTokens": 16,
+            },
+            artifact_dir=self.tmp_dir,
+            workload={"hardware": "local tokenizer engine", "operatingPoint": "laptop-smoke"},
+            pricing={"usdPerGpuHour": 1, "gpuCount": 1, "powerWattsPerGpu": 100},
+            http_stream_json=http_stream_json,
+        )
+
+        sample = result["samples"][0]
+        self.assertTrue(sample["promptTokenIdsAvailable"])
+        self.assertEqual(sample["promptTokenDetailCount"], 3)
+        self.assertEqual(sample["promptTokenIdSource"], "configured-tokenizer")
+        self.assertEqual(sample["promptTokenizationSource"], "configured-tokenizer-chat-template")
+        self.assertEqual(sample["promptTokenizerModel"], "unit-tokenizer")
+        self.assertEqual(len(sample["promptTokenIdsSha256"]), 64)
+        self.assertEqual(tokenizer.messages, [{"role": "user", "content": "Say ok."}])
+        prompt_rows = [row for row in sample["tokenTimeline"] if row.get("tokenPhase") == "prompt"]
+        output_rows = [row for row in sample["tokenTimeline"] if row.get("tokenPhase") == "output"]
+        self.assertEqual([row["tokenId"] for row in prompt_rows], [11, 22, 33])
+        self.assertEqual([row["tokenIdSource"] for row in prompt_rows], ["configured-tokenizer"] * 3)
+        self.assertEqual(len(output_rows), 1)
+        aggregate = result["measurements"][0]
+        self.assertTrue(aggregate["promptTokenDetailsRequired"])
+        self.assertEqual(aggregate["promptTokenIdsAvailableCount"], 1)
+        self.assertEqual(aggregate["metricCompleteness"], 1)
+        sample_rows = [row for row in result["measurements"] if row.get("surface") == "serving_request_sample"]
+        token_rows = [row for row in result["measurements"] if row.get("surface") == "serving_token_timeline"]
+        self.assertTrue(sample_rows[0]["promptTokenIdsAvailable"])
+        self.assertEqual(sample_rows[0]["promptTokenIdSource"], "configured-tokenizer")
+        self.assertEqual([row["tokenId"] for row in token_rows if row.get("tokenPhase") == "prompt"], [11, 22, 33])
+
     def test_serving_producer_derives_native_prometheus_deltas(self):
         metric_snapshots = [
             """
@@ -1254,6 +1330,17 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertEqual(verification["campaignIds"], sorted(item["campaignId"] for item in summary["submissions"]))
         self.assertEqual(set(verification["artifactHashes"].keys()), {"vllm", "sglang", "tensorrt-llm"})
         self.assertEqual(verification["receiptCounts"], {"vllm": 1, "sglang": 1, "tensorrt-llm": 1})
+        coverage = verification["telemetryCoverage"]
+        self.assertFalse(coverage["allProven"])
+        self.assertEqual(coverage["categorySummary"]["clientStreamTiming"]["status"], "proven")
+        self.assertEqual(coverage["categorySummary"]["requestReceipts"]["status"], "proven")
+        self.assertEqual(coverage["categorySummary"]["dashboardFineGrainRows"]["status"], "proven")
+        self.assertEqual(coverage["categorySummary"]["operatorFullArtifacts"]["status"], "proven")
+        self.assertEqual(coverage["categorySummary"]["nativeRuntimeTelemetry"]["status"], "missing")
+        self.assertEqual(coverage["categorySummary"]["dcgmHardwareTelemetry"]["status"], "missing")
+        self.assertEqual(coverage["categorySummary"]["promptTokenIds"]["status"], "missing")
+        self.assertEqual(coverage["categorySummary"]["outputTokenIdsLogprobs"]["status"], "missing")
+        self.assertEqual(coverage["engines"]["vllm"]["clientStreamTiming"]["status"], "proven")
         with open(proof_path, encoding="utf-8") as handle:
             proof = json.load(handle)
         self.assertEqual(set(proof["evidenceIndex"]["engines"].keys()), {"vllm", "sglang", "tensorrt-llm"})
@@ -1277,6 +1364,7 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         with open(rows_path, encoding="utf-8") as handle:
             persisted_rows = json.load(handle)
         self.assertEqual(persisted_rows["schemaVersion"], "performance-iq.serving-proof-rows.v1")
+        self.assertEqual(persisted_rows["telemetryCoverage"]["schemaVersion"], "performance-iq.serving-telemetry-coverage.v1")
         self.assertEqual(persisted_rows["rowCounts"]["servingTokenTimeline"], 6)
         self.assertEqual(write_proof_rows(proof_path, rows_path)["rowCounts"]["servingRequestSamples"], 3)
 
@@ -1346,6 +1434,7 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertTrue(verification["ok"], json.dumps(verification, indent=2))
         self.assertGreaterEqual(verification["eventCounts"]["serving.measurement.serving_request_sample"], 3)
         self.assertGreaterEqual(verification["eventCounts"]["serving.measurement.serving_token_timeline"], 3)
+        self.assertEqual(verification["telemetryCoverage"]["categorySummary"]["kafkaEventLog"]["status"], "proven")
         lines[0]["payload"]["campaignId"] = "tampered"
         with open(event_log_path, "w", encoding="utf-8") as handle:
             for event in lines:
@@ -1354,6 +1443,48 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         tampered_verification = verify_proof_summary(proof_path)
         self.assertFalse(tampered_verification["ok"])
         self.assertTrue(any("eventId digest" in error for error in tampered_verification["errors"]))
+
+    def test_serving_smoke_fake_full_telemetry_proves_all_coverage(self):
+        proof_path = os.path.join(self.tmp_dir, "fake-full-proof.json")
+        event_log_path = os.path.join(self.tmp_dir, "fake-events.jsonl")
+        receipt_log_path = os.path.join(self.tmp_dir, "fake-receipts.jsonl")
+        rows_path = os.path.join(self.tmp_dir, "fake-proof-rows.json")
+        stdout = StringIO()
+        stderr = StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = serving_smoke_main([
+                "--fake-full-telemetry",
+                "--model", laptop_smoke_model(),
+                "--repetitions", "1",
+                "--max-tokens", "8",
+                "--artifact-dir", self.tmp_dir,
+                "--run-suffix", "fake-full",
+                "--summary-out", proof_path,
+                "--event-log", event_log_path,
+                "--receipt-log", receipt_log_path,
+            ])
+
+        self.assertEqual(code, 0, stderr.getvalue() + stdout.getvalue())
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["proofBoundary"], "local fake serving engines and synthetic dashboard row snapshot; not real runtime proof")
+        self.assertTrue(os.path.exists(proof_path))
+        self.assertTrue(os.path.exists(event_log_path))
+        self.assertTrue(os.path.exists(receipt_log_path))
+        verification = report["verification"]
+        self.assertTrue(verification["ok"], json.dumps(verification, indent=2))
+        coverage = verification["telemetryCoverage"]
+        self.assertTrue(coverage["allProven"], json.dumps(coverage, indent=2))
+        for category, summary in coverage["categorySummary"].items():
+            self.assertEqual(summary["status"], "proven", category)
+        self.assertEqual(coverage["engines"]["tensorrt-llm"]["dcgmHardwareTelemetry"]["status"], "proven")
+        self.assertEqual(verification["eventCounts"]["serving.measurement.serving_request_sample"], 3)
+        self.assertGreaterEqual(verification["eventCounts"]["serving.request_receipt"], 3)
+
+        rows = write_proof_rows(proof_path, rows_path, verification=verification)
+        self.assertTrue(rows["telemetryCoverage"]["allProven"])
+        self.assertEqual(rows["rowCounts"]["servingRequestSamples"], 3)
+        self.assertGreaterEqual(rows["rowCounts"]["servingTokenTimeline"], 18)
 
     def test_serving_smoke_verifies_partial_proof_only_when_allowed(self):
         proof_path, summary = self.write_full_serving_proof()
@@ -1696,6 +1827,11 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertIn("PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true", plan["strictProof"]["command"])
         self.assertIn("serving_request_samples", plan["strictProof"]["dashboardSurfaces"])
         self.assertIn("serving_token_timeline", plan["strictProof"]["dashboardSurfaces"])
+        self.assertIn("stream=true", plan["telemetryModel"]["streamingCollection"])
+        self.assertIn("post-capture", plan["telemetryModel"]["kafkaBoundary"])
+        self.assertIn("serving_token_timeline", plan["telemetryModel"]["requestSurfaces"])
+        self.assertIn("DCGM hardware counters", plan["telemetryModel"]["strictTelemetry"])
+        self.assertIn("tokenizer-exact prompt token IDs", plan["telemetryModel"]["strictTelemetry"])
 
     def test_serving_smoke_parser_reads_pricing_env(self):
         os.environ["PIQ_SERVING_USD_PER_GPU_HOUR"] = "2.5"

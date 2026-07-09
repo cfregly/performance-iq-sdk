@@ -243,12 +243,40 @@ Use `strict-smoke` or `strict-recorded-smoke` for product proof: these require
 token IDs/logprobs, token ID provenance, native engine telemetry, DCGM hardware
 counters, dashboard rows, request receipts, and configured GPU cost.
 
+For CI and local contract checks without real runtimes, use deterministic fake
+engines:
+
+```bash
+bash ops/serving-producers/run-smoke.sh fake-strict-smoke \
+  --repetitions 1 \
+  --max-tokens 8 \
+  --artifact-dir ./performance-iq-output/fake-strict-serving
+```
+
+`fake-strict-smoke` starts local fake OpenAI-compatible vLLM, SGLang, and
+TensorRT-LLM endpoints, routes traffic through receipt proxies, captures
+stream timing, token IDs/logprobs, prompt token IDs, native metrics, DCGM
+counters, operator-full artifacts, Kafka-ready event rows, and a synthetic
+dashboard row snapshot. The command fails unless `verify-proof` is `ok` and
+`telemetryCoverage.allProven` is true. This is local contract proof only; it
+does not replace `strict-recorded-smoke` against real serving engines.
+
 Verify the saved proof bundle offline:
 
 ```bash
 bash ops/serving-producers/run-smoke.sh verify-proof \
   "$PIQ_ARTIFACT_DIR/serving-smoke-proof-<suffix>.json"
 ```
+
+Read two fields in the verifier output separately:
+
+- `ok` proves the proof bundle is internally valid: artifacts hash, manifests
+  match, receipts line up, preflight passed, and dashboard rows are queryable.
+- `telemetryCoverage.allProven` proves the full product telemetry set is
+  present across required engines: client stream timing, native runtime
+  telemetry, DCGM counters, tokenizer-exact prompt IDs, output token
+  IDs/logprobs, operator-full raw artifacts, request receipts, runtime
+  provenance, dashboard fine-grain rows, and Kafka-ready event rows.
 
 To inspect every generated row, add a proof-row dump. The output includes
 submitted runs, dashboard row snapshots, request samples, token timeline rows,

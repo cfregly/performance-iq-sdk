@@ -11,6 +11,7 @@ Usage:
   bash ops/serving-producers/run-smoke.sh strict-smoke [extra args...]
   bash ops/serving-producers/run-smoke.sh recorded-smoke [extra args...]
   bash ops/serving-producers/run-smoke.sh strict-recorded-smoke [extra args...]
+  bash ops/serving-producers/run-smoke.sh fake-strict-smoke [extra args...]
   bash ops/serving-producers/run-smoke.sh no-submit [extra args...]
   bash ops/serving-producers/run-smoke.sh verify-proof <proof-summary.json> [--dump-proof-rows rows.json]
   bash ops/serving-producers/run-smoke.sh receipt-proxy [proxy args...]
@@ -26,6 +27,9 @@ Modes:
   strict-recorded-smoke
                Start receipt proxies and require token, native telemetry, and
                DCGM proof gates.
+  fake-strict-smoke
+               Run deterministic local fake engines through strict telemetry,
+               receipts, Kafka-ready events, proof verification, and coverage.
   no-submit    Send requests and write artifacts without submitting runs.
   verify-proof Verify a saved full three-engine proof bundle offline; optionally
                dump all finest-grain proof rows with --dump-proof-rows.
@@ -36,7 +40,7 @@ USAGE
 
 mode="${1:-preflight}"
 case "$mode" in
-  launch-plan|diagnostics|preflight|smoke|strict-smoke|recorded-smoke|strict-recorded-smoke|no-submit|verify-proof|receipt-proxy)
+  launch-plan|diagnostics|preflight|smoke|strict-smoke|recorded-smoke|strict-recorded-smoke|fake-strict-smoke|no-submit|verify-proof|receipt-proxy)
     shift || true
     ;;
   -h|--help|help)
@@ -161,6 +165,17 @@ case "$mode" in
   strict-recorded-smoke)
     require_strict_pricing "$@"
     exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --record-receipts --receipt-log "$receipt_log" --event-log "$event_log" "${strict_common[@]}" "$@"
+    ;;
+  fake-strict-smoke)
+    exec "$python_bin" -m performance_iq_sdk.serving_smoke \
+      --model "$model" \
+      --artifact-dir "$artifact_dir" \
+      --fake-full-telemetry \
+      --receipt-log "$receipt_log" \
+      --event-log "$event_log" \
+      --top-logprobs "${PIQ_SERVING_TOP_LOGPROBS:-5}" \
+      --usd-per-gpu-hour "${PIQ_SERVING_USD_PER_GPU_HOUR:-1}" \
+      "$@"
     ;;
   no-submit)
     exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --no-submit --event-log "$event_log" "$@"

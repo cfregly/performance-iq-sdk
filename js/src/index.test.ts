@@ -342,6 +342,7 @@ describe("performance-iq-sdk js", () => {
       request: {
         model: laptopSmokeModel(),
         messages: [{ role: "user", content: "Say ok." }],
+        promptTokenIds: [11, 22, 33],
       },
       artifactDir,
       workload: {
@@ -387,7 +388,15 @@ describe("performance-iq-sdk js", () => {
     expect(sample.queueWaitMs).toBeCloseTo(2)
     expect(sample.prefillMs).toBeCloseTo(60)
     expect(sample.decodeMs).toBeCloseTo(120)
+    expect(sample.promptTokenIdsAvailable).toBe(true)
+    expect(sample.promptTokenDetailCount).toBe(3)
+    expect(sample.promptTokenIdSource).toBe("configured-prompt-token-ids")
+    expect(sample.promptTokenIdsSha256).toEqual(expect.any(String))
+    expect(sample.tokenTimeline?.filter((row) => row.tokenPhase === "prompt")).toHaveLength(3)
+    expect(sample.tokenTimeline?.find((row) => row.tokenPhase === "prompt")?.tokenId).toBe(11)
     expect(result.measurements[0].nativeTelemetryAvailableCount).toBe(1)
+    expect(result.measurements[0].promptTokenDetailsRequired).toBe(true)
+    expect(result.measurements[0].promptTokenIdsAvailableCount).toBe(1)
     expect(result.measurements[0].avgQueueWaitMs as number).toBeCloseTo(2)
     expect(result.measurements[0].avgPrefillMs as number).toBeCloseTo(60)
     expect(result.measurements[0].avgDecodeMs as number).toBeCloseTo(120)
@@ -401,6 +410,11 @@ describe("performance-iq-sdk js", () => {
     expect(sampleRows[0].nativeGpuMemoryBytes).toBe(2000)
     expect(sampleRows[0].engineVersion).toBe("vllm-test")
     expect(sampleRows[0].containerId).toBe("container-a")
+    expect(sampleRows[0].promptTokenIdsAvailable).toBe(true)
+    expect(sampleRows[0].promptTokenIdSource).toBe("configured-prompt-token-ids")
+    const promptTimelineRows = result.measurements.filter((row) => row.surface === "serving_token_timeline" && row.tokenPhase === "prompt")
+    expect(promptTimelineRows).toHaveLength(3)
+    expect(promptTimelineRows[0].tokenId).toBe(11)
   })
 
   it("defaults TensorRT-LLM native metrics collection to the Prometheus endpoint", async () => {

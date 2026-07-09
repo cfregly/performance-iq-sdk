@@ -649,6 +649,32 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
             "PIQ_TENSORRT_LLM_METRICS_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}/prometheus/metrics",
             "PIQ_TENSORRT_LLM_JSON_METRICS_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}/metrics",
         },
+        "telemetryModel": {
+            "streamingCollection": (
+                "The producer sends OpenAI-compatible stream=true requests, reads SSE data frames as they arrive, "
+                "and timestamps first byte, first output token/content, each chunk/token row, and completion on the measuring client."
+            ),
+            "kafkaBoundary": (
+                "Kafka is a post-capture ingestion/export boundary for already timestamped serving events; "
+                "do not place Kafka between the producer and serving engine when measuring TTFT/TPOT."
+            ),
+            "eventLog": "PIQ_SERVING_EVENT_LOG writes Kafka-ready JSONL events after capture.",
+            "requestSurfaces": [
+                "serving_request_samples",
+                "serving_token_timeline",
+            ],
+            "strictTelemetry": [
+                "client stream timing",
+                "native engine timing/cache/concurrency metrics",
+                "DCGM hardware counters",
+                "tokenizer-exact prompt token IDs",
+                "response or tokenizer-resolved output token IDs",
+                "response logprobs/top-logprobs",
+                "operator-full raw artifacts",
+                "request receipts",
+                "runtime provenance",
+            ],
+        },
         "strictProof": {
             "mode": "strict-recorded-smoke",
             "requires": [
@@ -1058,6 +1084,297 @@ def _validate_measurement_row(
     for fragment in ["serving-producer", engine, expected_framework, str(expected_model or "")]:
         if fragment and fragment not in tags:
             errors.append(f"{engine} measurement tags must include {fragment}.")
+
+
+def _coverage_status(proven: int, expected: int) -> str:
+    if expected <= 0:
+        return "missing"
+    if proven == expected:
+        return "proven"
+    if proven > 0:
+        return "partial"
+    return "missing"
+
+
+def _coverage_item(status: str, proven: int, expected: int, missing: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "status": status,
+        "provenCount": proven,
+        "expectedCount": expected,
+        "missing": missing or [],
+    }
+
+
+def _engine_runtime_provenance_present(sample: dict[str, Any]) -> bool:
+    keys = [
+        "engineVersion",
+        "modelRevision",
+        "imageDigest",
+        "serverArgsSha256",
+        "processId",
+        "containerId",
+        "podName",
+        "nodeName",
+        "hostName",
+    ]
+    return any(sample.get(key) not in (None, "", []) for key in keys)
+
+
+def _telemetry_coverage_from_proof(
+    *,
+    proof: dict[str, Any],
+    proof_dir: str,
+    expected_engines: list[str],
+    receipt_counts: dict[str, int],
+    event_counts: dict[str, int],
+) -> dict[str, Any]:
+    categories = {
+        "clientStreamTiming": {
+            "description": "Client-side stream=true timing for E2E, TTFB, TTFT, TTFOT, TPOT, and output timeline rows.",
+        },
+        "requestReceipts": {
+            "description": "Engine-side request receipts proving trace IDs reached POST /v1/chat/completions.",
+        },
+        "dashboardFineGrainRows": {
+            "description": "Queryable serving_request_samples and serving_token_timeline dashboard rows.",
+        },
+        "nativeRuntimeTelemetry": {
+            "description": "Native engine timing/cache/concurrency metrics such as queue, prefill, decode, KV, and cache state.",
+        },
+        "dcgmHardwareTelemetry": {
+            "description": "DCGM hardware counters for power, utilization, clocks, memory, temperature, and energy.",
+        },
+        "promptTokenIds": {
+            "description": "Tokenizer-exact prompt/input token IDs with prompt token provenance.",
+        },
+        "outputTokenIdsLogprobs": {
+            "description": "Output token IDs, logprobs, top-logprobs, and token-detail provenance.",
+        },
+        "operatorFullArtifacts": {
+            "description": "Operator-full raw request/response, token, native, hardware, and runtime artifacts.",
+        },
+        "runtimeProvenance": {
+            "description": "Runtime version/revision/image/process/container/pod/node/host/server-arg provenance when configured.",
+        },
+        "kafkaEventLog": {
+            "description": "Post-capture Kafka-ready event log with request-sample and token-timeline events.",
+        },
+    }
+    coverage = {
+        "schemaVersion": "performance-iq.serving-telemetry-coverage.v1",
+        "model": proof.get("model"),
+        "expectedEngines": expected_engines,
+        "categories": categories,
+        "engines": {},
+        "categorySummary": {},
+        "allProven": False,
+    }
+    dashboard = proof.get("dashboard") if isinstance(proof.get("dashboard"), dict) else {}
+    dashboard_counts = dashboard.get("rowCounts") if isinstance(dashboard.get("rowCounts"), dict) else {}
+    event_log_present = bool(proof.get("eventLogPath")) and (
+        event_counts.get("serving.measurement.serving_request_sample", 0) > 0
+        and event_counts.get("serving.measurement.serving_token_timeline", 0) > 0
+    )
+    submissions = {
+        item.get("engine"): item
+        for item in proof.get("submissions", [])
+        if isinstance(item, dict) and item.get("engine") in ENGINE_IDS
+    }
+    for engine in expected_engines:
+        submission = submissions.get(engine)
+        engine_coverage: dict[str, Any] = {}
+        if not isinstance(submission, dict):
+            coverage["engines"][engine] = {
+                category: _coverage_item("missing", 0, 1, [f"{engine} submission missing"])
+                for category in categories
+            }
+            continue
+        artifact_path = _resolve_proof_member_path(submission.get("artifactPath"), proof_dir)
+        artifact = _read_json_object(artifact_path or "")
+        samples = artifact.get("samples") if isinstance(artifact.get("samples"), list) else []
+        measurements = artifact.get("measurements") if isinstance(artifact.get("measurements"), list) else []
+        first_measurement = measurements[0] if measurements and isinstance(measurements[0], dict) else {}
+        token_timeline = artifact.get("tokenTimeline") if isinstance(artifact.get("tokenTimeline"), list) else []
+        hardware_telemetry = artifact.get("hardwareTelemetry") if isinstance(artifact.get("hardwareTelemetry"), list) else []
+        capture_policy = artifact.get("capturePolicy") if isinstance(artifact.get("capturePolicy"), dict) else {}
+        expected_samples = len(samples) or int(submission.get("requestCount") or 0) or 1
+
+        stream_proven = sum(
+            1 for sample in samples
+            if isinstance(sample, dict)
+            and sample.get("streaming") is True
+            and all(_is_number(sample.get(key)) for key in ["e2eLatencyMs", "timeToFirstByteMs", "ttftMs", "ttfotMs", "tpotMs"])
+        )
+        output_rows = [
+            row for row in token_timeline
+            if isinstance(row, dict) and row.get("tokenPhase", "output") == "output"
+        ]
+        stream_missing = []
+        if stream_proven != expected_samples:
+            stream_missing.append("one or more request samples are missing stream timing fields")
+        if not output_rows:
+            stream_missing.append("token timeline has no output rows")
+        engine_coverage["clientStreamTiming"] = _coverage_item(
+            "proven" if stream_proven == expected_samples and output_rows else _coverage_status(stream_proven, expected_samples),
+            stream_proven,
+            expected_samples,
+            stream_missing,
+        )
+
+        receipts = receipt_counts.get(engine, 0)
+        engine_coverage["requestReceipts"] = _coverage_item(
+            _coverage_status(receipts, expected_samples),
+            receipts,
+            expected_samples,
+            [] if receipts >= expected_samples else ["request receipt count is below request sample count"],
+        )
+
+        fine_grain_ok = (
+            _number(dashboard_counts.get("serving_request_samples")) >= len(expected_engines)
+            and _number(dashboard_counts.get("serving_token_timeline")) >= len(expected_engines)
+        )
+        engine_coverage["dashboardFineGrainRows"] = _coverage_item(
+            "proven" if fine_grain_ok else "missing",
+            1 if fine_grain_ok else 0,
+            1,
+            [] if fine_grain_ok else ["dashboard row counts missing serving_request_samples or serving_token_timeline"],
+        )
+
+        native_proven = sum(
+            1 for sample in samples
+            if isinstance(sample, dict)
+            and sample.get("nativeTelemetryAvailable") is True
+            and all(_is_number(sample.get(key)) for key in REQUIRED_NATIVE_SAMPLE_FIELDS)
+        )
+        native_required = first_measurement.get("nativeTelemetryRequired") is True
+        engine_coverage["nativeRuntimeTelemetry"] = _coverage_item(
+            _coverage_status(native_proven, expected_samples),
+            native_proven,
+            expected_samples,
+            [] if native_proven == expected_samples else [
+                "native telemetry fields are missing"
+                + (" even though native telemetry is required" if native_required else "")
+            ],
+        )
+
+        hardware_proven = sum(
+            1 for sample in samples
+            if isinstance(sample, dict)
+            and sample.get("hardwareTelemetryAvailable") is True
+            and all(_is_number(sample.get(key)) for key in REQUIRED_HARDWARE_SAMPLE_COUNTERS)
+        )
+        hardware_rows_proven = sum(
+            1 for row in hardware_telemetry
+            if isinstance(row, dict)
+            and row.get("available") is True
+            and all(_is_number(row.get(key)) for key in ["powerWatts", "powerWattsPerGpu", "gpuUtilizationPct", "memoryCopyUtilizationPct", "gpuTemperatureC", "smClockMHz", "memoryClockMHz", "fbUsedMiB", "fbFreeMiB", "energyJoules"])
+        )
+        hardware_required = first_measurement.get("hardwareTelemetryRequired") is True
+        hardware_ok_count = min(hardware_proven, hardware_rows_proven)
+        engine_coverage["dcgmHardwareTelemetry"] = _coverage_item(
+            _coverage_status(hardware_ok_count, expected_samples),
+            hardware_ok_count,
+            expected_samples,
+            [] if hardware_ok_count == expected_samples else [
+                "DCGM hardware sample/artifact counters are missing"
+                + (" even though hardware telemetry is required" if hardware_required else "")
+            ],
+        )
+
+        prompt_sample_proven = sum(
+            1 for sample in samples
+            if isinstance(sample, dict)
+            and sample.get("promptTokenIdsAvailable") is True
+            and isinstance(sample.get("promptTokenIdSource"), str)
+            and isinstance(sample.get("promptTokenIdsSha256"), str)
+        )
+        prompt_rows = [
+            row for row in token_timeline
+            if isinstance(row, dict) and row.get("tokenPhase") == "prompt" and isinstance(row.get("tokenId"), int)
+        ]
+        prompt_required = first_measurement.get("promptTokenDetailsRequired") is True
+        prompt_ok = prompt_sample_proven == expected_samples and bool(prompt_rows)
+        engine_coverage["promptTokenIds"] = _coverage_item(
+            "proven" if prompt_ok else _coverage_status(prompt_sample_proven, expected_samples),
+            prompt_sample_proven,
+            expected_samples,
+            [] if prompt_ok else [
+                "prompt token IDs or prompt token timeline rows are missing"
+                + (" even though prompt token details are required" if prompt_required else "")
+            ],
+        )
+
+        output_sample_proven = sum(
+            1 for sample in samples
+            if isinstance(sample, dict)
+            and sample.get("tokenDetailsAvailable") is True
+            and sample.get("tokenIdsAvailable") is True
+            and sample.get("logprobsAvailable") is True
+            and isinstance(sample.get("tokenIdSource"), str)
+        )
+        output_rows_proven = all(
+            isinstance(row.get("tokenId"), int)
+            and isinstance(row.get("tokenIdSource"), str)
+            and _is_number(row.get("tokenLogprob"))
+            for row in output_rows
+        ) if output_rows else False
+        token_required = first_measurement.get("tokenDetailsRequired") is True
+        output_ok = output_sample_proven == expected_samples and output_rows_proven
+        engine_coverage["outputTokenIdsLogprobs"] = _coverage_item(
+            "proven" if output_ok else _coverage_status(output_sample_proven, expected_samples),
+            output_sample_proven,
+            expected_samples,
+            [] if output_ok else [
+                "output token IDs/logprobs or token timeline details are missing"
+                + (" even though output token details are required" if token_required else "")
+            ],
+        )
+
+        raw_path = _resolve_proof_member_path(capture_policy.get("rawArtifactPath"), proof_dir)
+        raw_present = capture_policy.get("mode") == "operator-full" and bool(raw_path) and os.path.exists(raw_path or "")
+        engine_coverage["operatorFullArtifacts"] = _coverage_item(
+            "proven" if raw_present else "missing",
+            1 if raw_present else 0,
+            1,
+            [] if raw_present else ["operator-full raw artifact is missing"],
+        )
+
+        runtime_proven = sum(
+            1 for sample in samples
+            if isinstance(sample, dict) and _engine_runtime_provenance_present(sample)
+        )
+        engine_coverage["runtimeProvenance"] = _coverage_item(
+            _coverage_status(runtime_proven, expected_samples),
+            runtime_proven,
+            expected_samples,
+            [] if runtime_proven == expected_samples else ["runtime version/image/process/container/node provenance is absent or partial"],
+        )
+
+        engine_coverage["kafkaEventLog"] = _coverage_item(
+            "proven" if event_log_present else "missing",
+            1 if event_log_present else 0,
+            1,
+            [] if event_log_present else ["Kafka-ready post-capture event log is missing request-sample or token-timeline events"],
+        )
+        coverage["engines"][engine] = engine_coverage
+
+    for category in categories:
+        statuses = [
+            engine_coverage.get(category, {}).get("status")
+            for engine_coverage in coverage["engines"].values()
+            if isinstance(engine_coverage, dict)
+        ]
+        proven = sum(1 for status in statuses if status == "proven")
+        coverage["categorySummary"][category] = {
+            "status": "proven" if proven == len(expected_engines) and expected_engines else "partial" if proven else "missing",
+            "provenEngines": proven,
+            "expectedEngines": len(expected_engines),
+        }
+    coverage["allProven"] = all(
+        summary.get("status") == "proven"
+        for summary in coverage["categorySummary"].values()
+    ) if coverage["categorySummary"] else False
+    return coverage
 
 
 def build_evidence_index(summary: dict[str, Any]) -> dict[str, Any]:
@@ -1663,6 +1980,14 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
         elif event_counts and published_count != sum(event_counts.values()):
             errors.append("kafkaPublication publishedCount must equal event log event count.")
 
+    telemetry_coverage = _telemetry_coverage_from_proof(
+        proof=proof,
+        proof_dir=proof_dir,
+        expected_engines=expected_engines,
+        receipt_counts=receipt_counts,
+        event_counts=event_counts,
+    )
+
     return {
         "schemaVersion": PROOF_VERIFICATION_SCHEMA_VERSION,
         "proofPath": proof_abs,
@@ -1678,6 +2003,7 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
         "eventLogPath": event_log_path or None,
         "eventCounts": event_counts,
         "dashboard": proof.get("dashboard") if isinstance(proof.get("dashboard"), dict) else None,
+        "telemetryCoverage": telemetry_coverage,
     }
 
 
@@ -1725,6 +2051,7 @@ def extract_proof_rows(
         "measurements": [],
         "requestReceipts": [],
         "eventLogRows": [],
+        "telemetryCoverage": verification.get("telemetryCoverage") if isinstance(verification, dict) else None,
     }
 
     submissions = proof.get("submissions")
@@ -2175,6 +2502,193 @@ def run_serving_smoke(
     }
 
 
+def _fake_dashboard(summary: dict[str, Any]) -> dict[str, Any]:
+    submissions = [item for item in summary.get("submissions", []) if isinstance(item, dict)]
+    campaign_ids = [str(item.get("campaignId")) for item in submissions if item.get("campaignId")]
+    runtime_frameworks = sorted({
+        str(item.get("runtimeFramework"))
+        for item in submissions
+        if item.get("runtimeFramework")
+    })
+    request_sample_count = 0
+    token_timeline_count = 0
+    run_detail_rows = []
+    for item in submissions:
+        artifact = _read_json_object(str(item.get("artifactPath") or ""))
+        measurements = artifact.get("measurements") if isinstance(artifact.get("measurements"), list) else []
+        request_sample_count += sum(1 for row in measurements if isinstance(row, dict) and row.get("surface") == "serving_request_sample")
+        token_timeline_count += sum(1 for row in measurements if isinstance(row, dict) and row.get("surface") == "serving_token_timeline")
+        first = measurements[0] if measurements and isinstance(measurements[0], dict) else {}
+        run_detail_rows.append([
+            item.get("campaignId"),
+            item.get("runId"),
+            item.get("runtimeFramework"),
+            first.get("avgTtftMs"),
+            first.get("avgTpotMs"),
+            first.get("avgTtfotMs"),
+            first.get("metricCompleteness"),
+        ])
+    engine_count = len(submissions)
+    campaign_rows = [[campaign_id] for campaign_id in campaign_ids]
+    return {
+        "storeProvider": "local-fake-serving-fixture",
+        "proofBoundary": "local fake serving engines and synthetic dashboard row snapshot; not real runtime or production dashboard proof",
+        "rowCounts": {
+            "price_performance": engine_count,
+            "capacity_best": engine_count,
+            "campaign_provenance": engine_count,
+            "run_details": engine_count,
+            "serving_request_samples": request_sample_count,
+            "serving_token_timeline": token_timeline_count,
+        },
+        "rows": {
+            "price_performance": [
+                [summary.get("model"), item.get("runtimeFramework"), item.get("engine")]
+                for item in submissions
+            ],
+            "capacity_best": [
+                [summary.get("model"), item.get("runtimeFramework")]
+                for item in submissions
+            ],
+            "campaign_provenance": campaign_rows,
+            "run_details": run_detail_rows,
+            "serving_request_samples": campaign_rows,
+            "serving_token_timeline": campaign_rows,
+        },
+        "campaignIds": campaign_ids,
+        "surfaceCampaignIds": {
+            "campaign_provenance": campaign_ids,
+            "run_details": campaign_ids,
+            "serving_request_samples": campaign_ids,
+            "serving_token_timeline": campaign_ids,
+        },
+        "submittedCampaignRows": {
+            "campaign_provenance": campaign_rows,
+            "run_details": campaign_rows,
+            "serving_request_samples": campaign_rows,
+            "serving_token_timeline": campaign_rows,
+        },
+        "runtimeFrameworks": runtime_frameworks,
+    }
+
+
+def _fake_performance_iq_client() -> PerformanceIQ:
+    def transport(method: str, url: str, headers: dict[str, str], body: bytes) -> dict[str, Any]:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+        manifest = payload.get("manifest") if isinstance(payload.get("manifest"), dict) else {}
+        campaign = manifest.get("campaign") if isinstance(manifest.get("campaign"), dict) else {}
+        return {
+            "id": campaign.get("runId") or "fake-serving-run",
+            "status": "accepted",
+            "liveProofReady": False,
+            "validation": {
+                "ok": True,
+                "liveProofReady": False,
+                "proofBoundary": "local fake serving fixture",
+            },
+        }
+
+    return PerformanceIQ("http://performance-iq.local/fake", token="fake-token", transport=transport)
+
+
+def _start_fake_engine_servers(model: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    from performance_iq_sdk.serving_fake_engine import FakeEngineState, FakeOpenAIServer
+
+    engines: list[dict[str, Any]] = []
+    servers: list[dict[str, Any]] = []
+    for index, engine_id in enumerate(ENGINE_IDS, start=1):
+        server = FakeOpenAIServer(("127.0.0.1", 0), FakeEngineState(engine_id, model))
+        host, port = server.server_address
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = f"http://{host}:{port}"
+        engines.append({
+            "engine": engine_id,
+            "baseUrl": base_url,
+            "metricsUrl": f"{base_url}/prometheus/metrics" if engine_id == "tensorrt-llm" else f"{base_url}/metrics",
+            **({"nativeJsonMetricsUrl": f"{base_url}/metrics"} if engine_id == "tensorrt-llm" else {}),
+            "hardwareMetricsUrl": f"{base_url}/prometheus/metrics" if engine_id == "tensorrt-llm" else f"{base_url}/metrics",
+            "requireNativeTelemetry": True,
+            "requireHardwareTelemetry": True,
+            "promptTokenIds": [11, 22, 33, 44],
+            "frameworkVersion": f"{engine_id}-fake-1.0",
+            "modelRevision": "fake-model-revision",
+            "imageDigest": f"sha256:{str(index) * 64}",
+            "imageTag": f"performance-iq/{engine_id}:fake",
+            "serverArgs": [engine_id, "serve", model, "--fake-full-telemetry"],
+            "processId": str(9000 + index),
+            "containerId": f"fake-{engine_id}-container",
+            "podName": f"fake-{engine_id}-pod",
+            "nodeName": "fake-node",
+            "hostName": "local-fake-host",
+        })
+        servers.append({"engine": engine_id, "server": server, "thread": thread})
+    return engines, servers
+
+
+def _stop_fake_engine_servers(servers: list[dict[str, Any]]) -> None:
+    for item in servers:
+        item["server"].shutdown()
+    for item in servers:
+        item["server"].server_close()
+        item["thread"].join(timeout=2)
+
+
+def run_fake_full_telemetry_smoke(args: argparse.Namespace) -> dict[str, Any]:
+    run_suffix = args.run_suffix or f"fake-full-telemetry-{_utc_slug()}"
+    receipt_log = args.receipt_log or default_receipt_log_path(args.artifact_dir, run_suffix)
+    event_log = args.event_log or os.path.join(args.artifact_dir, f"serving-events-{_safe_slug(run_suffix)}.jsonl")
+    fake_servers: list[dict[str, Any]] = []
+    proxies: list[dict[str, Any]] = []
+    try:
+        engines, fake_servers = _start_fake_engine_servers(args.model)
+        proxied_engines, proxies = start_recording_proxies(
+            engines,
+            receipt_log,
+            listen_host=args.receipt_proxy_host,
+        )
+        preflight = runtime_preflight(proxied_engines, [], model=args.model)
+        if not preflight["ready"]:
+            raise ValueError("fake full telemetry preflight failed: " + json.dumps(preflight, indent=2))
+        summary = run_serving_smoke(
+            engines=attach_endpoint_preflight(proxied_engines, preflight),
+            performance_iq=_fake_performance_iq_client(),
+            model=args.model,
+            prompt=args.prompt,
+            artifact_dir=args.artifact_dir,
+            repetitions=args.repetitions,
+            max_tokens=args.max_tokens,
+            hardware="local fake serving engines",
+            operating_point="fake-full-telemetry",
+            pricing={
+                "usdPerGpuHour": args.usd_per_gpu_hour if args.usd_per_gpu_hour is not None else 1.0,
+                "gpuCount": args.gpu_count,
+                "powerWattsPerGpu": args.power_watts_per_gpu if args.power_watts_per_gpu is not None else 120.0,
+            },
+            run_suffix=run_suffix,
+            capture_token_details=True,
+            top_logprobs=args.top_logprobs if args.top_logprobs > 0 else 5,
+            submit=True,
+        )
+        summary["proofBoundary"] = "local fake serving engines and synthetic dashboard row snapshot; not real runtime proof"
+        summary["preflight"] = preflight
+        summary["receiptProxies"] = proxy_summary(proxies)
+        summary["dashboard"] = _fake_dashboard(summary)
+        summary["receiptLogPath"] = receipt_log
+        summary["eventLogPath"] = event_log
+        proof_path = write_proof_summary(summary, args.artifact_dir, summary_out=args.summary_out)
+        write_serving_event_log(summary, event_log, topic=args.kafka_topic)
+        verification = verify_proof_summary(proof_path)
+        return {
+            **summary,
+            "proofSummaryPath": proof_path,
+            "verification": verification,
+        }
+    finally:
+        stop_recording_proxies(proxies)
+        _stop_fake_engine_servers(fake_servers)
+
+
 def parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Submit vLLM, SGLang, and TensorRT-LLM OpenAI-compatible serving producer smoke data to Performance IQ.",
@@ -2227,6 +2741,7 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--preflight-only", action="store_true", help="Report local runtime and endpoint readiness without sending completion requests.")
     parser.add_argument("--diagnostics-only", action="store_true", help="Report read-only host, cache, port, and endpoint diagnostics for real engine setup.")
     parser.add_argument("--launch-plan-only", action="store_true", help="Print host-aware launch commands for the three serving engines.")
+    parser.add_argument("--fake-full-telemetry", action="store_true", help="Run deterministic local fake engines with strict telemetry, receipts, event log, and proof verification.")
     parser.add_argument("--verify-proof", help="Verify a saved serving smoke proof summary JSON. Requires all three engines unless --allow-missing-engines is set.")
     parser.add_argument("--dump-proof-rows", default=_env("PIQ_SERVING_PROOF_ROWS_OUT"), help="With --verify-proof, write all finest-grain proof rows to this JSON path.")
     parser.add_argument("--skip-preflight", action="store_true", help="Skip the default /v1/models readiness check before sending completion requests.")
@@ -2254,6 +2769,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.diagnostics_only:
         print(json.dumps(runtime_diagnostics(engines, missing, model=args.model), indent=2))
         return 0
+    if args.fake_full_telemetry:
+        try:
+            report = run_fake_full_telemetry_smoke(args)
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(json.dumps(report, indent=2))
+        verification = report.get("verification") if isinstance(report.get("verification"), dict) else {}
+        coverage = verification.get("telemetryCoverage") if isinstance(verification.get("telemetryCoverage"), dict) else {}
+        return 0 if verification.get("ok") is True and coverage.get("allProven") is True else 1
     if args.preflight_only:
         preflight = runtime_preflight(
             engines,
