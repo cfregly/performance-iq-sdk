@@ -3434,6 +3434,7 @@ def _start_fake_engine_servers(model: str) -> tuple[list[dict[str, Any]], list[d
             "requireNativeTelemetry": True,
             "requireHardwareTelemetry": True,
             "promptTokenIds": [11, 22, 33, 44],
+            "tokenizerModel": model,
             "frameworkVersion": f"{engine_id}-fake-1.0",
             "modelRevision": "fake-model-revision",
             "imageDigest": f"sha256:{str(index) * 64}",

@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import shutil
 import sys
@@ -1436,6 +1437,7 @@ else:
                 engine={
                     "engine": "vllm",
                     "baseUrl": "http://127.0.0.1:8000",
+                    "tokenizerModel": laptop_smoke_model(),
                     "tokenizerPythonBin": tokenizer_python,
                     "resolveTokenIdsWithTokenizer": True,
                 },
@@ -1453,23 +1455,42 @@ else:
             )
 
         sample = result["samples"][0]
+        tokenizer_python_sha256 = hashlib.sha256(tokenizer_python.encode("utf-8")).hexdigest()
         self.assertTrue(sample["promptTokenIdsAvailable"])
         self.assertEqual(sample["promptTokenIdSource"], "external-hf-tokenizer")
         self.assertTrue(sample["tokenIdsAvailable"])
         self.assertEqual(sample["tokenIdSource"], "external-hf-tokenizer")
+        self.assertEqual(sample["tokenizerModel"], laptop_smoke_model())
+        self.assertEqual(sample["tokenizerPythonBinSha256"], tokenizer_python_sha256)
         output_rows = [
             row for row in sample["tokenTimeline"]
             if row.get("tokenPhase", "output") == "output"
         ]
         self.assertEqual(output_rows[0]["tokenId"], 101)
         self.assertEqual(output_rows[0]["tokenIdSource"], "external-hf-tokenizer")
+        self.assertEqual(output_rows[0]["tokenizerModel"], laptop_smoke_model())
+        self.assertEqual(output_rows[0]["tokenizerPythonBinSha256"], tokenizer_python_sha256)
         top_logprobs = json.loads(output_rows[0]["topLogprobsJson"])
         self.assertEqual(top_logprobs[0]["tokenId"], 101)
+        sample_rows = [
+            row for row in result["measurements"]
+            if row.get("surface") == "serving_request_sample"
+        ]
+        self.assertEqual(sample_rows[0]["tokenizerModel"], laptop_smoke_model())
+        self.assertEqual(sample_rows[0]["tokenizerPythonBinSha256"], tokenizer_python_sha256)
         prompt_rows = [
             row for row in result["measurements"]
             if row.get("surface") == "serving_token_timeline" and row.get("tokenPhase") == "prompt"
         ]
         self.assertEqual([row["tokenId"] for row in prompt_rows], [501, 502])
+        self.assertEqual([row["tokenizerModel"] for row in prompt_rows], [laptop_smoke_model(), laptop_smoke_model()])
+        self.assertEqual([row["tokenizerPythonBinSha256"] for row in prompt_rows], [tokenizer_python_sha256, tokenizer_python_sha256])
+        output_measurement_rows = [
+            row for row in result["measurements"]
+            if row.get("surface") == "serving_token_timeline" and row.get("tokenPhase") == "output"
+        ]
+        self.assertEqual(output_measurement_rows[0]["tokenizerModel"], laptop_smoke_model())
+        self.assertEqual(output_measurement_rows[0]["tokenizerPythonBinSha256"], tokenizer_python_sha256)
 
     def test_serving_smoke_runs_all_configured_engines(self):
         calls = []
