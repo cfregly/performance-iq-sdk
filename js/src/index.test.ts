@@ -85,7 +85,7 @@ describe("performance-iq-sdk js", () => {
     expect(result.ok).toBe(true)
     expect(result.liveProofReady).toBe(true)
     expect(result.freshRun).toBe(true)
-    expect(result.snapshotBacked).toBe(false)
+    expect(result.producerBacked).toBe(true)
   })
 
   it("rejects non-producer source table names", async () => {
@@ -165,7 +165,16 @@ describe("performance-iq-sdk js", () => {
     })
 
     const result = await runServingProducer({
-      engine: { engine: "vllm", baseUrl: "http://127.0.0.1:8000", frameworkVersion: "test" },
+      engine: {
+        engine: "vllm",
+        baseUrl: "http://127.0.0.1:8000",
+        frameworkVersion: "test",
+        endpointPreflight: {
+          url: "http://127.0.0.1:8000/v1/models",
+          ok: true,
+          modelAvailable: true,
+        },
+      },
       request: {
         model: laptopSmokeModel(),
         messages: [{ role: "user", content: "Say ok." }],
@@ -204,6 +213,11 @@ describe("performance-iq-sdk js", () => {
       totalTokens: 40,
     })
     expect(fs.existsSync(result.artifactPath)).toBe(true)
+    const artifact = JSON.parse(fs.readFileSync(result.artifactPath, "utf-8"))
+    expect(artifact.endpointPreflight).toMatchObject({
+      url: "http://127.0.0.1:8000/v1/models",
+      modelAvailable: true,
+    })
     expect((await validateRun(result.runInput)).ok).toBe(true)
   })
 })

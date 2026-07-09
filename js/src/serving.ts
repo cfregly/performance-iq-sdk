@@ -23,6 +23,7 @@ export interface ServingEngineConfig {
   frameworkVersion?: string
   imageDigest?: string
   imageTag?: string
+  endpointPreflight?: Record<string, unknown>
 }
 
 export interface ServingRequestConfig {
@@ -263,6 +264,7 @@ async function writeSummaryArtifact(
     engineLabel: ENGINE_LABELS[config.engine.engine],
     baseUrl: config.engine.baseUrl,
     requestPath: config.engine.requestPath ?? "/v1/chat/completions",
+    endpointPreflight: config.engine.endpointPreflight,
     model: config.request.model,
     request: requestPayload(config.request),
     samples,

@@ -5,7 +5,9 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import StringIO
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
@@ -13,6 +15,8 @@ from performance_iq_sdk import PerformanceIQ, build_manifest, laptop_smoke_model
 from performance_iq_sdk.serving_smoke import (
     engine_configs_from_env,
     endpoint_probe,
+    main as serving_smoke_main,
+    query_dashboard,
     run_serving_smoke,
     runtime_launch_plan,
     runtime_preflight,
@@ -75,7 +79,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["liveProofReady"])
         self.assertTrue(result["freshRun"])
-        self.assertFalse(result["snapshotBacked"])
+        self.assertTrue(result["producerBacked"])
 
     def test_rejects_non_producer_source_table(self):
         result = validate_run(self.input(store={
@@ -137,7 +141,15 @@ class PerformanceIQSdkTest(unittest.TestCase):
             }
 
         result = run_serving_producer(
-            engine={"engine": "sglang", "baseUrl": "http://127.0.0.1:30000"},
+            engine={
+                "engine": "sglang",
+                "baseUrl": "http://127.0.0.1:30000",
+                "endpointPreflight": {
+                    "url": "http://127.0.0.1:30000/v1/models",
+                    "ok": True,
+                    "modelAvailable": True,
+                },
+            },
             request={
                 "model": laptop_smoke_model(),
                 "messages": [{"role": "user", "content": "Say ok."}],
@@ -155,6 +167,10 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(result["manifest"]["runtime"]["framework"], "SGLang")
         self.assertEqual(result["manifest"]["sourceType"], "other-measured-producer")
         self.assertTrue(os.path.exists(result["artifactPath"]))
+        with open(result["artifactPath"], encoding="utf-8") as handle:
+            artifact = json.load(handle)
+        self.assertEqual(artifact["endpointPreflight"]["url"], "http://127.0.0.1:30000/v1/models")
+        self.assertTrue(artifact["endpointPreflight"]["modelAvailable"])
         self.assertEqual(result["measurements"][0]["runtimeEngine"], "sglang")
         self.assertEqual(result["measurements"][0]["completionTokens"], 14)
         self.assertTrue(validate_run(result["runInput"])["ok"])
@@ -310,6 +326,136 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertTrue(result["modelChecked"])
         self.assertFalse(result["modelAvailable"])
         self.assertFalse(result["ok"])
+
+    def test_serving_smoke_main_preflight_blocks_wrong_model_before_request(self):
+        calls = {"post": 0}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                return
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"object":"list","data":[{"id":"other-model","object":"model"}]}')
+
+            def do_POST(self):
+                calls["post"] += 1
+                self.send_response(200)
+                self.end_headers()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                code = serving_smoke_main([
+                    "--vllm-url", f"http://127.0.0.1:{server.server_address[1]}",
+                    "--allow-missing-engines",
+                    "--no-submit",
+                    "--model", laptop_smoke_model(),
+                    "--artifact-dir", self.tmp_dir,
+                ])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(calls["post"], 0)
+
+    def test_serving_smoke_main_preflight_allows_matching_model_request(self):
+        calls = {"post": 0}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                return
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "object": "list",
+                    "data": [{"id": laptop_smoke_model(), "object": "model"}],
+                }).encode("utf-8"))
+
+            def do_POST(self):
+                calls["post"] += 1
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "id": "chatcmpl-main-test",
+                    "model": laptop_smoke_model(),
+                    "choices": [{"finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+                }).encode("utf-8"))
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                code = serving_smoke_main([
+                    "--vllm-url", f"http://127.0.0.1:{server.server_address[1]}",
+                    "--allow-missing-engines",
+                    "--no-submit",
+                    "--model", laptop_smoke_model(),
+                    "--repetitions", "1",
+                    "--artifact-dir", self.tmp_dir,
+                ])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(calls["post"], 1)
+
+    def test_serving_smoke_dashboard_query_reports_campaign_surfaces(self):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                return
+
+            def do_POST(self):
+                length = int(self.headers.get("content-length", "0"))
+                if length:
+                    self.rfile.read(length)
+                payload = json.dumps({
+                    "price_performance": {
+                        "rowCount": 1,
+                        "rows": [["model", "hardware", "vLLM"]],
+                    },
+                    "capacity_best": {"rowCount": 1, "rows": [["model"]]},
+                    "campaign_provenance": {"rowCount": 1, "rows": [["campaign-a"]]},
+                    "run_details": {"rowCount": 1, "rows": [["campaign-a"]]},
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.send_header("x-piq-store-provider", "sdk-ingestion")
+                self.end_headers()
+                self.wfile.write(payload)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = query_dashboard(f"http://127.0.0.1:{server.server_address[1]}")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(result["storeProvider"], "sdk-ingestion")
+        self.assertEqual(result["campaignIds"], ["campaign-a"])
+        self.assertEqual(result["surfaceCampaignIds"], {
+            "campaign_provenance": ["campaign-a"],
+            "run_details": ["campaign-a"],
+        })
+        self.assertEqual(result["runtimeFrameworks"], ["vLLM"])
 
 
 if __name__ == "__main__":

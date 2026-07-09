@@ -169,8 +169,12 @@ The command sends the same chat-completion prompt to vLLM, SGLang, and
 TensorRT-LLM, writes one normalized summary artifact per engine, submits three
 producer runs, and checks the fixed dashboard surfaces
 `price_performance`, `capacity_best`, `campaign_provenance`, and `run_details`.
-It fails fast unless all three URLs are configured. Use
-`--allow-missing-engines` only for partial local debugging.
+Each artifact includes the request samples, derived measurements, and the
+endpoint preflight evidence used for that engine.
+It fails fast unless all three URLs are configured and the configured endpoints
+pass the model-aware `/v1/models` preflight. Use `--allow-missing-engines` only
+for partial local debugging and `--skip-preflight` only when debugging a
+nonstandard endpoint by hand.
 
 Run a non-mutating readiness check first when setting up real engines:
 

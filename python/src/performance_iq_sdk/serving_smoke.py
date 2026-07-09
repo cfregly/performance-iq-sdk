@@ -35,6 +35,10 @@ ENGINE_API_KEY_ENV = {
     "tensorrt-llm": "PIQ_TENSORRT_LLM_API_KEY",
 }
 QUERY_NAMES = ("price_performance", "capacity_best", "campaign_provenance", "run_details")
+CAMPAIGN_ID_QUERY_COLUMN = {
+    "campaign_provenance": 0,
+    "run_details": 0,
+}
 ENGINE_DEFAULT_PORT = {
     "vllm": 8000,
     "sglang": 30000,
@@ -321,6 +325,23 @@ def runtime_preflight(engines: list[dict[str, Any]], missing_urls: list[str], mo
     }
 
 
+def attach_endpoint_preflight(engines: list[dict[str, Any]], preflight: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not preflight:
+        return engines
+    by_engine = {
+        item.get("engine"): item
+        for item in preflight.get("endpoints", [])
+        if isinstance(item, dict)
+    }
+    return [
+        {
+            **engine,
+            **({"endpointPreflight": by_engine[engine["engine"]]} if engine.get("engine") in by_engine else {}),
+        }
+        for engine in engines
+    ]
+
+
 def query_dashboard(base_url: str, token: str | None = None) -> dict[str, Any]:
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/api/store/queries",
@@ -333,10 +354,19 @@ def query_dashboard(base_url: str, token: str | None = None) -> dict[str, Any]:
     )
     with urllib.request.urlopen(request, timeout=60) as response:
         body = json.loads(response.read().decode("utf-8"))
+        surface_campaign_ids = {
+            name: sorted({
+                row[index]
+                for row in body.get(name, {}).get("rows", [])
+                if len(row) > index and isinstance(row[index], str)
+            })
+            for name, index in CAMPAIGN_ID_QUERY_COLUMN.items()
+        }
         return {
             "storeProvider": response.headers.get("x-piq-store-provider"),
             "rowCounts": {name: body[name]["rowCount"] for name in QUERY_NAMES if name in body},
-            "campaignIds": sorted(row[0] for row in body.get("campaign_provenance", {}).get("rows", [])),
+            "campaignIds": surface_campaign_ids.get("campaign_provenance", []),
+            "surfaceCampaignIds": surface_campaign_ids,
             "runtimeFrameworks": sorted({
                 row[2]
                 for row in body.get("price_performance", {}).get("rows", [])
@@ -438,6 +468,7 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-missing-engines", action="store_true", help="Run configured engines only instead of requiring all three URLs.")
     parser.add_argument("--preflight-only", action="store_true", help="Report local runtime and endpoint readiness without sending completion requests.")
     parser.add_argument("--launch-plan-only", action="store_true", help="Print host-aware launch commands for the three serving engines.")
+    parser.add_argument("--skip-preflight", action="store_true", help="Skip the default /v1/models readiness check before sending completion requests.")
     return parser
 
 
@@ -465,6 +496,14 @@ def main(argv: list[str] | None = None) -> int:
         print("PIQ_BASE_URL or --piq-base-url is required unless --no-submit is set.", file=sys.stderr)
         return 2
 
+    preflight = None
+    if not args.skip_preflight:
+        preflight = runtime_preflight(engines, [], model=args.model)
+        if not preflight["ready"]:
+            print(json.dumps(preflight, indent=2))
+            print("Serving engine preflight failed; pass --skip-preflight only for targeted debugging.", file=sys.stderr)
+            return 1
+
     client = None if args.no_submit else PerformanceIQ(args.piq_base_url, token=args.piq_token)
     pricing = {
         **({"usdPerGpuHour": args.usd_per_gpu_hour} if args.usd_per_gpu_hour is not None else {}),
@@ -473,7 +512,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         summary = run_serving_smoke(
-            engines=engines,
+            engines=attach_endpoint_preflight(engines, preflight),
             performance_iq=client,
             model=args.model,
             prompt=args.prompt,
@@ -486,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
             run_suffix=args.run_suffix,
             submit=not args.no_submit,
         )
+        if preflight is not None:
+            summary["preflight"] = preflight
         if args.query_dashboard:
             if not args.piq_base_url:
                 raise ValueError("dashboard query requires PIQ_BASE_URL or --piq-base-url")
@@ -499,12 +540,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if args.query_dashboard:
             row_counts = summary.get("dashboard", {}).get("rowCounts", {})
-            campaign_ids = set(summary.get("dashboard", {}).get("campaignIds", []))
+            surface_campaign_ids = summary.get("dashboard", {}).get("surfaceCampaignIds", {})
             submitted_campaign_ids = {item["campaignId"] for item in summary["submissions"]}
             expected = len(summary["submissions"])
+            missing_campaign_surfaces = [
+                name for name in CAMPAIGN_ID_QUERY_COLUMN
+                if not submitted_campaign_ids.issubset(set(surface_campaign_ids.get(name, [])))
+            ]
             if (
                 any(row_counts.get(name, 0) < expected for name in QUERY_NAMES) or
-                not submitted_campaign_ids.issubset(campaign_ids)
+                missing_campaign_surfaces
             ):
                 return 1
         return 0

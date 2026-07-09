@@ -223,6 +223,7 @@ def _write_summary_artifact(
                 "engineLabel": serving_engine_label(engine["engine"]),
                 "baseUrl": engine["baseUrl"],
                 "requestPath": engine.get("requestPath", "/v1/chat/completions"),
+                "endpointPreflight": engine.get("endpointPreflight"),
                 "model": request["model"],
                 "request": _request_payload(request),
                 "samples": samples,

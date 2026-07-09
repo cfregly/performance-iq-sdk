@@ -316,11 +316,16 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 
     source_kind = manifest.get("sourceType")
     live_proof_ready = not errors and manifest.get("runClass") == "measured" and source_kind == "fresh-run"
+    producer_backed = (
+        not errors
+        and manifest.get("runClass") == "measured"
+        and source_kind in {"fresh-run", "other-measured-producer"}
+    )
     return {
         "ok": not errors,
         "liveProofReady": live_proof_ready,
         "sourceType": source_kind,
-        "snapshotBacked": False,
+        "producerBacked": producer_backed,
         "freshRun": source_kind == "fresh-run",
         "errors": errors,
         "warnings": warnings,
@@ -340,7 +345,7 @@ def validate_run(input: PerformanceIQRunInput) -> dict[str, Any]:
             "ok": False,
             "liveProofReady": False,
             "sourceType": input.get("sourceType"),
-            "snapshotBacked": False,
+            "producerBacked": False,
             "freshRun": input.get("sourceType") == "fresh-run",
             "errors": [*errors, str(exc)],
             "warnings": [],

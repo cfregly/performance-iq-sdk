@@ -131,7 +131,7 @@ export interface ValidationResult {
   ok: boolean
   liveProofReady: boolean
   sourceType: SourceType | undefined
-  snapshotBacked: boolean
+  producerBacked: boolean
   freshRun: boolean
   errors: string[]
   warnings: string[]
@@ -360,12 +360,15 @@ export function validateManifest(manifest: ProducerRunManifest): ValidationResul
   const liveProofReady = errors.length === 0 &&
     manifest.runClass === "measured" &&
     manifest.sourceType === "fresh-run"
+  const producerBacked = errors.length === 0 &&
+    manifest.runClass === "measured" &&
+    ["fresh-run", "other-measured-producer"].includes(manifest.sourceType)
 
   return {
     ok: errors.length === 0,
     liveProofReady,
     sourceType: manifest.sourceType,
-    snapshotBacked: false,
+    producerBacked,
     freshRun: manifest.sourceType === "fresh-run",
     errors,
     warnings,
@@ -390,7 +393,7 @@ export async function validateRun(input: PerformanceIQRunInput): Promise<Validat
       ok: false,
       liveProofReady: false,
       sourceType: input.sourceType,
-      snapshotBacked: false,
+      producerBacked: false,
       freshRun: input.sourceType === "fresh-run",
       errors,
       warnings: [],

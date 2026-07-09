@@ -22,9 +22,12 @@ From this checkout, use:
 PYTHONPATH=src python -m performance_iq_sdk.serving_smoke --query-dashboard
 ```
 
-The command fails unless all three engine URLs are configured, sends the same
-model and prompt to each runtime, writes normalized summary artifacts, submits
-producer runs, and verifies the fixed Performance IQ dashboard query surfaces.
+The command fails unless all three engine URLs are configured and pass the
+model-aware `/v1/models` preflight, sends the same model and prompt to each
+runtime, writes normalized summary artifacts, submits producer runs, and
+verifies the fixed Performance IQ dashboard query surfaces. The normalized
+summary artifact for each engine includes the endpoint preflight evidence used
+for that run. Use `--skip-preflight` only for targeted endpoint debugging.
 
 Use `--preflight-only` to check local runtime availability and configured
 `/v1/models` endpoints without sending inference requests or submitting runs.
