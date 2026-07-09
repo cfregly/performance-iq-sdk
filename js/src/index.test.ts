@@ -493,7 +493,9 @@ describe("performance-iq-sdk js", () => {
     expect(sample.tokenIdsAvailable).toBe(true)
     expect(sample.logprobsAvailable).toBe(true)
     expect(sample.tokenDetailCount).toBe(2)
+    expect(sample.tokenIdSource).toBe("response-logprobs")
     expect(sample.tokenTimeline?.[0].tokenId).toBe(101)
+    expect(sample.tokenTimeline?.[0].tokenIdSource).toBe("response-logprobs")
     expect(sample.tokenTimeline?.[0].tokenLogprob).toBeCloseTo(-0.1)
     expect(sample.avgPowerWatts).toBeCloseTo(120)
     expect(sample.avgPowerWattsPerGpu).toBeCloseTo(120)
@@ -513,10 +515,87 @@ describe("performance-iq-sdk js", () => {
     expect(result.measurements[0].powerSource).toBe("dcgm")
     const timelineRows = result.measurements.filter((row) => row.surface === "serving_token_timeline")
     expect(timelineRows[0].tokenId).toBe(101)
+    expect(timelineRows[0].tokenIdSource).toBe("response-logprobs")
     expect(timelineRows[1].tokenLogprob as number).toBeCloseTo(-0.2)
     const sampleRows = result.measurements.filter((row) => row.surface === "serving_request_sample")
+    expect(sampleRows[0].tokenIdSource).toBe("response-logprobs")
     expect(sampleRows[0].gpuTemperatureC).toBeCloseTo(61)
     expect(sampleRows[0].smClockMHz).toBeCloseTo(1801)
     expect(sampleRows[0].fbUsedMiB).toBeCloseTo(4097)
+  })
+
+  it("resolves missing token IDs from a configured token map", async () => {
+    const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "piq-serving-token-map-test-"))
+    tmpDirs.push(artifactDir)
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.method).toBe("POST")
+      const body = [
+        {
+          id: "chatcmpl-test",
+          model: laptopSmokeModel(),
+          choices: [{
+            delta: { content: "o" },
+            logprobs: {
+              content: [{
+                token: "o",
+                logprob: -0.1,
+                top_logprobs: [
+                  { token: "o", logprob: -0.1 },
+                  { token: "O", logprob: -2.0 },
+                ],
+              }],
+            },
+          }],
+        },
+        {
+          id: "chatcmpl-test",
+          model: laptopSmokeModel(),
+          choices: [{
+            delta: { content: "k" },
+            finish_reason: "stop",
+            logprobs: { content: [{ token: "k", logprob: -0.2 }] },
+          }],
+          usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
+        },
+      ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })
+    })
+
+    const result = await runServingProducer({
+      engine: {
+        engine: "vllm",
+        baseUrl: "http://127.0.0.1:8000",
+        tokenIdMap: { o: 101, O: 102, k: 202 },
+      },
+      request: {
+        model: laptopSmokeModel(),
+        messages: [{ role: "user", content: "Say ok." }],
+        captureTokenDetails: true,
+        topLogprobs: 2,
+      },
+      artifactDir,
+      workload: {
+        hardware: "local token map engine",
+        operatingPoint: "laptop-smoke",
+      },
+      pricing: { usdPerGpuHour: 1, gpuCount: 1, powerWattsPerGpu: 100 },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => new Date("2026-07-09T12:00:00Z"),
+    })
+
+    const sample = result.samples[0]
+    expect(sample.tokenIdsAvailable).toBe(true)
+    expect(sample.tokenIdSource).toBe("configured-token-id-map")
+    expect(sample.tokenTimeline?.[0].tokenId).toBe(101)
+    expect(sample.tokenTimeline?.[0].tokenIdSource).toBe("configured-token-id-map")
+    const topLogprobs = JSON.parse(String(sample.tokenTimeline?.[0].topLogprobsJson))
+    expect(topLogprobs[1].tokenId).toBe(102)
+    expect(topLogprobs[1].tokenIdSource).toBe("configured-token-id-map")
+    const timelineRows = result.measurements.filter((row) => row.surface === "serving_token_timeline")
+    expect(timelineRows[1].tokenId).toBe(202)
+    expect(timelineRows[1].tokenIdSource).toBe("configured-token-id-map")
   })
 })
