@@ -3,11 +3,14 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 from performance_iq_sdk import PerformanceIQ, build_manifest, laptop_smoke_model, run_serving_producer, validate_run
+from performance_iq_sdk.serving_smoke import engine_configs_from_env, endpoint_probe, run_serving_smoke, runtime_preflight
 
 
 class PerformanceIQSdkTest(unittest.TestCase):
@@ -68,15 +71,15 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertTrue(result["freshRun"])
         self.assertFalse(result["snapshotBacked"])
 
-    def test_rejects_stale_sdk_source_table(self):
+    def test_rejects_non_producer_source_table(self):
         result = validate_run(self.input(store={
-            "sourceTables": ["performance_iq.sdk_submission"],
+            "sourceTables": ["model_store.synthetic_fixture"],
             "modelTables": ["model_store.sdk_pending_ingest"],
             "rowProof": [{"table": "model_store.sdk_pending_ingest", "rowCount": 1}],
         }))
 
         self.assertFalse(result["ok"])
-        self.assertIn("legacy or mock source table", " ".join(result["errors"]))
+        self.assertIn("only use latest Producer Runner source tables", " ".join(result["errors"]))
 
     def test_customer_safe_fails_closed(self):
         result = validate_run(self.input(confidentiality="customer-safe"))
@@ -149,6 +152,116 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(result["measurements"][0]["runtimeEngine"], "sglang")
         self.assertEqual(result["measurements"][0]["completionTokens"], 14)
         self.assertTrue(validate_run(result["runInput"])["ok"])
+
+    def test_serving_smoke_runs_all_configured_engines(self):
+        calls = []
+        submissions = []
+
+        def http_post_json(url, headers, payload):
+            calls.append((url, headers, payload))
+            return {
+                "status": 200,
+                "body": {
+                    "id": f"chatcmpl-{len(calls)}",
+                    "model": laptop_smoke_model(),
+                    "choices": [{"finish_reason": "stop"}],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 7,
+                        "total_tokens": 17,
+                    },
+                },
+            }
+
+        def transport(method, url, headers, body):
+            payload = json.loads(body.decode("utf-8"))
+            submissions.append((method, url, headers, payload))
+            return {
+                "id": payload["manifest"]["campaign"]["runId"],
+                "status": "accepted",
+                "liveProofReady": False,
+            }
+
+        client = PerformanceIQ("https://performance-iq.example", token="service-token", transport=transport)
+        summary = run_serving_smoke(
+            engines=[
+                {"engine": "vllm", "baseUrl": "http://127.0.0.1:8000"},
+                {"engine": "sglang", "baseUrl": "http://127.0.0.1:30000"},
+                {"engine": "tensorrt-llm", "baseUrl": "http://127.0.0.1:8001"},
+            ],
+            performance_iq=client,
+            model=laptop_smoke_model(),
+            prompt="Say ok.",
+            artifact_dir=self.tmp_dir,
+            repetitions=2,
+            max_tokens=16,
+            hardware="local endpoints",
+            operating_point="laptop-smoke",
+            pricing={"usdPerGpuHour": 1, "gpuCount": 1, "powerWattsPerGpu": 100},
+            run_suffix="unit",
+            http_post_json=http_post_json,
+        )
+
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(len(submissions), 3)
+        self.assertEqual({call[2]["model"] for call in calls}, {laptop_smoke_model()})
+        self.assertEqual(
+            [item["runtimeFramework"] for item in summary["submissions"]],
+            ["vLLM", "SGLang", "TensorRT-LLM"],
+        )
+        self.assertTrue(all(item["status"] == "accepted" for item in summary["submissions"]))
+        self.assertTrue(all(item["successCount"] == 2 for item in summary["submissions"]))
+
+    def test_serving_smoke_reports_missing_engine_urls(self):
+        class Args:
+            vllm_url = "http://127.0.0.1:8000"
+            sglang_url = None
+            tensorrt_llm_url = None
+            framework_version = None
+            image_digest = None
+            image_tag = None
+
+        configs, missing = engine_configs_from_env(Args())
+
+        self.assertEqual([config["engine"] for config in configs], ["vllm"])
+        self.assertEqual(missing, ["sglang (PIQ_SGLANG_URL)", "tensorrt-llm (PIQ_TENSORRT_LLM_URL)"])
+
+    def test_serving_smoke_preflight_reports_missing_without_requests(self):
+        preflight = runtime_preflight([], ["vllm (PIQ_VLLM_URL)"])
+
+        self.assertFalse(preflight["ready"])
+        self.assertEqual(preflight["missingEngineUrls"], ["vllm (PIQ_VLLM_URL)"])
+        self.assertEqual(preflight["endpoints"], [])
+        self.assertIn("vllmCommand", preflight["localRuntime"])
+        self.assertIn("python", preflight["host"])
+
+    def test_serving_smoke_endpoint_preflight_rejects_not_found_models_route(self):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                return
+
+            def do_GET(self):
+                self.send_response(404)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"detail":"not found"}')
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = endpoint_probe({
+                "engine": "vllm",
+                "baseUrl": f"http://127.0.0.1:{server.server_address[1]}",
+            })
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertTrue(result["reachable"])
+        self.assertEqual(result["status"], 404)
+        self.assertFalse(result["ok"])
 
 
 if __name__ == "__main__":

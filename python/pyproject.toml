@@ -24,5 +24,8 @@ classifiers = [
   "Topic :: Software Development :: Libraries"
 ]
 
+[project.scripts]
+piq-serving-smoke = "performance_iq_sdk.serving_smoke:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]

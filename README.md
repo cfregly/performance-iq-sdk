@@ -137,6 +137,77 @@ Example endpoints:
 - SGLang: `http://127.0.0.1:30000/v1/chat/completions`
 - TensorRT-LLM: configure the OpenAI-compatible server URL for your deployment.
 
+### Three-engine smoke
+
+Use the Python smoke runner when you have real serving endpoints and want one
+proof packet for all three frameworks:
+
+```bash
+export PIQ_BASE_URL=http://127.0.0.1:3002
+export PIQ_VLLM_URL=http://127.0.0.1:8000
+export PIQ_SGLANG_URL=http://127.0.0.1:30000
+export PIQ_TENSORRT_LLM_URL=http://127.0.0.1:8001
+
+python -m performance_iq_sdk.serving_smoke \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --repetitions 3 \
+  --artifact-dir ./performance-iq-output/serving-producers \
+  --query-dashboard
+```
+
+From this source checkout, run the same command as:
+
+```bash
+PYTHONPATH=python/src python -m performance_iq_sdk.serving_smoke \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --repetitions 3 \
+  --artifact-dir ./performance-iq-output/serving-producers \
+  --query-dashboard
+```
+
+The command sends the same chat-completion prompt to vLLM, SGLang, and
+TensorRT-LLM, writes one normalized summary artifact per engine, submits three
+producer runs, and checks the fixed dashboard surfaces
+`price_performance`, `capacity_best`, `campaign_provenance`, and `run_details`.
+It fails fast unless all three URLs are configured. Use
+`--allow-missing-engines` only for partial local debugging.
+
+Run a non-mutating readiness check first when setting up real engines:
+
+```bash
+PYTHONPATH=python/src python -m performance_iq_sdk.serving_smoke \
+  --preflight-only \
+  --vllm-url http://127.0.0.1:8000 \
+  --sglang-url http://127.0.0.1:30000 \
+  --tensorrt-llm-url http://127.0.0.1:8001
+```
+
+The preflight prints local binary/module status (`vllm`, `sglang`,
+`trtllm-serve`, `nvidia-smi`) and probes each configured endpoint at
+`/v1/models`. It does not send inference requests or write Performance IQ runs.
+
+Reference launch shapes for the same smoke model:
+
+```bash
+# vLLM OpenAI-compatible server
+vllm serve Qwen/Qwen2.5-0.5B-Instruct \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --served-model-name Qwen/Qwen2.5-0.5B-Instruct
+
+# SGLang OpenAI-compatible server
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen2.5-0.5B-Instruct \
+  --host 127.0.0.1 \
+  --port 30000 \
+  --served-model-name Qwen/Qwen2.5-0.5B-Instruct
+
+# TensorRT-LLM OpenAI-compatible server; requires NVIDIA/CUDA.
+trtllm-serve Qwen/Qwen2.5-0.5B-Instruct \
+  --host 127.0.0.1 \
+  --port 8001
+```
+
 ## Safety Rules
 
 - SDKs never accept or forward caller-provided SQL, query names, or query lists.

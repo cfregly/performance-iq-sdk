@@ -104,12 +104,6 @@ class PerformanceIQRunInput(TypedDict):
 IMAGE_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$", re.IGNORECASE)
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
 PLACEHOLDER_PATTERN = re.compile(r"\b(replace-with|example-only|do-not-quote|template only)\b", re.IGNORECASE)
-LEGACY_SOURCE_TABLE_PATTERNS = [
-    re.compile(r"^intake_" + "am" + r"ps\.", re.IGNORECASE),
-    re.compile(r"^intake_store\.perf_report_.*_v1$", re.IGNORECASE),
-    re.compile(r"^sample-data:", re.IGNORECASE),
-    re.compile(r"^performance_iq\.sdk_submission$", re.IGNORECASE),
-]
 DISALLOWED_REQUEST_KEYS = {"sql", "queryName", "queries"}
 
 
@@ -302,19 +296,10 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     row_proof = store.get("rowProof") if isinstance(store.get("rowProof"), list) else []
     if not source_tables:
         errors.append("store.sourceTables must contain at least one table")
-    legacy_source_tables = [
-        table
-        for table in source_tables
-        if any(pattern.search(str(table)) for pattern in LEGACY_SOURCE_TABLE_PATTERNS)
-    ]
-    if legacy_source_tables:
+    unsupported_source_tables = [table for table in source_tables if table not in LATEST_PRODUCER_SOURCE_TABLES]
+    if unsupported_source_tables:
         errors.append(
-            "store.sourceTables must not use legacy or mock source table names: "
-            + ", ".join(str(table) for table in legacy_source_tables)
-        )
-    if source_tables and not any(table in LATEST_PRODUCER_SOURCE_TABLES for table in source_tables):
-        errors.append(
-            "store.sourceTables must include a latest Producer Runner source table: "
+            "store.sourceTables must only use latest Producer Runner source tables: "
             + ", ".join(LATEST_PRODUCER_SOURCE_TABLES)
         )
     if not model_tables:

@@ -2,3 +2,29 @@
 
 Python SDK for building, validating, and submitting Performance IQ producer
 results packets. See the repository root README for full examples.
+
+## Serving producer smoke
+
+After installing the package, run all configured OpenAI-compatible serving
+engines with:
+
+```bash
+PIQ_BASE_URL=http://127.0.0.1:3002 \
+PIQ_VLLM_URL=http://127.0.0.1:8000 \
+PIQ_SGLANG_URL=http://127.0.0.1:30000 \
+PIQ_TENSORRT_LLM_URL=http://127.0.0.1:8001 \
+piq-serving-smoke --query-dashboard
+```
+
+From this checkout, use:
+
+```bash
+PYTHONPATH=src python -m performance_iq_sdk.serving_smoke --query-dashboard
+```
+
+The command fails unless all three engine URLs are configured, sends the same
+model and prompt to each runtime, writes normalized summary artifacts, submits
+producer runs, and verifies the fixed Performance IQ dashboard query surfaces.
+
+Use `--preflight-only` to check local runtime availability and configured
+`/v1/models` endpoints without sending inference requests or submitting runs.

@@ -88,17 +88,17 @@ describe("performance-iq-sdk js", () => {
     expect(result.snapshotBacked).toBe(false)
   })
 
-  it("rejects stale SDK source table names", async () => {
+  it("rejects non-producer source table names", async () => {
     const result = await validateRun(runInput({
       store: {
-        sourceTables: ["performance_iq.sdk_submission"],
+        sourceTables: ["model_store.synthetic_fixture"],
         modelTables: ["model_store.sdk_pending_ingest"],
         rowProof: [{ table: "model_store.sdk_pending_ingest", rowCount: 1 }],
       },
     }))
 
     expect(result.ok).toBe(false)
-    expect(result.errors.join(" ")).toContain("legacy or mock source table")
+    expect(result.errors.join(" ")).toContain("only use latest Producer Runner source tables")
   })
 
   it("fails closed for customer-safe submissions until governance is implemented", async () => {

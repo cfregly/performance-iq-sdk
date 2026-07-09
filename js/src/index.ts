@@ -164,12 +164,6 @@ export interface PerformanceStatusRequest {
 const IMAGE_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/i
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i
 const PLACEHOLDER_PATTERN = /\b(replace-with|example-only|do-not-quote|template only)\b/i
-const LEGACY_SOURCE_TABLE_PATTERNS = [
-  new RegExp(`^intake_${"am"}ps\\.`, "i"),
-  /^intake_store\.perf_report_.*_v1$/i,
-  /^sample-data:/i,
-  /^performance_iq\.sdk_submission$/i,
-]
 const DISALLOWED_REQUEST_KEYS = new Set(["sql", "queryName", "queries"])
 
 function normalizeBaseUrl(value: string): string {
@@ -344,12 +338,9 @@ export function validateManifest(manifest: ProducerRunManifest): ValidationResul
   }
   const sourceTables = manifest.store?.sourceTables ?? []
   if (!sourceTables.length) errors.push("store.sourceTables must contain at least one table")
-  const legacySourceTables = sourceTables.filter((table) => LEGACY_SOURCE_TABLE_PATTERNS.some((pattern) => pattern.test(table)))
-  if (legacySourceTables.length > 0) {
-    errors.push(`store.sourceTables must not use legacy or mock source table names: ${legacySourceTables.join(", ")}`)
-  }
-  if (sourceTables.length > 0 && !sourceTables.some((table) => LATEST_PRODUCER_SOURCE_TABLES.includes(table))) {
-    errors.push(`store.sourceTables must include a latest Producer Runner source table: ${LATEST_PRODUCER_SOURCE_TABLES.join(", ")}`)
+  const unsupportedSourceTables = sourceTables.filter((table) => !LATEST_PRODUCER_SOURCE_TABLES.includes(table))
+  if (unsupportedSourceTables.length > 0) {
+    errors.push(`store.sourceTables must only use latest Producer Runner source tables: ${LATEST_PRODUCER_SOURCE_TABLES.join(", ")}`)
   }
   if (!manifest.store?.modelTables?.length) errors.push("store.modelTables must contain at least one table")
   const modelTables = new Set(manifest.store?.modelTables ?? [])
