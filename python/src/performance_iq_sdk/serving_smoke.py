@@ -188,6 +188,8 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
         server_args = _json_or_text_env(_engine_env_name(engine, "SERVER_ARGS"))
         if server_args is None:
             server_args = getattr(args, "server_args", None)
+        tokenizer_model = _env(_engine_env_name(engine, "TOKENIZER_MODEL"), getattr(args, "tokenizer_model", None))
+        resolve_token_ids = bool(getattr(args, "resolve_token_ids_with_tokenizer", False))
         process_id = _env(_engine_env_name(engine, "PROCESS_ID"), getattr(args, "process_id", None))
         container_id = _env(_engine_env_name(engine, "CONTAINER_ID"), getattr(args, "container_id", None))
         pod_name = _env(_engine_env_name(engine, "POD_NAME"), getattr(args, "pod_name", None))
@@ -206,6 +208,8 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
             **({"imageDigest": image_digest} if image_digest else {}),
             **({"imageTag": image_tag} if image_tag else {}),
             **({"serverArgs": server_args} if server_args is not None else {}),
+            **({"tokenizerModel": tokenizer_model} if tokenizer_model else {}),
+            **({"resolveTokenIdsWithTokenizer": True} if resolve_token_ids else {}),
             **({"processId": process_id} if process_id else {}),
             **({"containerId": container_id} if container_id else {}),
             **({"podName": pod_name} if pod_name else {}),
@@ -1308,6 +1312,8 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                         errors.append(f"{engine} samples[{index}].logprobsAvailable requires tokenDetailsAvailable.")
                     if sample.get("tokenIdsAvailable") and not sample.get("tokenDetailsAvailable"):
                         errors.append(f"{engine} samples[{index}].tokenIdsAvailable requires tokenDetailsAvailable.")
+                    if sample.get("tokenIdsAvailable") and not isinstance(sample.get("tokenIdSource"), str):
+                        errors.append(f"{engine} samples[{index}].tokenIdSource is required when token IDs are available.")
                     if not _is_positive_number(sample.get("outputTokenCount")):
                         errors.append(f"{engine} samples[{index}].outputTokenCount must be a positive number.")
                     if not isinstance(sample.get("promptSha256"), str) or len(sample.get("promptSha256")) != 64:
@@ -1354,6 +1360,8 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                         errors.append(f"{engine} tokenTimeline[{token_index}].tokenLogprob must be numeric when present.")
                     if token_row.get("tokenId") is not None and not isinstance(token_row.get("tokenId"), int):
                         errors.append(f"{engine} tokenTimeline[{token_index}].tokenId must be an integer when present.")
+                    if token_row.get("tokenId") is not None and not isinstance(token_row.get("tokenIdSource"), str):
+                        errors.append(f"{engine} tokenTimeline[{token_index}].tokenIdSource is required when tokenId is present.")
             hardware_telemetry = artifact.get("hardwareTelemetry")
             if not isinstance(hardware_telemetry, list) or len(hardware_telemetry) != request_count:
                 errors.append(f"{engine} summary artifact hardwareTelemetry must match requestCount.")
@@ -1421,6 +1429,8 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                                     errors.append(f"{engine} samples[{index}].{key} must be true when token details are required.")
                             if sample.get("tokenDetailSource") != "response-logprobs":
                                 errors.append(f"{engine} samples[{index}].tokenDetailSource must be response-logprobs when token details are required.")
+                            if not isinstance(sample.get("tokenIdSource"), str):
+                                errors.append(f"{engine} samples[{index}].tokenIdSource must describe tokenizer/response provenance when token details are required.")
                         for token_index, token_row in enumerate(token_timeline if isinstance(token_timeline, list) else []):
                             if not isinstance(token_row, dict):
                                 continue
@@ -1428,6 +1438,8 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                                 errors.append(f"{engine} tokenTimeline[{token_index}].tokenIndex must be an integer when token details are required.")
                             if not isinstance(token_row.get("tokenId"), int):
                                 errors.append(f"{engine} tokenTimeline[{token_index}].tokenId must be an integer when token details are required.")
+                            if not isinstance(token_row.get("tokenIdSource"), str):
+                                errors.append(f"{engine} tokenTimeline[{token_index}].tokenIdSource must describe tokenizer/response provenance when token details are required.")
                             if not _is_number(token_row.get("tokenLogprob")):
                                 errors.append(f"{engine} tokenTimeline[{token_index}].tokenLogprob must be numeric when token details are required.")
                             if token_row.get("tokenDetailSource") != "response-logprobs":

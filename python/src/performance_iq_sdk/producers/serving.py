@@ -863,7 +863,7 @@ def _send_streaming_chat_completion(
                     native_telemetry = telemetry
             content = _choice_content(body)
             if content:
-                token_details = _choice_token_details(body)
+                token_details = _choice_token_details(body, engine, request)
                 output_chunks.append({
                     "chunkIndex": len(output_chunks),
                     "content": content,
@@ -922,6 +922,7 @@ def _send_streaming_chat_completion(
                         "contentSha256": detail.get("tokenSha256") or chunk["contentSha256"],
                         "isFirstOutput": token_index == 0,
                         "tokenId": detail.get("tokenId"),
+                        "tokenIdSource": detail.get("tokenIdSource"),
                         "tokenLogprob": detail.get("logprob"),
                         "tokenTextSha256": detail.get("tokenSha256"),
                         "topLogprobsJson": _stable_json(top_logprobs) if top_logprobs else None,
@@ -939,6 +940,7 @@ def _send_streaming_chat_completion(
                     "contentSha256": chunk["contentSha256"],
                     "isFirstOutput": chunk["chunkIndex"] == 0,
                     "tokenId": None,
+                    "tokenIdSource": None,
                     "tokenLogprob": None,
                     "tokenTextSha256": None,
                     "topLogprobsJson": None,
@@ -1064,6 +1066,7 @@ def _send_streaming_chat_completion(
             "logprobsAvailable": False,
             "tokenDetailCount": 0,
             "tokenDetailSource": "error",
+            "tokenIdSource": None,
             "error": str(exc),
         }
 
@@ -1107,7 +1110,7 @@ def _send_non_streaming_chat_completion(
         )
         hardware_telemetry = _hardware_metrics_delta(engine, hardware_before, hardware_after)
         runtime_provenance = _runtime_provenance(engine, native_telemetry)
-        raw_token_details = _choice_token_details(body)
+        raw_token_details = _choice_token_details(body, engine, request)
         token_summary = _token_detail_summary(raw_token_details, token_details_requested)
         token_timeline = [
             {
@@ -1120,6 +1123,7 @@ def _send_non_streaming_chat_completion(
                 "contentSha256": detail.get("tokenSha256"),
                 "isFirstOutput": index == 0,
                 "tokenId": detail.get("tokenId"),
+                "tokenIdSource": detail.get("tokenIdSource"),
                 "tokenLogprob": detail.get("logprob"),
                 "tokenTextSha256": detail.get("tokenSha256"),
                 "topLogprobsJson": _stable_json(detail.get("topLogprobs")) if detail.get("topLogprobs") else None,
@@ -1245,6 +1249,7 @@ def _send_non_streaming_chat_completion(
             "logprobsAvailable": False,
             "tokenDetailCount": 0,
             "tokenDetailSource": "error",
+            "tokenIdSource": None,
             "error": str(exc),
         }
 
@@ -1477,6 +1482,7 @@ def _build_measurements(
             "logprobsAvailable": sample.get("logprobsAvailable"),
             "tokenDetailCount": sample.get("tokenDetailCount"),
             "tokenDetailSource": sample.get("tokenDetailSource"),
+            "tokenIdSource": sample.get("tokenIdSource"),
             "queueWaitMs": sample.get("queueWaitMs"),
             "prefillMs": sample.get("prefillMs"),
             "decodeMs": sample.get("decodeMs"),
@@ -1509,6 +1515,7 @@ def _build_measurements(
                 "isFirstOutput": chunk.get("isFirstOutput"),
                 "tokenIndex": chunk.get("tokenIndex"),
                 "tokenId": chunk.get("tokenId"),
+                "tokenIdSource": chunk.get("tokenIdSource"),
                 "tokenLogprob": chunk.get("tokenLogprob"),
                 "tokenTextSha256": chunk.get("tokenTextSha256"),
                 "topLogprobsJson": chunk.get("topLogprobsJson"),
@@ -1598,6 +1605,7 @@ def _write_summary_artifact(
                         "logprobsAvailable": sample.get("logprobsAvailable"),
                         "tokenDetailCount": sample.get("tokenDetailCount"),
                         "tokenDetailSource": sample.get("tokenDetailSource"),
+                        "tokenIdSource": sample.get("tokenIdSource"),
                     }
                     for sample in samples
                 ],
