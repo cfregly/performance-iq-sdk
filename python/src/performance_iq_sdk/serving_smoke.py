@@ -16,7 +16,7 @@ import sys
 import threading
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, Callable
 
 from performance_iq_sdk.client import PerformanceIQ
 from performance_iq_sdk.producers.serving import (
@@ -50,6 +50,11 @@ ENGINE_METRICS_URL_ENV = {
     "sglang": "PIQ_SGLANG_METRICS_URL",
     "tensorrt-llm": "PIQ_TENSORRT_LLM_METRICS_URL",
 }
+ENGINE_JSON_METRICS_URL_ENV = {
+    "vllm": "PIQ_VLLM_JSON_METRICS_URL",
+    "sglang": "PIQ_SGLANG_JSON_METRICS_URL",
+    "tensorrt-llm": "PIQ_TENSORRT_LLM_JSON_METRICS_URL",
+}
 ENGINE_HARDWARE_METRICS_URL_ENV = {
     "vllm": "PIQ_VLLM_HARDWARE_METRICS_URL",
     "sglang": "PIQ_SGLANG_HARDWARE_METRICS_URL",
@@ -79,6 +84,9 @@ PROOF_VERIFICATION_SCHEMA_VERSION = "performance-iq.serving-smoke-proof-verifica
 EVIDENCE_INDEX_SCHEMA_VERSION = "performance-iq.serving-evidence-index.v1"
 SERVING_SUMMARY_SCHEMA_VERSION = "performance-iq.serving-producer-summary.v1"
 PRODUCER_MANIFEST_SCHEMA_VERSION = "performance-iq.producer-manifest.v1"
+SERVING_EVENT_SCHEMA_VERSION = "performance-iq.serving-telemetry-event.v1"
+SERVING_EVENT_DEFAULT_TOPIC = "performance-iq.serving.telemetry.v1"
+SERVING_KAFKA_PUBLICATION_SCHEMA_VERSION = "performance-iq.serving-kafka-publication.v1"
 LOW_FREE_SPACE_BYTES = 30 * 1024 * 1024 * 1024
 SIZE_TIMEOUT_SECONDS = 15
 COMMAND_PROBE_TIMEOUT_SECONDS = 30
@@ -108,6 +116,19 @@ REQUIRED_NATIVE_SAMPLE_FIELDS = (
     "promptTokensCachedDelta",
     "promptTokensComputedDelta",
 )
+
+
+def default_native_metrics_url(engine: str, base_url: str) -> str:
+    base = base_url.rstrip("/")
+    if engine == "tensorrt-llm":
+        return f"{base}/prometheus/metrics"
+    return f"{base}/metrics"
+
+
+def default_native_json_metrics_url(engine: str, base_url: str) -> str | None:
+    if engine != "tensorrt-llm":
+        return None
+    return f"{base_url.rstrip('/')}/metrics"
 
 
 def _utc_slug() -> str:
@@ -177,7 +198,8 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
         if not url:
             continue
         api_key = _env(ENGINE_API_KEY_ENV[engine])
-        metrics_url = _env(ENGINE_METRICS_URL_ENV[engine], f"{url.rstrip('/')}/metrics")
+        metrics_url = _env(ENGINE_METRICS_URL_ENV[engine], default_native_metrics_url(engine, url))
+        json_metrics_url = _env(ENGINE_JSON_METRICS_URL_ENV[engine], default_native_json_metrics_url(engine, url))
         hardware_metrics_url = _env(ENGINE_HARDWARE_METRICS_URL_ENV[engine])
         if getattr(args, "collect_hardware_metrics", False) and not hardware_metrics_url:
             hardware_metrics_url = metrics_url
@@ -199,6 +221,7 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
             "engine": engine,
             "baseUrl": url,
             "metricsUrl": metrics_url,
+            **({"nativeJsonMetricsUrl": json_metrics_url} if json_metrics_url else {}),
             **({"hardwareMetricsUrl": hardware_metrics_url} if hardware_metrics_url else {}),
             **({"requireNativeTelemetry": True} if getattr(args, "require_native_telemetry", False) else {}),
             **({"requireHardwareTelemetry": True} if getattr(args, "require_hardware_telemetry", False) else {}),
@@ -452,6 +475,7 @@ def environment_diagnostics() -> dict[str, Any]:
         "PIQ_SGLANG_METRICS_URL",
         "PIQ_TENSORRT_LLM_URL",
         "PIQ_TENSORRT_LLM_METRICS_URL",
+        "PIQ_TENSORRT_LLM_JSON_METRICS_URL",
         "PIQ_TENSORRT_LLM_IMAGE",
         "PIQ_PYTHON_BIN",
         "PIQ_SERVING_BIN_DIR",
@@ -620,6 +644,10 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
             "PIQ_VLLM_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['vllm']}",
             "PIQ_SGLANG_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['sglang']}",
             "PIQ_TENSORRT_LLM_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}",
+            "PIQ_VLLM_METRICS_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['vllm']}/metrics",
+            "PIQ_SGLANG_METRICS_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['sglang']}/metrics",
+            "PIQ_TENSORRT_LLM_METRICS_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}/prometheus/metrics",
+            "PIQ_TENSORRT_LLM_JSON_METRICS_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}/metrics",
         },
         "strictProof": {
             "mode": "strict-recorded-smoke",
@@ -682,10 +710,10 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
                 "serve": (
                     f"SGLANG_USE_MLX=1 python -m sglang.launch_server --model {quoted_model} "
                     f"--disable-cuda-graph --host 127.0.0.1 --port {ENGINE_DEFAULT_PORT['sglang']} "
-                    f"--served-model-name {quoted_model}"
+                    f"--served-model-name {quoted_model} --enable-metrics"
                 ) if apple_silicon else (
                     f"python -m sglang.launch_server --model-path {quoted_model} --host 127.0.0.1 "
-                    f"--port {ENGINE_DEFAULT_PORT['sglang']} --served-model-name {quoted_model}"
+                    f"--port {ENGINE_DEFAULT_PORT['sglang']} --served-model-name {quoted_model} --enable-metrics"
                 ),
                 "verify": f"curl -fsS http://127.0.0.1:{ENGINE_DEFAULT_PORT['sglang']}/v1/models",
             },
@@ -808,6 +836,14 @@ def sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _sha256_json(value: Any) -> str:
+    return hashlib.sha256(_stable_json(value).encode("utf-8")).hexdigest()
+
+
 def _unique_candidates(candidates: list[str]) -> list[str]:
     seen: set[str] = set()
     unique: list[str] = []
@@ -833,6 +869,61 @@ def _resolve_proof_member_path(path: Any, proof_dir: str) -> str:
         if os.path.exists(candidate):
             return candidate
     return candidates[0]
+
+
+def _serving_event_validation_errors(event: dict[str, Any], line_number: int) -> tuple[str | None, list[str]]:
+    errors: list[str] = []
+    if event.get("schemaVersion") != SERVING_EVENT_SCHEMA_VERSION:
+        errors.append(f"event log line {line_number} schemaVersion must be {SERVING_EVENT_SCHEMA_VERSION}.")
+    if not isinstance(event.get("topic"), str) or not event.get("topic"):
+        errors.append(f"event log line {line_number} topic is required.")
+    event_type = event.get("eventType")
+    if not isinstance(event_type, str) or not event_type:
+        errors.append(f"event log line {line_number} eventType is required.")
+        return None, errors
+    event_id = event.get("eventId")
+    partition_key = event.get("partitionKey")
+    payload = event.get("payload")
+    if not isinstance(event_id, str) or len(event_id) != 64:
+        errors.append(f"event log line {line_number} eventId must be a 64-character digest.")
+    if not isinstance(partition_key, str) or not partition_key:
+        errors.append(f"event log line {line_number} partitionKey is required.")
+    if not isinstance(payload, dict):
+        errors.append(f"event log line {line_number} payload must be an object.")
+    if isinstance(event_id, str) and len(event_id) == 64 and isinstance(partition_key, str) and isinstance(payload, dict):
+        expected_event_id = _sha256_json({
+            "schemaVersion": event.get("schemaVersion"),
+            "eventType": event_type,
+            "partitionKey": partition_key,
+            "payload": payload,
+        })
+        if event_id != expected_event_id:
+            errors.append(f"event log line {line_number} eventId digest does not match event payload.")
+    return event_type, errors
+
+
+def load_serving_event_log(event_log_path: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    validation_errors: list[str] = []
+    with open(event_log_path, encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            try:
+                event = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                validation_errors.append(f"event log line {line_number} is not valid JSON: {exc}")
+                continue
+            if not isinstance(event, dict):
+                validation_errors.append(f"event log line {line_number} must be a JSON object.")
+                continue
+            _event_type, event_errors = _serving_event_validation_errors(event, line_number)
+            validation_errors.extend(event_errors)
+            events.append(event)
+    if validation_errors:
+        raise ValueError("; ".join(validation_errors))
+    return events
 
 
 def _load_json_file(path: str, errors: list[str], label: str) -> dict[str, Any] | None:
@@ -1067,6 +1158,7 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
     artifact_hashes: dict[str, str] = {}
     campaign_ids: list[str] = []
     receipt_counts: dict[str, int] = {}
+    event_counts: dict[str, int] = {}
 
     proof = _load_json_file(proof_abs, errors, "proof summary")
     if not proof:
@@ -1144,6 +1236,21 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
             }
         except ValueError as exc:
             errors.append(str(exc))
+
+    event_log_path = _resolve_proof_member_path(proof.get("eventLogPath"), proof_dir)
+    if event_log_path:
+        if not os.path.exists(event_log_path):
+            errors.append(f"event log does not exist: {event_log_path}")
+        else:
+            try:
+                for event in load_serving_event_log(event_log_path):
+                    event_type = event.get("eventType")
+                    if isinstance(event_type, str):
+                        event_counts[event_type] = event_counts.get(event_type, 0) + 1
+            except ValueError as exc:
+                errors.append(str(exc))
+            except OSError as exc:
+                errors.append(f"event log is not readable: {exc}")
 
     preflight = proof.get("preflight")
     endpoint_preflight_by_engine: dict[str, dict[str, Any]] = {}
@@ -1506,6 +1613,21 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
         if not isinstance(runtime_frameworks, list) or not expected_frameworks.issubset(set(runtime_frameworks)):
             errors.append("dashboard runtimeFrameworks is missing submitted serving frameworks.")
 
+    if event_log_path and os.path.exists(event_log_path):
+        for required_event_type in ["serving.measurement.serving_request_sample", "serving.measurement.serving_token_timeline"]:
+            if event_counts.get(required_event_type, 0) < len(expected_engines):
+                errors.append(f"event log must include at least {len(expected_engines)} {required_event_type} events.")
+
+    kafka_publication = proof.get("kafkaPublication")
+    if isinstance(kafka_publication, dict):
+        if kafka_publication.get("schemaVersion") != SERVING_KAFKA_PUBLICATION_SCHEMA_VERSION:
+            errors.append(f"kafkaPublication schemaVersion must be {SERVING_KAFKA_PUBLICATION_SCHEMA_VERSION}.")
+        published_count = kafka_publication.get("publishedCount")
+        if not isinstance(published_count, int) or published_count < 0:
+            errors.append("kafkaPublication publishedCount must be a non-negative integer.")
+        elif event_counts and published_count != sum(event_counts.values()):
+            errors.append("kafkaPublication publishedCount must equal event log event count.")
+
     return {
         "schemaVersion": PROOF_VERIFICATION_SCHEMA_VERSION,
         "proofPath": proof_abs,
@@ -1518,8 +1640,120 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
         "artifactHashes": artifact_hashes,
         "receiptLogPath": receipt_log_path or None,
         "receiptCounts": receipt_counts,
+        "eventLogPath": event_log_path or None,
+        "eventCounts": event_counts,
         "dashboard": proof.get("dashboard") if isinstance(proof.get("dashboard"), dict) else None,
     }
+
+
+def _load_json_object(path: str, label: str) -> dict[str, Any]:
+    with open(path, encoding="utf-8") as handle:
+        parsed = json.load(handle)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{label} must be a JSON object: {path}")
+    return parsed
+
+
+def _enrich_artifact_rows(rows: Any, context: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    enriched: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if isinstance(row, dict):
+            enriched.append({**context, "rowIndex": index, **row})
+    return enriched
+
+
+def extract_proof_rows(
+    proof_path: str,
+    *,
+    require_all_engines: bool = True,
+    verification: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    proof_abs = os.path.abspath(proof_path)
+    proof_dir = os.path.dirname(proof_abs)
+    proof = _load_json_object(proof_abs, "proof summary")
+    verification = verification or verify_proof_summary(proof_abs, require_all_engines=require_all_engines)
+
+    rows: dict[str, Any] = {
+        "schemaVersion": "performance-iq.serving-proof-rows.v1",
+        "proofPath": proof_abs,
+        "generatedAtUtc": _utc_now_iso(),
+        "verification": verification,
+        "submissions": [],
+        "dashboardRows": proof.get("dashboard", {}).get("rows", {}) if isinstance(proof.get("dashboard"), dict) else {},
+        "servingRequestSamples": [],
+        "servingTokenTimeline": [],
+        "nativeTelemetry": [],
+        "hardwareTelemetry": [],
+        "requestTrace": [],
+        "measurements": [],
+        "requestReceipts": [],
+        "eventLogRows": [],
+    }
+
+    submissions = proof.get("submissions")
+    if isinstance(submissions, list):
+        for submission in submissions:
+            if not isinstance(submission, dict):
+                continue
+            context = {
+                "engine": submission.get("engine"),
+                "runtimeFramework": submission.get("runtimeFramework"),
+                "campaignId": submission.get("campaignId"),
+                "runId": submission.get("runId"),
+                "artifactPath": submission.get("artifactPath"),
+                "manifestPath": submission.get("manifestPath"),
+            }
+            rows["submissions"].append({**context, **submission})
+            artifact_path = _resolve_proof_member_path(submission.get("artifactPath"), proof_dir)
+            if not artifact_path or not os.path.exists(artifact_path):
+                continue
+            artifact = _load_json_object(artifact_path, f"{submission.get('engine', 'engine')} summary artifact")
+            rows["servingRequestSamples"].extend(_enrich_artifact_rows(artifact.get("samples"), context))
+            rows["servingTokenTimeline"].extend(_enrich_artifact_rows(artifact.get("tokenTimeline"), context))
+            rows["nativeTelemetry"].extend(_enrich_artifact_rows(artifact.get("nativeTelemetry"), context))
+            rows["hardwareTelemetry"].extend(_enrich_artifact_rows(artifact.get("hardwareTelemetry"), context))
+            rows["requestTrace"].extend(_enrich_artifact_rows(artifact.get("requestTrace"), context))
+            rows["measurements"].extend(_enrich_artifact_rows(artifact.get("measurements"), context))
+
+    receipt_log_path = _resolve_proof_member_path(proof.get("receiptLogPath"), proof_dir)
+    if receipt_log_path and os.path.exists(receipt_log_path):
+        rows["receiptLogPath"] = receipt_log_path
+        rows["requestReceipts"] = load_receipts(receipt_log_path)
+
+    event_log_path = _resolve_proof_member_path(proof.get("eventLogPath"), proof_dir)
+    if event_log_path and os.path.exists(event_log_path):
+        rows["eventLogPath"] = event_log_path
+        rows["eventLogRows"] = load_serving_event_log(event_log_path)
+
+    rows["rowCounts"] = {
+        key: len(value)
+        for key, value in rows.items()
+        if isinstance(value, list)
+    }
+    return rows
+
+
+def write_proof_rows(
+    proof_path: str,
+    output_path: str,
+    *,
+    require_all_engines: bool = True,
+    verification: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    rows = extract_proof_rows(
+        proof_path,
+        require_all_engines=require_all_engines,
+        verification=verification,
+    )
+    parent = os.path.dirname(output_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as handle:
+        json.dump(rows, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return rows
 
 
 def default_proof_summary_path(artifact_dir: str, run_suffix: str) -> str:
@@ -1607,6 +1841,226 @@ def write_proof_summary(summary: dict[str, Any], artifact_dir: str, summary_out:
         json.dump(body, handle, indent=2)
         handle.write("\n")
     return proof_path
+
+
+def _event_key(*parts: Any) -> str:
+    return "|".join(str(part) for part in parts if part is not None and str(part) != "")
+
+
+def _serving_event(
+    *,
+    topic: str,
+    event_type: str,
+    key: str,
+    payload: dict[str, Any],
+    summary: dict[str, Any],
+    submission: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    campaign_id = submission.get("campaignId") if submission else payload.get("campaignId")
+    run_id = submission.get("runId") if submission else payload.get("runId")
+    engine = submission.get("engine") if submission else payload.get("engine")
+    body = {
+        "schemaVersion": SERVING_EVENT_SCHEMA_VERSION,
+        "topic": topic,
+        "eventType": event_type,
+        "partitionKey": key,
+        "emittedAtUtc": _utc_now_iso(),
+        "model": summary.get("model"),
+        "runSuffix": summary.get("runSuffix"),
+        "campaignId": campaign_id,
+        "runId": run_id,
+        "engine": engine,
+        "runtimeFramework": submission.get("runtimeFramework") if submission else payload.get("runtimeFramework"),
+        "proofSummaryPath": summary.get("proofSummaryPath"),
+        "artifactPath": submission.get("artifactPath") if submission else payload.get("artifactPath"),
+        "manifestPath": submission.get("manifestPath") if submission else payload.get("manifestPath"),
+        "payload": payload,
+    }
+    body["eventId"] = _sha256_json({
+        "schemaVersion": body["schemaVersion"],
+        "eventType": body["eventType"],
+        "partitionKey": body["partitionKey"],
+        "payload": body["payload"],
+    })
+    return body
+
+
+def build_serving_event_records(summary: dict[str, Any], *, topic: str = SERVING_EVENT_DEFAULT_TOPIC) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for submission in summary.get("submissions", []):
+        if not isinstance(submission, dict):
+            continue
+        campaign_id = submission.get("campaignId")
+        run_id = submission.get("runId")
+        engine = submission.get("engine")
+        key_base = _event_key(campaign_id, run_id, engine)
+        artifact = _read_json_object(str(submission.get("artifactPath") or ""))
+        manifest = _read_json_object(str(submission.get("manifestPath") or ""))
+        events.append(_serving_event(
+            topic=topic,
+            event_type="serving.submission",
+            key=key_base,
+            summary=summary,
+            submission=submission,
+            payload={
+                **{key: value for key, value in submission.items() if key != "errors"},
+                "errors": submission.get("errors") or [],
+            },
+        ))
+        if artifact:
+            events.append(_serving_event(
+                topic=topic,
+                event_type="serving.artifact",
+                key=_event_key(key_base, "artifact"),
+                summary=summary,
+                submission=submission,
+                payload={
+                    "schemaVersion": artifact.get("schemaVersion"),
+                    "capturePolicy": artifact.get("capturePolicy"),
+                    "requestTrace": artifact.get("requestTrace"),
+                    "artifactPath": submission.get("artifactPath"),
+                    "artifactSha256": submission.get("artifactSha256"),
+                    "manifestPath": submission.get("manifestPath"),
+                    "manifestSchemaVersion": manifest.get("schemaVersion"),
+                },
+            ))
+            for measurement_index, row in enumerate(artifact.get("measurements") if isinstance(artifact.get("measurements"), list) else []):
+                if not isinstance(row, dict):
+                    continue
+                surface = str(row.get("surface") or "result")
+                request_id = row.get("requestId")
+                key = _event_key(key_base, surface, request_id, row.get("chunkIndex"), row.get("tokenIndex"), measurement_index)
+                events.append(_serving_event(
+                    topic=topic,
+                    event_type=f"serving.measurement.{surface}",
+                    key=key,
+                    summary=summary,
+                    submission=submission,
+                    payload=row,
+                ))
+            for name, rows in [
+                ("serving.request_trace", artifact.get("requestTrace")),
+                ("serving.native_telemetry", artifact.get("nativeTelemetry")),
+                ("serving.hardware_telemetry", artifact.get("hardwareTelemetry")),
+                ("serving.token_detail_summary", artifact.get("tokenDetails")),
+            ]:
+                if not isinstance(rows, list):
+                    continue
+                for index, row in enumerate(rows):
+                    if not isinstance(row, dict):
+                        continue
+                    events.append(_serving_event(
+                        topic=topic,
+                        event_type=name,
+                        key=_event_key(key_base, name, row.get("requestId"), index),
+                        summary=summary,
+                        submission=submission,
+                        payload=row,
+                    ))
+
+    dashboard = summary.get("dashboard")
+    if isinstance(dashboard, dict):
+        events.append(_serving_event(
+            topic=topic,
+            event_type="serving.dashboard_snapshot",
+            key=_event_key(summary.get("runSuffix"), "dashboard"),
+            summary=summary,
+            payload={
+                "storeProvider": dashboard.get("storeProvider"),
+                "rowCounts": dashboard.get("rowCounts"),
+                "surfaceCampaignIds": dashboard.get("surfaceCampaignIds"),
+                "submittedCampaignRows": dashboard.get("submittedCampaignRows"),
+            },
+        ))
+
+    receipt_log = str(summary.get("receiptLogPath") or "")
+    if receipt_log and os.path.exists(receipt_log):
+        try:
+            receipts = load_receipts(receipt_log)
+        except ValueError:
+            receipts = []
+        for receipt in receipts:
+            events.append(_serving_event(
+                topic=topic,
+                event_type="serving.request_receipt",
+                key=_event_key(receipt.get("campaignId"), receipt.get("runId"), receipt.get("engine"), receipt.get("requestId")),
+                summary=summary,
+                payload=receipt,
+            ))
+    return events
+
+
+def write_serving_event_log(summary: dict[str, Any], event_log_path: str, *, topic: str = SERVING_EVENT_DEFAULT_TOPIC) -> str:
+    parent = os.path.dirname(event_log_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    events = build_serving_event_records(summary, topic=topic)
+    with open(event_log_path, "w", encoding="utf-8") as handle:
+        for event in events:
+            json.dump(event, handle, sort_keys=True)
+            handle.write("\n")
+    return event_log_path
+
+
+KafkaProducerFactory = Callable[..., Any]
+
+
+def publish_serving_event_log(
+    event_log_path: str,
+    *,
+    bootstrap_servers: str,
+    topic: str | None = None,
+    client_id: str = "performance-iq-serving-producer",
+    producer_factory: KafkaProducerFactory | None = None,
+) -> dict[str, Any]:
+    if not bootstrap_servers:
+        raise ValueError("bootstrap_servers is required to publish serving events to Kafka.")
+    events = load_serving_event_log(event_log_path)
+    if not events:
+        raise ValueError(f"event log contains no publishable events: {event_log_path}")
+    if producer_factory is None:
+        try:
+            from kafka import KafkaProducer  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "Kafka publication requires kafka-python. Install with `pip install './python[kafka]'` "
+                "or omit --publish-kafka and use the JSONL event log as the durable handoff."
+            ) from exc
+        producer_factory = KafkaProducer
+    producer = producer_factory(
+        bootstrap_servers=bootstrap_servers,
+        client_id=client_id,
+    )
+    event_counts: dict[str, int] = {}
+    topic_counts: dict[str, int] = {}
+    try:
+        for event in events:
+            event_topic = topic or str(event.get("topic") or SERVING_EVENT_DEFAULT_TOPIC)
+            event_type = str(event.get("eventType") or "unknown")
+            event_counts[event_type] = event_counts.get(event_type, 0) + 1
+            topic_counts[event_topic] = topic_counts.get(event_topic, 0) + 1
+            future = producer.send(
+                event_topic,
+                key=str(event.get("partitionKey") or "").encode("utf-8"),
+                value=_stable_json(event).encode("utf-8"),
+            )
+            if hasattr(future, "get"):
+                future.get(timeout=30)
+        if hasattr(producer, "flush"):
+            producer.flush(timeout=30)
+    finally:
+        if hasattr(producer, "close"):
+            producer.close(timeout=30)
+    return {
+        "schemaVersion": SERVING_KAFKA_PUBLICATION_SCHEMA_VERSION,
+        "eventLogPath": event_log_path,
+        "bootstrapServers": bootstrap_servers,
+        "clientId": client_id,
+        "publishedAtUtc": _utc_now_iso(),
+        "publishedCount": len(events),
+        "eventCounts": event_counts,
+        "topicCounts": topic_counts,
+    }
 
 
 def run_serving_smoke(
@@ -1724,6 +2178,11 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--host-name", help="Global serving-engine host name; per-engine PIQ_<ENGINE>_HOST_NAME overrides it.")
     parser.add_argument("--run-suffix", default=_env("PIQ_SERVING_RUN_SUFFIX"))
     parser.add_argument("--summary-out", default=_env("PIQ_SERVING_SUMMARY_OUT"), help="Write the overall smoke proof summary to this JSON path.")
+    parser.add_argument("--event-log", default=_env("PIQ_SERVING_EVENT_LOG"), help="Write Kafka-ready post-capture serving telemetry events to this JSONL path.")
+    parser.add_argument("--kafka-topic", default=_env("PIQ_SERVING_KAFKA_TOPIC", SERVING_EVENT_DEFAULT_TOPIC), help="Topic name embedded in post-capture serving telemetry events.")
+    parser.add_argument("--publish-kafka", action="store_true", default=_env("PIQ_SERVING_PUBLISH_KAFKA", "false").lower() == "true", help="Publish post-capture serving telemetry events to Kafka after writing the JSONL event log.")
+    parser.add_argument("--kafka-bootstrap-servers", default=_env("PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS"), help="Kafka bootstrap servers for --publish-kafka; env PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS.")
+    parser.add_argument("--kafka-client-id", default=_env("PIQ_SERVING_KAFKA_CLIENT_ID", "performance-iq-serving-producer"), help="Kafka client ID for post-capture event publication.")
     parser.add_argument("--receipt-log", default=_env("PIQ_SERVING_RECEIPT_LOG"), help="JSONL receipt log produced by the serving request recorder.")
     parser.add_argument("--record-receipts", action="store_true", help="Start in-process receipt proxies and route engine traffic through them.")
     parser.add_argument("--receipt-proxy-host", default=_env("PIQ_SERVING_RECEIPT_PROXY_HOST", "127.0.0.1"))
@@ -1734,6 +2193,7 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--diagnostics-only", action="store_true", help="Report read-only host, cache, port, and endpoint diagnostics for real engine setup.")
     parser.add_argument("--launch-plan-only", action="store_true", help="Print host-aware launch commands for the three serving engines.")
     parser.add_argument("--verify-proof", help="Verify a saved serving smoke proof summary JSON. Requires all three engines unless --allow-missing-engines is set.")
+    parser.add_argument("--dump-proof-rows", default=_env("PIQ_SERVING_PROOF_ROWS_OUT"), help="With --verify-proof, write all finest-grain proof rows to this JSON path.")
     parser.add_argument("--skip-preflight", action="store_true", help="Skip the default /v1/models readiness check before sending completion requests.")
     return parser
 
@@ -1742,6 +2202,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.verify_proof:
         report = verify_proof_summary(args.verify_proof, require_all_engines=not args.allow_missing_engines)
+        if args.dump_proof_rows:
+            write_proof_rows(
+                args.verify_proof,
+                args.dump_proof_rows,
+                require_all_engines=not args.allow_missing_engines,
+                verification=report,
+            )
+            report["proofRowsPath"] = os.path.abspath(args.dump_proof_rows)
         print(json.dumps(report, indent=2))
         return 0 if report["ok"] else 1
     engines, missing = engine_configs_from_env(args)
@@ -1772,6 +2240,13 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_submit and not args.piq_base_url:
         print("PIQ_BASE_URL or --piq-base-url is required unless --no-submit is set.", file=sys.stderr)
         return 2
+    if args.publish_kafka:
+        if not args.event_log:
+            print("--publish-kafka requires --event-log or PIQ_SERVING_EVENT_LOG so publication happens after durable capture.", file=sys.stderr)
+            return 2
+        if not args.kafka_bootstrap_servers:
+            print("--publish-kafka requires --kafka-bootstrap-servers or PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS.", file=sys.stderr)
+            return 2
 
     client = None if args.no_submit else PerformanceIQ(args.piq_base_url, token=args.piq_token)
     pricing = {
@@ -1829,7 +2304,19 @@ def main(argv: list[str] | None = None) -> int:
             )
         if receipt_log:
             summary["receiptLogPath"] = receipt_log
+        if args.event_log:
+            summary["eventLogPath"] = args.event_log
         write_proof_summary(summary, args.artifact_dir, summary_out=args.summary_out)
+        if args.event_log:
+            write_serving_event_log(summary, args.event_log, topic=args.kafka_topic)
+        if args.publish_kafka:
+            summary["kafkaPublication"] = publish_serving_event_log(
+                args.event_log,
+                bootstrap_servers=args.kafka_bootstrap_servers,
+                topic=args.kafka_topic,
+                client_id=args.kafka_client_id,
+            )
+            write_proof_summary(summary, args.artifact_dir, summary_out=args.summary_out)
         print(json.dumps(summary, indent=2))
         failures = [
             item for item in summary["submissions"]

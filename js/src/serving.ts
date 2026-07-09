@@ -22,6 +22,8 @@ export interface ServingEngineConfig {
   apiKey?: string
   requestPath?: string
   metricsUrl?: string
+  nativeJsonMetricsUrl?: string
+  jsonMetricsUrl?: string
   collectNativeMetrics?: boolean
   hardwareMetricsUrl?: string
   dcgmMetricsUrl?: string
@@ -124,6 +126,10 @@ export interface ServingRequestSample {
   nativeTpotMs?: number | null
   nativeE2eLatencyMs?: number | null
   nativeInterTokenLatencyMs?: number | null
+  nativeIterationLatencyMs?: number | null
+  nativeGpuMemoryBytes?: number | null
+  nativeKvCacheUsedBlocks?: number | null
+  nativeKvCacheMaxBlocks?: number | null
   runningRequests?: number | null
   waitingRequests?: number | null
   kvCacheUsagePct?: number | null
@@ -409,9 +415,24 @@ function nativeTelemetry(config: ServingProducerConfig, body?: Record<string, an
   }
 }
 
+function defaultNativeMetricsUrl(engine: ServingEngineConfig): string {
+  const baseUrl = normalizeBaseUrl(engine.baseUrl)
+  return engine.engine === "tensorrt-llm" ? `${baseUrl}/prometheus/metrics` : `${baseUrl}/metrics`
+}
+
+function defaultNativeJsonMetricsUrl(engine: ServingEngineConfig): string | null {
+  return engine.engine === "tensorrt-llm" ? `${normalizeBaseUrl(engine.baseUrl)}/metrics` : null
+}
+
 function metricsUrl(config: ServingProducerConfig): string | null {
   if (config.engine.metricsUrl?.trim()) return config.engine.metricsUrl.trim()
-  return config.engine.collectNativeMetrics ? `${normalizeBaseUrl(config.engine.baseUrl)}/metrics` : null
+  return config.engine.collectNativeMetrics ? defaultNativeMetricsUrl(config.engine) : null
+}
+
+function nativeJsonMetricsUrl(config: ServingProducerConfig): string | null {
+  if (config.engine.nativeJsonMetricsUrl?.trim()) return config.engine.nativeJsonMetricsUrl.trim()
+  if (config.engine.jsonMetricsUrl?.trim()) return config.engine.jsonMetricsUrl.trim()
+  return config.engine.collectNativeMetrics ? defaultNativeJsonMetricsUrl(config.engine) : null
 }
 
 function parsePrometheusMetrics(text: string): Record<string, number> {
@@ -433,42 +454,141 @@ function parsePrometheusMetrics(text: string): Record<string, number> {
       const labelledName = `${metricName}{${labelName}=${labelValue}}`
       metrics[labelledName] = (metrics[labelledName] ?? 0) + value
       metrics[`${labelledName}__sample_count`] = (metrics[`${labelledName}__sample_count`] ?? 0) + 1
+      for (const suffix of ["_sum", "_count"]) {
+        if (!metricName.endsWith(suffix)) continue
+        const labelledHistogramName = `${metricName.slice(0, -suffix.length)}{${labelName}=${labelValue}}${suffix}`
+        metrics[labelledHistogramName] = (metrics[labelledHistogramName] ?? 0) + value
+        metrics[`${labelledHistogramName}__sample_count`] = (metrics[`${labelledHistogramName}__sample_count`] ?? 0) + 1
+      }
     }
   }
   return metrics
 }
 
+function flattenNumericJsonMetrics(value: unknown, prefix = ""): Record<string, number> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return Object.entries(value as Record<string, unknown>).reduce<Record<string, number>>((acc, [key, nested]) => {
+      const childPrefix = prefix ? `${prefix}.${key}` : key
+      return { ...acc, ...flattenNumericJsonMetrics(nested, childPrefix) }
+    }, {})
+  }
+  if (Array.isArray(value)) {
+    return value.reduce<Record<string, number>>((acc, nested, index) => {
+      const childPrefix = prefix ? `${prefix}.${index}` : String(index)
+      return { ...acc, ...flattenNumericJsonMetrics(nested, childPrefix) }
+    }, {})
+  }
+  return typeof value === "number" && Number.isFinite(value) && prefix ? { [prefix]: value } : {}
+}
+
+function parseNativeJsonMetrics(text: string): Record<string, number> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return {}
+  }
+  const records = Array.isArray(parsed) ? parsed : [parsed]
+  const numericRecords = records
+    .filter((record) => record && typeof record === "object" && !Array.isArray(record))
+    .map((record) => flattenNumericJsonMetrics(record))
+    .filter((record) => Object.keys(record).length > 0)
+  if (!numericRecords.length) return {}
+  const latest = numericRecords[numericRecords.length - 1] ?? {}
+  const summary: Record<string, number> = Object.fromEntries(
+    Object.entries(latest).map(([key, value]) => [`latest.${key}`, value]),
+  )
+  const keys = new Set(numericRecords.flatMap((record) => Object.keys(record)))
+  for (const key of keys) {
+    const values = numericRecords.map((record) => record[key]).filter((value): value is number => Number.isFinite(value))
+    if (!values.length) continue
+    summary[`avg.${key}`] = values.reduce((sum, value) => sum + value, 0) / values.length
+    summary[`max.${key}`] = Math.max(...values)
+  }
+  return summary
+}
+
 async function readNativeMetrics(config: ServingProducerConfig): Promise<Record<string, unknown>> {
   const url = metricsUrl(config)
-  if (!url) return { available: false, source: "metrics-url-not-configured" }
+  const jsonUrl = nativeJsonMetricsUrl(config)
+  if (!url && !jsonUrl) return { available: false, source: "metrics-url-not-configured" }
   const fetchImpl = config.fetchImpl ?? fetch
-  try {
-    const response = await fetchImpl(url, {
+  const metrics: Record<string, number> = {}
+  const jsonMetrics: Record<string, number> = {}
+  const sources: string[] = []
+  const errors: Array<Record<string, unknown>> = []
+  if (url) {
+    try {
+      const response = await fetchImpl(url, {
+        method: "GET",
+        headers: {
+          accept: "text/plain",
+          ...(config.engine.apiKey ? { authorization: `Bearer ${config.engine.apiKey}` } : {}),
+        },
+      })
+      if (!response.ok) {
+        errors.push({ source: "prometheus-unavailable", metricsUrl: url, status: response.status })
+      } else {
+        const text = await response.text()
+        Object.assign(metrics, parsePrometheusMetrics(text))
+        Object.assign(jsonMetrics, parseNativeJsonMetrics(text))
+        if (Object.keys(metrics).length) sources.push("prometheus-snapshot")
+        if (Object.keys(jsonMetrics).length) sources.push("native-json-snapshot")
+      }
+    } catch (error) {
+      errors.push({
+        source: "prometheus-unavailable",
+        metricsUrl: url,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  if (jsonUrl && jsonUrl !== url) {
+    try {
+      const response = await fetchImpl(jsonUrl, {
       method: "GET",
       headers: {
-        accept: "text/plain",
+        accept: "application/json, text/plain",
         ...(config.engine.apiKey ? { authorization: `Bearer ${config.engine.apiKey}` } : {}),
       },
     })
     if (!response.ok) {
-      return { available: false, source: "prometheus-unavailable", metricsUrl: url, status: response.status }
+        errors.push({ source: "native-json-unavailable", nativeJsonMetricsUrl: jsonUrl, status: response.status })
+      } else {
+        const parsed = parseNativeJsonMetrics(await response.text())
+        if (Object.keys(parsed).length) {
+          Object.assign(jsonMetrics, parsed)
+          sources.push("native-json-snapshot")
+        } else if (!Object.keys(metrics).length) {
+          errors.push({ source: "native-json-empty", nativeJsonMetricsUrl: jsonUrl })
+        }
+      }
+    } catch (error) {
+      errors.push({
+        source: "native-json-unavailable",
+        nativeJsonMetricsUrl: jsonUrl,
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
-    const metrics = parsePrometheusMetrics(await response.text())
-    if (!Object.keys(metrics).length) return { available: false, source: "prometheus-empty", metricsUrl: url }
-    return {
-      available: true,
-      source: "prometheus-snapshot",
-      metricsUrl: url,
-      metrics,
-      capturedAtUtc: new Date().toISOString(),
-    }
-  } catch (error) {
+  }
+  if (!Object.keys(metrics).length && !Object.keys(jsonMetrics).length) {
     return {
       available: false,
-      source: "prometheus-unavailable",
+      source: typeof errors[0]?.source === "string" ? errors[0].source : "native-metrics-empty",
       metricsUrl: url,
-      error: error instanceof Error ? error.message : String(error),
+      ...(jsonUrl ? { nativeJsonMetricsUrl: jsonUrl } : {}),
+      ...(errors.length ? { errors } : {}),
     }
+  }
+  return {
+    available: true,
+    source: Array.from(new Set(sources)).join("+") || "native-metrics-snapshot",
+    metricsUrl: url,
+    ...(jsonUrl ? { nativeJsonMetricsUrl: jsonUrl } : {}),
+    metrics,
+    ...(Object.keys(jsonMetrics).length ? { jsonMetrics } : {}),
+    ...(errors.length ? { errors } : {}),
+    capturedAtUtc: new Date().toISOString(),
   }
 }
 
@@ -541,6 +661,17 @@ function metricAverage(metrics: Record<string, number>, candidates: string[]): n
   return null
 }
 
+function jsonMetricValue(metrics: Record<string, number>, candidates: string[]): number | null {
+  return metricValue(metrics, candidates)
+}
+
+function firstNumber(...values: Array<number | null>): number | null {
+  for (const value of values) {
+    if (value != null && Number.isFinite(value)) return value
+  }
+  return null
+}
+
 function counterDelta(before: Record<string, number>, after: Record<string, number>, candidates: string[]): number | null {
   const beforeValue = metricValue(before, candidates)
   const afterValue = metricValue(after, candidates)
@@ -578,17 +709,28 @@ function nativeMetricsDelta(
   const afterMetrics = after.metrics && typeof after.metrics === "object" && !Array.isArray(after.metrics)
     ? after.metrics as Record<string, number>
     : {}
+  const afterJsonMetrics = after.jsonMetrics && typeof after.jsonMetrics === "object" && !Array.isArray(after.jsonMetrics)
+    ? after.jsonMetrics as Record<string, number>
+    : {}
   const prefixQueries = counterDelta(beforeMetrics, afterMetrics, [
+    "vllm:prefix_cache_queries",
     "vllm:prefix_cache_queries_total",
     "sglang:prefix_cache_queries_total",
+    "sglang:prefix_cache_queries",
     "sglang_prefix_cache_queries_total",
+    "sglang_prefix_cache_queries",
+    "trtllm_prefix_cache_queries",
     "trtllm:prefix_cache_queries_total",
     "trtllm_prefix_cache_queries_total",
   ])
   const prefixHits = counterDelta(beforeMetrics, afterMetrics, [
+    "vllm:prefix_cache_hits",
     "vllm:prefix_cache_hits_total",
     "sglang:prefix_cache_hits_total",
+    "sglang:prefix_cache_hits",
     "sglang_prefix_cache_hits_total",
+    "sglang_prefix_cache_hits",
+    "trtllm_prefix_cache_hits",
     "trtllm:prefix_cache_hits_total",
     "trtllm_prefix_cache_hits_total",
   ])
@@ -606,6 +748,8 @@ function nativeMetricsDelta(
     "sglang_request_queue_time_seconds",
     "trtllm:request_queue_time_seconds",
     "trtllm_request_queue_time_seconds",
+    "trtllm_queue_time_seconds",
+    "trtllm:queue_time_seconds",
   ])
   const prefillMs = histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
     "vllm:request_prefill_time_seconds",
@@ -615,6 +759,8 @@ function nativeMetricsDelta(
     "sglang_request_prefill_time_seconds",
     "trtllm:request_prefill_time_seconds",
     "trtllm_request_prefill_time_seconds",
+    "trtllm:context_time_seconds",
+    "trtllm_context_time_seconds",
   ])
   let decodeMs = histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
     "vllm:request_decode_time_seconds",
@@ -624,11 +770,19 @@ function nativeMetricsDelta(
     "sglang_request_decode_time_seconds",
     "trtllm:request_decode_time_seconds",
     "trtllm_request_decode_time_seconds",
+    "trtllm:generation_time_seconds",
+    "trtllm_generation_time_seconds",
   ])
   if (decodeMs == null && nativeE2eLatencyMs != null && queueWaitMs != null && prefillMs != null) {
     const derivedDecodeMs = nativeE2eLatencyMs - queueWaitMs - prefillMs
     if (derivedDecodeMs >= 0) decodeMs = derivedDecodeMs
   }
+  const trtllmKvUsedBlocks = jsonMetricValue(afterJsonMetrics, ["latest.kvCacheStats.usedNumBlocks", "max.kvCacheStats.usedNumBlocks"])
+  const trtllmKvMaxBlocks = jsonMetricValue(afterJsonMetrics, ["latest.kvCacheStats.maxNumBlocks", "max.kvCacheStats.maxNumBlocks"])
+  const trtllmKvUsage = trtllmKvUsedBlocks != null && trtllmKvMaxBlocks != null && trtllmKvMaxBlocks > 0
+    ? trtllmKvUsedBlocks / trtllmKvMaxBlocks
+    : null
+  const prefixCacheHitRate = prefixHits != null && prefixQueries != null && prefixQueries > 0 ? prefixHits / prefixQueries : null
   const values: Record<string, number | null> = {
     nativeTtftMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
       "vllm:time_to_first_token_seconds",
@@ -639,10 +793,15 @@ function nativeMetricsDelta(
     ]),
     nativeTpotMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
       "vllm:request_time_per_output_token_seconds",
+      "vllm:time_per_output_token_seconds",
       "sglang:request_time_per_output_token_seconds",
+      "sglang:time_per_output_token_seconds",
       "sglang_request_time_per_output_token_seconds",
+      "sglang_time_per_output_token_seconds",
       "trtllm:request_time_per_output_token_seconds",
+      "trtllm:time_per_output_token_seconds",
       "trtllm_request_time_per_output_token_seconds",
+      "trtllm_time_per_output_token_seconds",
     ]),
     nativeInterTokenLatencyMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
       "vllm:inter_token_latency_seconds",
@@ -655,12 +814,26 @@ function nativeMetricsDelta(
     queueWaitMs,
     prefillMs,
     decodeMs,
-    runningRequests: metricValue(afterMetrics, ["vllm:num_requests_running", "sglang:num_running_reqs", "sglang_num_running_reqs", "trtllm:num_requests_running", "trtllm_num_requests_running"]),
-    waitingRequests: metricValue(afterMetrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs", "trtllm:num_requests_waiting", "trtllm_num_requests_waiting"]),
-    kvCacheUsagePct: metricValue(afterMetrics, ["vllm:kv_cache_usage_perc", "sglang:token_usage", "sglang_token_usage", "trtllm:kv_cache_usage_perc", "trtllm_kv_cache_usage_perc"]),
+    runningRequests: firstNumber(
+      metricValue(afterMetrics, ["vllm:num_requests_running", "sglang:num_running_reqs", "sglang_num_running_reqs", "trtllm:num_requests_running", "trtllm_num_requests_running", "trtllm:num_active_requests", "trtllm_num_active_requests"]),
+      jsonMetricValue(afterJsonMetrics, ["latest.numActiveRequests", "avg.numActiveRequests", "max.numActiveRequests"]),
+    ),
+    waitingRequests: metricValue(afterMetrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs", "trtllm:num_requests_waiting", "trtllm_num_requests_waiting", "trtllm:num_queued_requests", "trtllm_num_queued_requests"]),
+    kvCacheUsagePct: firstNumber(
+      metricValue(afterMetrics, ["vllm:kv_cache_usage_perc", "sglang:token_usage", "sglang_token_usage", "trtllm:kv_cache_usage_perc", "trtllm_kv_cache_usage_perc", "trtllm:kv_cache_utilization", "trtllm_kv_cache_utilization"]),
+      trtllmKvUsage,
+    ),
+    trtllmIterationLatencyMs: jsonMetricValue(afterJsonMetrics, ["avg.iterLatencyMS", "latest.iterLatencyMS"]),
+    trtllmGpuMemoryBytes: jsonMetricValue(afterJsonMetrics, ["latest.gpuMemUsage", "max.gpuMemUsage"]),
+    trtllmKvCacheUsedBlocks: trtllmKvUsedBlocks,
+    trtllmKvCacheMaxBlocks: trtllmKvMaxBlocks,
     prefixCacheQueriesDelta: prefixQueries,
     prefixCacheHitsDelta: prefixHits,
-    cacheHitRate: prefixHits != null && prefixQueries != null && prefixQueries > 0 ? prefixHits / prefixQueries : null,
+    cacheHitRate: firstNumber(
+      prefixCacheHitRate,
+      metricValue(afterMetrics, ["sglang:cache_hit_rate", "sglang_cache_hit_rate", "trtllm:kv_cache_hit_rate", "trtllm_kv_cache_hit_rate"]),
+      jsonMetricValue(afterJsonMetrics, ["latest.kvCacheStats.cacheHitRate", "avg.kvCacheStats.cacheHitRate"]),
+    ),
     promptTokensCachedDelta: counterDelta(beforeMetrics, afterMetrics, [
       "vllm:prompt_tokens_cached_total",
       "sglang:prompt_tokens_cached_total",
@@ -677,10 +850,15 @@ function nativeMetricsDelta(
     ]),
   }
   const availableValues = Object.fromEntries(Object.entries(values).filter(([, value]) => value != null))
+  const deltaSources = [
+    ...(Object.keys(beforeMetrics).length && Object.keys(afterMetrics).length ? ["prometheus-delta"] : []),
+    ...(Object.keys(afterJsonMetrics).length ? ["native-json-snapshot"] : []),
+  ]
   return {
     available: Object.keys(availableValues).length > 0,
-    source: "prometheus-delta",
+    source: deltaSources.join("+") || "native-metrics-delta",
     metricsUrl: after.metricsUrl ?? before.metricsUrl,
+    nativeJsonMetricsUrl: after.nativeJsonMetricsUrl ?? before.nativeJsonMetricsUrl,
     beforeCapturedAtUtc: before.capturedAtUtc,
     afterCapturedAtUtc: after.capturedAtUtc,
     ...availableValues,
@@ -735,18 +913,35 @@ function hardwareMetricsDelta(
 
 function combineNativeTelemetry(...items: Array<Record<string, unknown>>): Record<string, unknown> {
   const combined: Record<string, unknown> = {}
-  const sources: string[] = []
+  const availableSources: string[] = []
+  const fallbackSources: string[] = []
   for (const item of items) {
-    if (typeof item.source === "string") sources.push(item.source)
+    if (typeof item.source === "string") {
+      if (item.available) availableSources.push(item.source)
+      else fallbackSources.push(item.source)
+    }
     Object.assign(combined, item)
   }
   combined.available = items.some((item) => Boolean(item.available))
+  const sources = availableSources.length ? availableSources : fallbackSources
   if (sources.length) combined.source = Array.from(new Set(sources)).join("+")
   return combined
 }
 
 function numberFrom(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null
+}
+
+function nativeIterationFields(telemetry: Record<string, unknown>): Pick<
+  ServingRequestSample,
+  "nativeIterationLatencyMs" | "nativeGpuMemoryBytes" | "nativeKvCacheUsedBlocks" | "nativeKvCacheMaxBlocks"
+> {
+  return {
+    nativeIterationLatencyMs: numberFrom(telemetry.nativeIterationLatencyMs) ?? numberFrom(telemetry.trtllmIterationLatencyMs),
+    nativeGpuMemoryBytes: numberFrom(telemetry.nativeGpuMemoryBytes) ?? numberFrom(telemetry.trtllmGpuMemoryBytes),
+    nativeKvCacheUsedBlocks: numberFrom(telemetry.nativeKvCacheUsedBlocks) ?? numberFrom(telemetry.trtllmKvCacheUsedBlocks),
+    nativeKvCacheMaxBlocks: numberFrom(telemetry.nativeKvCacheMaxBlocks) ?? numberFrom(telemetry.trtllmKvCacheMaxBlocks),
+  }
 }
 
 function tokenIdFrom(item: Record<string, any>): number | null {
@@ -1073,6 +1268,7 @@ async function sendChatCompletion(
         nativeTpotMs: numberFrom(telemetry.nativeTpotMs),
         nativeE2eLatencyMs: numberFrom(telemetry.nativeE2eLatencyMs),
         nativeInterTokenLatencyMs: numberFrom(telemetry.nativeInterTokenLatencyMs),
+        ...nativeIterationFields(telemetry),
         runningRequests: numberFrom(telemetry.runningRequests),
         waitingRequests: numberFrom(telemetry.waitingRequests),
         kvCacheUsagePct: numberFrom(telemetry.kvCacheUsagePct),
@@ -1193,6 +1389,7 @@ async function sendChatCompletion(
       nativeTpotMs: numberFrom(telemetry.nativeTpotMs),
       nativeE2eLatencyMs: numberFrom(telemetry.nativeE2eLatencyMs),
       nativeInterTokenLatencyMs: numberFrom(telemetry.nativeInterTokenLatencyMs),
+      ...nativeIterationFields(telemetry),
       runningRequests: numberFrom(telemetry.runningRequests),
       waitingRequests: numberFrom(telemetry.waitingRequests),
       kvCacheUsagePct: numberFrom(telemetry.kvCacheUsagePct),
@@ -1348,6 +1545,10 @@ function buildMeasurements(
     avgQueueWaitMs: avg(successful.map((sample) => sample.queueWaitMs ?? null).filter(finite)),
     avgPrefillMs: avg(successful.map((sample) => sample.prefillMs ?? null).filter(finite)),
     avgDecodeMs: avg(successful.map((sample) => sample.decodeMs ?? null).filter(finite)),
+    avgNativeIterationLatencyMs: avg(successful.map((sample) => sample.nativeIterationLatencyMs ?? null).filter(finite)),
+    avgNativeGpuMemoryBytes: avg(successful.map((sample) => sample.nativeGpuMemoryBytes ?? null).filter(finite)),
+    avgNativeKvCacheUsedBlocks: avg(successful.map((sample) => sample.nativeKvCacheUsedBlocks ?? null).filter(finite)),
+    avgNativeKvCacheMaxBlocks: avg(successful.map((sample) => sample.nativeKvCacheMaxBlocks ?? null).filter(finite)),
     usdPer1mOutputTokens,
     usdPer1mTotalTokens,
     avgPowerWatts: avg(successful.map((sample) => sample.avgPowerWatts ?? null).filter(finite)),
@@ -1423,6 +1624,10 @@ function buildMeasurements(
     nativeTpotMs: sample.nativeTpotMs,
     nativeE2eLatencyMs: sample.nativeE2eLatencyMs,
     nativeInterTokenLatencyMs: sample.nativeInterTokenLatencyMs,
+    nativeIterationLatencyMs: sample.nativeIterationLatencyMs,
+    nativeGpuMemoryBytes: sample.nativeGpuMemoryBytes,
+    nativeKvCacheUsedBlocks: sample.nativeKvCacheUsedBlocks,
+    nativeKvCacheMaxBlocks: sample.nativeKvCacheMaxBlocks,
     runningRequests: sample.runningRequests,
     waitingRequests: sample.waitingRequests,
     kvCacheUsagePct: sample.kvCacheUsagePct,

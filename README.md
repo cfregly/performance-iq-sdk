@@ -219,6 +219,14 @@ bash ops/serving-producers/run-smoke.sh verify-proof \
   ./performance-iq-output/serving-producers/serving-smoke-proof-<suffix>.json
 ```
 
+Dump all generated proof rows for inspection or handoff:
+
+```bash
+bash ops/serving-producers/run-smoke.sh verify-proof \
+  ./performance-iq-output/serving-producers/serving-smoke-proof-<suffix>.json \
+  --dump-proof-rows ./performance-iq-output/serving-producers/serving-proof-rows.json
+```
+
 The verifier requires all three producers, accepted submissions, matching
 artifact hashes, producer manifests, model-aware endpoint preflight, dashboard
 campaign rows, and runtime framework provenance.

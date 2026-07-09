@@ -291,12 +291,35 @@ def _native_telemetry(engine: dict[str, Any], body: dict[str, Any] | None = None
     }
 
 
+def _default_native_metrics_url(engine: dict[str, Any]) -> str:
+    base_url = _normalize_base_url(str(engine["baseUrl"]))
+    if engine.get("engine") == "tensorrt-llm":
+        return f"{base_url}/prometheus/metrics"
+    return f"{base_url}/metrics"
+
+
+def _default_native_json_metrics_url(engine: dict[str, Any]) -> str | None:
+    if engine.get("engine") != "tensorrt-llm":
+        return None
+    return f"{_normalize_base_url(str(engine['baseUrl']))}/metrics"
+
+
 def _metrics_url(engine: dict[str, Any]) -> str | None:
     configured = engine.get("metricsUrl")
     if isinstance(configured, str) and configured.strip():
         return configured.strip()
     if engine.get("collectNativeMetrics") is True:
-        return f"{_normalize_base_url(str(engine['baseUrl']))}/metrics"
+        return _default_native_metrics_url(engine)
+    return None
+
+
+def _native_json_metrics_url(engine: dict[str, Any]) -> str | None:
+    for key in ("nativeJsonMetricsUrl", "jsonMetricsUrl"):
+        configured = engine.get(key)
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip()
+    if engine.get("collectNativeMetrics") is True:
+        return _default_native_json_metrics_url(engine)
     return None
 
 
@@ -330,7 +353,51 @@ def _parse_prometheus_metrics(text: str) -> dict[str, float]:
                 labelled_name = f"{metric_name}{{{label_name}={label_value}}}"
                 metrics[labelled_name] = metrics.get(labelled_name, 0.0) + value
                 metrics[f"{labelled_name}__sample_count"] = metrics.get(f"{labelled_name}__sample_count", 0.0) + 1
+                for suffix in ("_sum", "_count"):
+                    if metric_name.endswith(suffix):
+                        labelled_histogram_name = f"{metric_name[:-len(suffix)]}{{{label_name}={label_value}}}{suffix}"
+                        metrics[labelled_histogram_name] = metrics.get(labelled_histogram_name, 0.0) + value
+                        metrics[f"{labelled_histogram_name}__sample_count"] = metrics.get(f"{labelled_histogram_name}__sample_count", 0.0) + 1
     return metrics
+
+
+def _flatten_numeric_json_metrics(value: Any, prefix: str = "") -> dict[str, float]:
+    flattened: dict[str, float] = {}
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            flattened.update(_flatten_numeric_json_metrics(nested, child_prefix))
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            child_prefix = f"{prefix}.{index}" if prefix else str(index)
+            flattened.update(_flatten_numeric_json_metrics(nested, child_prefix))
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        flattened[prefix] = float(value)
+    return flattened
+
+
+def _parse_native_json_metrics(text: str) -> dict[str, float]:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    records = parsed if isinstance(parsed, list) else [parsed]
+    numeric_records = [
+        _flatten_numeric_json_metrics(record)
+        for record in records
+        if isinstance(record, dict)
+    ]
+    numeric_records = [record for record in numeric_records if record]
+    if not numeric_records:
+        return {}
+    latest = numeric_records[-1]
+    summary: dict[str, float] = {f"latest.{key}": value for key, value in latest.items()}
+    for key in sorted({metric_key for record in numeric_records for metric_key in record}):
+        values = [record[key] for record in numeric_records if key in record]
+        if values:
+            summary[f"avg.{key}"] = sum(values) / len(values)
+            summary[f"max.{key}"] = max(values)
+    return summary
 
 
 def _hardware_metrics_url(engine: dict[str, Any]) -> str | None:
@@ -372,21 +439,55 @@ def _read_hardware_metrics(engine: dict[str, Any], http_get_text: HttpGetText | 
 
 def _read_native_metrics(engine: dict[str, Any], http_get_text: HttpGetText | None = None) -> dict[str, Any]:
     url = _metrics_url(engine)
-    if not url:
+    json_url = _native_json_metrics_url(engine)
+    if not url and not json_url:
         return {"available": False, "source": "metrics-url-not-configured"}
-    try:
-        text = (http_get_text or _get_text)(url, _metrics_headers(engine))
-    except Exception as exc:
-        return {"available": False, "source": "prometheus-unavailable", "metricsUrl": url, "error": str(exc)}
-    metrics = _parse_prometheus_metrics(text)
-    if not metrics:
-        return {"available": False, "source": "prometheus-empty", "metricsUrl": url}
+    get_text = http_get_text or _get_text
+    metrics: dict[str, float] = {}
+    json_metrics: dict[str, float] = {}
+    sources: list[str] = []
+    errors: list[dict[str, str]] = []
+    captured_at = _now_iso()
+    if url:
+        try:
+            text = get_text(url, _metrics_headers(engine))
+            metrics.update(_parse_prometheus_metrics(text))
+            parsed_json = _parse_native_json_metrics(text)
+            if metrics:
+                sources.append("prometheus-snapshot")
+            if parsed_json:
+                json_metrics.update(parsed_json)
+                sources.append("native-json-snapshot")
+        except Exception as exc:
+            errors.append({"url": url, "source": "prometheus-unavailable", "error": str(exc)})
+    if json_url and json_url != url:
+        try:
+            text = get_text(json_url, {**_metrics_headers(engine), "accept": "application/json, text/plain"})
+            parsed_json = _parse_native_json_metrics(text)
+            if parsed_json:
+                json_metrics.update(parsed_json)
+                sources.append("native-json-snapshot")
+            elif not metrics:
+                errors.append({"url": json_url, "source": "native-json-empty", "error": "no numeric JSON metrics"})
+        except Exception as exc:
+            errors.append({"url": json_url, "source": "native-json-unavailable", "error": str(exc)})
+    if not metrics and not json_metrics:
+        return {
+            "available": False,
+            "source": errors[0]["source"] if errors else "native-metrics-empty",
+            "metricsUrl": url,
+            **({"nativeJsonMetricsUrl": json_url} if json_url else {}),
+            **({"errors": errors} if errors else {}),
+        }
     return {
         "available": True,
-        "source": "prometheus-snapshot",
+        "source": "+".join(dict.fromkeys(sources)) if sources else "native-metrics-snapshot",
         "metricsUrl": url,
+        **({"nativeJsonMetricsUrl": json_url} if json_url else {}),
         "metrics": metrics,
-        "capturedAtUtc": _now_iso(),
+        **({"jsonMetrics": json_metrics} if json_metrics else {}),
+        **({"errors": errors} if errors else {}),
+        "capturedAtUtc": captured_at,
     }
 
 
@@ -407,6 +508,17 @@ def _metric_average(metrics: dict[str, float], candidates: list[str]) -> float |
         if isinstance(count, (int, float)) and count > 0:
             return float(value) / float(count)
         return float(value)
+    return None
+
+
+def _json_metric_value(metrics: dict[str, float], candidates: list[str]) -> float | None:
+    return _metric_value(metrics, candidates)
+
+
+def _first_number(*values: float | None) -> float | None:
+    for value in values:
+        if isinstance(value, (int, float)):
+            return float(value)
     return None
 
 
@@ -439,6 +551,7 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         }
     before_metrics = before.get("metrics") if isinstance(before.get("metrics"), dict) else {}
     after_metrics = after.get("metrics") if isinstance(after.get("metrics"), dict) else {}
+    after_json_metrics = after.get("jsonMetrics") if isinstance(after.get("jsonMetrics"), dict) else {}
     if not isinstance(before_metrics, dict) or not isinstance(after_metrics, dict):
         return {"available": False, "source": "prometheus-delta-invalid"}
 
@@ -451,10 +564,15 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
     ])
     native_tpot_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
         "vllm:request_time_per_output_token_seconds",
+        "vllm:time_per_output_token_seconds",
         "sglang:request_time_per_output_token_seconds",
+        "sglang:time_per_output_token_seconds",
         "sglang_request_time_per_output_token_seconds",
+        "sglang_time_per_output_token_seconds",
         "trtllm:request_time_per_output_token_seconds",
+        "trtllm:time_per_output_token_seconds",
         "trtllm_request_time_per_output_token_seconds",
+        "trtllm_time_per_output_token_seconds",
     ])
     native_inter_token_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
         "vllm:inter_token_latency_seconds",
@@ -477,6 +595,9 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         "sglang_request_queue_time_seconds",
         "trtllm:request_queue_time_seconds",
         "trtllm_request_queue_time_seconds",
+        "trtllm_queue_time_seconds",
+        "trtllm:queue_time_seconds",
+        "trtllm_request_queue_time_seconds",
     ])
     prefill_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
         "vllm:request_prefill_time_seconds",
@@ -486,6 +607,8 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         "sglang_request_prefill_time_seconds",
         "trtllm:request_prefill_time_seconds",
         "trtllm_request_prefill_time_seconds",
+        "trtllm:context_time_seconds",
+        "trtllm_context_time_seconds",
     ])
     decode_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
         "vllm:request_decode_time_seconds",
@@ -495,26 +618,43 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         "sglang_request_decode_time_seconds",
         "trtllm:request_decode_time_seconds",
         "trtllm_request_decode_time_seconds",
+        "trtllm:generation_time_seconds",
+        "trtllm_generation_time_seconds",
     ])
     if decode_ms is None and native_e2e_ms is not None and queue_wait_ms is not None and prefill_ms is not None:
         derived_decode_ms = native_e2e_ms - queue_wait_ms - prefill_ms
         if derived_decode_ms >= 0:
             decode_ms = derived_decode_ms
     prefix_queries = _counter_delta(before_metrics, after_metrics, [
+        "vllm:prefix_cache_queries",
         "vllm:prefix_cache_queries_total",
         "sglang:prefix_cache_queries_total",
+        "sglang:prefix_cache_queries",
         "sglang_prefix_cache_queries_total",
+        "sglang_prefix_cache_queries",
+        "trtllm_prefix_cache_queries",
         "trtllm:prefix_cache_queries_total",
         "trtllm_prefix_cache_queries_total",
     ])
     prefix_hits = _counter_delta(before_metrics, after_metrics, [
+        "vllm:prefix_cache_hits",
         "vllm:prefix_cache_hits_total",
         "sglang:prefix_cache_hits_total",
+        "sglang:prefix_cache_hits",
         "sglang_prefix_cache_hits_total",
+        "sglang_prefix_cache_hits",
+        "trtllm_prefix_cache_hits",
         "trtllm:prefix_cache_hits_total",
         "trtllm_prefix_cache_hits_total",
     ])
     cache_hit_rate = (prefix_hits / prefix_queries) if prefix_hits is not None and prefix_queries and prefix_queries > 0 else None
+    trtllm_kv_used_blocks = _json_metric_value(after_json_metrics, ["latest.kvCacheStats.usedNumBlocks", "max.kvCacheStats.usedNumBlocks"])
+    trtllm_kv_max_blocks = _json_metric_value(after_json_metrics, ["latest.kvCacheStats.maxNumBlocks", "max.kvCacheStats.maxNumBlocks"])
+    trtllm_kv_usage = (
+        trtllm_kv_used_blocks / trtllm_kv_max_blocks
+        if trtllm_kv_used_blocks is not None and trtllm_kv_max_blocks and trtllm_kv_max_blocks > 0
+        else None
+    )
     values = {
         "nativeTtftMs": native_ttft_ms,
         "nativeTpotMs": native_tpot_ms,
@@ -523,12 +663,26 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         "queueWaitMs": queue_wait_ms,
         "prefillMs": prefill_ms,
         "decodeMs": decode_ms,
-        "runningRequests": _metric_value(after_metrics, ["vllm:num_requests_running", "sglang:num_running_reqs", "sglang_num_running_reqs", "trtllm:num_requests_running", "trtllm_num_requests_running"]),
-        "waitingRequests": _metric_value(after_metrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs", "trtllm:num_requests_waiting", "trtllm_num_requests_waiting"]),
-        "kvCacheUsagePct": _metric_value(after_metrics, ["vllm:kv_cache_usage_perc", "sglang:token_usage", "sglang_token_usage", "trtllm:kv_cache_usage_perc", "trtllm_kv_cache_usage_perc"]),
+        "runningRequests": _first_number(
+            _metric_value(after_metrics, ["vllm:num_requests_running", "sglang:num_running_reqs", "sglang_num_running_reqs", "trtllm:num_requests_running", "trtllm_num_requests_running", "trtllm:num_active_requests", "trtllm_num_active_requests"]),
+            _json_metric_value(after_json_metrics, ["latest.numActiveRequests", "avg.numActiveRequests", "max.numActiveRequests"]),
+        ),
+        "waitingRequests": _metric_value(after_metrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs", "trtllm:num_requests_waiting", "trtllm_num_requests_waiting", "trtllm:num_queued_requests", "trtllm_num_queued_requests"]),
+        "kvCacheUsagePct": _first_number(
+            _metric_value(after_metrics, ["vllm:kv_cache_usage_perc", "sglang:token_usage", "sglang_token_usage", "trtllm:kv_cache_usage_perc", "trtllm_kv_cache_usage_perc", "trtllm:kv_cache_utilization", "trtllm_kv_cache_utilization"]),
+            trtllm_kv_usage,
+        ),
+        "trtllmIterationLatencyMs": _json_metric_value(after_json_metrics, ["avg.iterLatencyMS", "latest.iterLatencyMS"]),
+        "trtllmGpuMemoryBytes": _json_metric_value(after_json_metrics, ["latest.gpuMemUsage", "max.gpuMemUsage"]),
+        "trtllmKvCacheUsedBlocks": trtllm_kv_used_blocks,
+        "trtllmKvCacheMaxBlocks": trtllm_kv_max_blocks,
         "prefixCacheQueriesDelta": prefix_queries,
         "prefixCacheHitsDelta": prefix_hits,
-        "cacheHitRate": cache_hit_rate,
+        "cacheHitRate": _first_number(
+            cache_hit_rate,
+            _metric_value(after_metrics, ["sglang:cache_hit_rate", "sglang_cache_hit_rate", "trtllm:kv_cache_hit_rate", "trtllm_kv_cache_hit_rate"]),
+            _json_metric_value(after_json_metrics, ["latest.kvCacheStats.cacheHitRate", "avg.kvCacheStats.cacheHitRate"]),
+        ),
         "promptTokensCachedDelta": _counter_delta(before_metrics, after_metrics, [
             "vllm:prompt_tokens_cached_total",
             "sglang:prompt_tokens_cached_total",
@@ -545,10 +699,16 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         ]),
     }
     available_values = {key: value for key, value in values.items() if value is not None}
+    delta_sources = []
+    if before_metrics and after_metrics:
+        delta_sources.append("prometheus-delta")
+    if after_json_metrics:
+        delta_sources.append("native-json-snapshot")
     return {
         "available": bool(available_values),
-        "source": "prometheus-delta",
+        "source": "+".join(delta_sources) if delta_sources else "native-metrics-delta",
         "metricsUrl": after.get("metricsUrl") or before.get("metricsUrl"),
+        "nativeJsonMetricsUrl": after.get("nativeJsonMetricsUrl") or before.get("nativeJsonMetricsUrl"),
         "beforeCapturedAtUtc": before.get("capturedAtUtc"),
         "afterCapturedAtUtc": after.get("capturedAtUtc"),
         **available_values,
@@ -597,17 +757,31 @@ def _hardware_metrics_delta(engine: dict[str, Any], before: dict[str, Any], afte
 
 def _combine_native_telemetry(*items: dict[str, Any]) -> dict[str, Any]:
     combined: dict[str, Any] = {}
-    sources: list[str] = []
+    available_sources: list[str] = []
+    fallback_sources: list[str] = []
     for item in items:
         if not isinstance(item, dict):
             continue
         if item.get("source"):
-            sources.append(str(item["source"]))
+            if item.get("available"):
+                available_sources.append(str(item["source"]))
+            else:
+                fallback_sources.append(str(item["source"]))
         combined.update(item)
     combined["available"] = any(bool(item.get("available")) for item in items if isinstance(item, dict))
+    sources = available_sources or fallback_sources
     if sources:
         combined["source"] = "+".join(dict.fromkeys(sources))
     return combined
+
+
+def _native_iteration_fields(native_telemetry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "nativeIterationLatencyMs": native_telemetry.get("nativeIterationLatencyMs", native_telemetry.get("trtllmIterationLatencyMs")),
+        "nativeGpuMemoryBytes": native_telemetry.get("nativeGpuMemoryBytes", native_telemetry.get("trtllmGpuMemoryBytes")),
+        "nativeKvCacheUsedBlocks": native_telemetry.get("nativeKvCacheUsedBlocks", native_telemetry.get("trtllmKvCacheUsedBlocks")),
+        "nativeKvCacheMaxBlocks": native_telemetry.get("nativeKvCacheMaxBlocks", native_telemetry.get("trtllmKvCacheMaxBlocks")),
+    }
 
 
 def _extract_token_id(item: dict[str, Any]) -> int | None:
@@ -879,6 +1053,7 @@ def _send_streaming_chat_completion(
             native_telemetry,
             _native_metrics_delta(engine, native_before, native_after),
         )
+        native_iteration_fields = _native_iteration_fields(native_telemetry)
         hardware_telemetry = _hardware_metrics_delta(engine, hardware_before, hardware_after)
         runtime_provenance = _runtime_provenance(engine, native_telemetry)
         first_chunk = events[0] if events else None
@@ -989,6 +1164,7 @@ def _send_streaming_chat_completion(
             "nativeTpotMs": native_telemetry.get("nativeTpotMs"),
             "nativeE2eLatencyMs": native_telemetry.get("nativeE2eLatencyMs"),
             "nativeInterTokenLatencyMs": native_telemetry.get("nativeInterTokenLatencyMs"),
+            **native_iteration_fields,
             "runningRequests": native_telemetry.get("runningRequests"),
             "waitingRequests": native_telemetry.get("waitingRequests"),
             "kvCacheUsagePct": native_telemetry.get("kvCacheUsagePct"),
@@ -1108,6 +1284,7 @@ def _send_non_streaming_chat_completion(
             _native_telemetry(engine, body),
             _native_metrics_delta(engine, native_before, native_after),
         )
+        native_iteration_fields = _native_iteration_fields(native_telemetry)
         hardware_telemetry = _hardware_metrics_delta(engine, hardware_before, hardware_after)
         runtime_provenance = _runtime_provenance(engine, native_telemetry)
         raw_token_details = _choice_token_details(body, engine, request)
@@ -1171,6 +1348,7 @@ def _send_non_streaming_chat_completion(
             "nativeTpotMs": native_telemetry.get("nativeTpotMs"),
             "nativeE2eLatencyMs": native_telemetry.get("nativeE2eLatencyMs"),
             "nativeInterTokenLatencyMs": native_telemetry.get("nativeInterTokenLatencyMs"),
+            **native_iteration_fields,
             "runningRequests": native_telemetry.get("runningRequests"),
             "waitingRequests": native_telemetry.get("waitingRequests"),
             "kvCacheUsagePct": native_telemetry.get("kvCacheUsagePct"),
@@ -1352,6 +1530,10 @@ def _build_measurements(
         "avgQueueWaitMs": _avg_numbers(successful, "queueWaitMs"),
         "avgPrefillMs": _avg_numbers(successful, "prefillMs"),
         "avgDecodeMs": _avg_numbers(successful, "decodeMs"),
+        "avgNativeIterationLatencyMs": _avg_numbers(successful, "nativeIterationLatencyMs"),
+        "avgNativeGpuMemoryBytes": _avg_numbers(successful, "nativeGpuMemoryBytes"),
+        "avgNativeKvCacheUsedBlocks": _avg_numbers(successful, "nativeKvCacheUsedBlocks"),
+        "avgNativeKvCacheMaxBlocks": _avg_numbers(successful, "nativeKvCacheMaxBlocks"),
         "usdPer1mOutputTokens": cost_usd / (output_tokens / 1_000_000) if cost_usd and output_tokens else None,
         "usdPer1mTotalTokens": cost_usd / (total_tokens / 1_000_000) if cost_usd and total_tokens else None,
         "avgPowerWatts": _avg_numbers(successful, "avgPowerWatts"),
@@ -1457,6 +1639,10 @@ def _build_measurements(
             "nativeTpotMs": sample.get("nativeTpotMs"),
             "nativeE2eLatencyMs": sample.get("nativeE2eLatencyMs"),
             "nativeInterTokenLatencyMs": sample.get("nativeInterTokenLatencyMs"),
+            "nativeIterationLatencyMs": sample.get("nativeIterationLatencyMs"),
+            "nativeGpuMemoryBytes": sample.get("nativeGpuMemoryBytes"),
+            "nativeKvCacheUsedBlocks": sample.get("nativeKvCacheUsedBlocks"),
+            "nativeKvCacheMaxBlocks": sample.get("nativeKvCacheMaxBlocks"),
             "runningRequests": sample.get("runningRequests"),
             "waitingRequests": sample.get("waitingRequests"),
             "kvCacheUsagePct": sample.get("kvCacheUsagePct"),

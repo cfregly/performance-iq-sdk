@@ -12,7 +12,7 @@ Usage:
   bash ops/serving-producers/run-smoke.sh recorded-smoke [extra args...]
   bash ops/serving-producers/run-smoke.sh strict-recorded-smoke [extra args...]
   bash ops/serving-producers/run-smoke.sh no-submit [extra args...]
-  bash ops/serving-producers/run-smoke.sh verify-proof <proof-summary.json>
+  bash ops/serving-producers/run-smoke.sh verify-proof <proof-summary.json> [--dump-proof-rows rows.json]
   bash ops/serving-producers/run-smoke.sh receipt-proxy [proxy args...]
 
 Modes:
@@ -27,7 +27,8 @@ Modes:
                Start receipt proxies and require token, native telemetry, and
                DCGM proof gates.
   no-submit    Send requests and write artifacts without submitting runs.
-  verify-proof Verify a saved full three-engine proof bundle offline.
+  verify-proof Verify a saved full three-engine proof bundle offline; optionally
+               dump all finest-grain proof rows with --dump-proof-rows.
   receipt-proxy
                Proxy one engine endpoint and write JSONL request receipts.
 USAGE
@@ -79,6 +80,7 @@ fi
 model="${PIQ_SERVING_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}"
 artifact_dir="${PIQ_ARTIFACT_DIR:-${repo_root}/performance-iq-output/serving-producers}"
 receipt_log="${PIQ_SERVING_RECEIPT_LOG:-${artifact_dir}/request-receipts.jsonl}"
+event_log="${PIQ_SERVING_EVENT_LOG:-${artifact_dir}/serving-events.jsonl}"
 
 common=(
   --model "$model"
@@ -147,21 +149,21 @@ case "$mode" in
     exec "$python_bin" -m performance_iq_sdk.serving_smoke --preflight-only "${common[@]}" "$@"
     ;;
   smoke)
-    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard "$@"
+    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --event-log "$event_log" "$@"
     ;;
   strict-smoke)
     require_strict_pricing "$@"
-    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard "${strict_common[@]}" "$@"
+    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --event-log "$event_log" "${strict_common[@]}" "$@"
     ;;
   recorded-smoke)
-    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --record-receipts --receipt-log "$receipt_log" "$@"
+    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --record-receipts --receipt-log "$receipt_log" --event-log "$event_log" "$@"
     ;;
   strict-recorded-smoke)
     require_strict_pricing "$@"
-    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --record-receipts --receipt-log "$receipt_log" "${strict_common[@]}" "$@"
+    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --record-receipts --receipt-log "$receipt_log" --event-log "$event_log" "${strict_common[@]}" "$@"
     ;;
   no-submit)
-    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --no-submit "$@"
+    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --no-submit --event-log "$event_log" "$@"
     ;;
   verify-proof)
     exec "$python_bin" -m performance_iq_sdk.serving_smoke --verify-proof "$@"

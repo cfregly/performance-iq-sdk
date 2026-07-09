@@ -18,9 +18,12 @@ from performance_iq_sdk import PerformanceIQ, build_manifest, laptop_smoke_model
 from performance_iq_sdk.serving_smoke import (
     engine_configs_from_env,
     endpoint_probe,
+    extract_proof_rows,
+    build_serving_event_records,
     huggingface_model_cache_name,
     main as serving_smoke_main,
     parser as serving_smoke_parser,
+    publish_serving_event_log,
     query_dashboard,
     run_serving_smoke,
     runtime_diagnostics,
@@ -28,7 +31,9 @@ from performance_iq_sdk.serving_smoke import (
     runtime_preflight,
     vllm_extension_probe,
     verify_proof_summary,
+    write_serving_event_log,
     write_proof_summary,
+    write_proof_rows,
 )
 from performance_iq_sdk.serving_receipts import (
     REQUEST_RECEIPT_SCHEMA_VERSION,
@@ -55,6 +60,11 @@ class PerformanceIQSdkTest(unittest.TestCase):
         "PIQ_SERVING_POWER_WATTS_PER_GPU",
         "PIQ_ARTIFACT_DIR",
         "PIQ_SERVING_SUMMARY_OUT",
+        "PIQ_SERVING_EVENT_LOG",
+        "PIQ_SERVING_PUBLISH_KAFKA",
+        "PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS",
+        "PIQ_SERVING_KAFKA_CLIENT_ID",
+        "PIQ_SERVING_KAFKA_TOPIC",
         "PIQ_SERVING_CAPTURE_TOKEN_DETAILS",
         "PIQ_SERVING_TOP_LOGPROBS",
         "PIQ_SERVING_RESOLVE_TOKEN_IDS_WITH_TOKENIZER",
@@ -65,6 +75,9 @@ class PerformanceIQSdkTest(unittest.TestCase):
         "PIQ_VLLM_METRICS_URL",
         "PIQ_SGLANG_METRICS_URL",
         "PIQ_TENSORRT_LLM_METRICS_URL",
+        "PIQ_VLLM_JSON_METRICS_URL",
+        "PIQ_SGLANG_JSON_METRICS_URL",
+        "PIQ_TENSORRT_LLM_JSON_METRICS_URL",
         "PIQ_VLLM_HARDWARE_METRICS_URL",
         "PIQ_SGLANG_HARDWARE_METRICS_URL",
         "PIQ_TENSORRT_LLM_HARDWARE_METRICS_URL",
@@ -719,6 +732,248 @@ vllm:request_prefill_kv_computed_tokens_sum{model_name="qwen"} 16
         self.assertAlmostEqual(aggregate["avgPrefillMs"], 60)
         self.assertAlmostEqual(aggregate["avgDecodeMs"], 120)
 
+    def test_serving_producer_derives_sglang_documented_native_metrics(self):
+        metric_snapshots = [
+            """
+sglang:time_to_first_token_seconds_count{model_name="qwen"} 10
+sglang:time_to_first_token_seconds_sum{model_name="qwen"} 1.0
+sglang:time_per_output_token_seconds_count{model_name="qwen"} 10
+sglang:time_per_output_token_seconds_sum{model_name="qwen"} 0.2
+sglang:e2e_request_latency_seconds_count{model_name="qwen"} 10
+sglang:e2e_request_latency_seconds_sum{model_name="qwen"} 4.0
+sglang:request_queue_time_seconds_count{model_name="qwen"} 10
+sglang:request_queue_time_seconds_sum{model_name="qwen"} 0.05
+sglang:per_stage_req_latency_seconds_count{stage="prefill_forward"} 10
+sglang:per_stage_req_latency_seconds_sum{stage="prefill_forward"} 0.5
+sglang:per_stage_req_latency_seconds_count{stage="decode_forward"} 10
+sglang:per_stage_req_latency_seconds_sum{stage="decode_forward"} 1.0
+sglang:num_running_reqs{model_name="qwen"} 0
+sglang:num_queue_reqs{model_name="qwen"} 0
+sglang:token_usage{model_name="qwen"} 0.4
+sglang:cache_hit_rate{model_name="qwen"} 0.25
+""",
+            """
+sglang:time_to_first_token_seconds_count{model_name="qwen"} 11
+sglang:time_to_first_token_seconds_sum{model_name="qwen"} 1.15
+sglang:time_per_output_token_seconds_count{model_name="qwen"} 11
+sglang:time_per_output_token_seconds_sum{model_name="qwen"} 0.23
+sglang:e2e_request_latency_seconds_count{model_name="qwen"} 11
+sglang:e2e_request_latency_seconds_sum{model_name="qwen"} 4.5
+sglang:request_queue_time_seconds_count{model_name="qwen"} 11
+sglang:request_queue_time_seconds_sum{model_name="qwen"} 0.052
+sglang:per_stage_req_latency_seconds_count{stage="prefill_forward"} 11
+sglang:per_stage_req_latency_seconds_sum{stage="prefill_forward"} 0.56
+sglang:per_stage_req_latency_seconds_count{stage="decode_forward"} 11
+sglang:per_stage_req_latency_seconds_sum{stage="decode_forward"} 1.12
+sglang:num_running_reqs{model_name="qwen"} 0
+sglang:num_queue_reqs{model_name="qwen"} 0
+sglang:token_usage{model_name="qwen"} 0.5
+sglang:cache_hit_rate{model_name="qwen"} 0.3
+""",
+        ]
+
+        def http_get_text(url, headers):
+            self.assertEqual(url, "http://127.0.0.1:30000/metrics")
+            return metric_snapshots.pop(0)
+
+        def http_stream_json(url, headers, payload):
+            return {
+                "status": 200,
+                "events": [
+                    {
+                        "receivedMs": 7,
+                        "receivedAtUtc": "2026-07-09T12:00:00.007Z",
+                        "body": {"id": "chatcmpl-stream", "model": laptop_smoke_model(), "choices": [{"delta": {"content": "ok"}}]},
+                    },
+                    {
+                        "receivedMs": 17,
+                        "receivedAtUtc": "2026-07-09T12:00:00.017Z",
+                        "body": {
+                            "id": "chatcmpl-stream",
+                            "model": laptop_smoke_model(),
+                            "choices": [{"delta": {}, "finish_reason": "stop"}],
+                            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+                        },
+                    },
+                ],
+            }
+
+        result = run_serving_producer(
+            engine={
+                "engine": "sglang",
+                "baseUrl": "http://127.0.0.1:30000",
+                "metricsUrl": "http://127.0.0.1:30000/metrics",
+            },
+            request={
+                "model": laptop_smoke_model(),
+                "messages": [{"role": "user", "content": "Say ok."}],
+                "maxTokens": 16,
+            },
+            artifact_dir=self.tmp_dir,
+            workload={"hardware": "local stream engine", "operatingPoint": "laptop-smoke"},
+            pricing={"usdPerGpuHour": 1, "gpuCount": 1, "powerWattsPerGpu": 100},
+            http_stream_json=http_stream_json,
+            http_get_text=http_get_text,
+        )
+
+        self.assertEqual(metric_snapshots, [])
+        sample = result["samples"][0]
+        self.assertTrue(sample["nativeTelemetryAvailable"])
+        self.assertAlmostEqual(sample["nativeTtftMs"], 150)
+        self.assertAlmostEqual(sample["nativeTpotMs"], 30)
+        self.assertAlmostEqual(sample["nativeE2eLatencyMs"], 500)
+        self.assertAlmostEqual(sample["queueWaitMs"], 2)
+        self.assertAlmostEqual(sample["prefillMs"], 60)
+        self.assertAlmostEqual(sample["decodeMs"], 120)
+        self.assertEqual(sample["runningRequests"], 0)
+        self.assertEqual(sample["waitingRequests"], 0)
+        self.assertAlmostEqual(sample["kvCacheUsagePct"], 0.5)
+        self.assertAlmostEqual(sample["cacheHitRate"], 0.3)
+
+    def test_serving_producer_derives_tensorrt_prometheus_and_json_metrics(self):
+        prometheus_snapshots = [
+            """
+trtllm_time_to_first_token_seconds_count{model_name="qwen"} 3
+trtllm_time_to_first_token_seconds_sum{model_name="qwen"} 0.3
+trtllm_time_per_output_token_seconds_count{model_name="qwen"} 3
+trtllm_time_per_output_token_seconds_sum{model_name="qwen"} 0.06
+trtllm_e2e_request_latency_seconds_count{model_name="qwen"} 3
+trtllm_e2e_request_latency_seconds_sum{model_name="qwen"} 1.2
+trtllm_request_queue_time_seconds_count{model_name="qwen"} 3
+trtllm_request_queue_time_seconds_sum{model_name="qwen"} 0.03
+trtllm_kv_cache_hit_rate{model_name="qwen"} 0.1
+trtllm_kv_cache_utilization{model_name="qwen"} 0.2
+""",
+            """
+trtllm_time_to_first_token_seconds_count{model_name="qwen"} 4
+trtllm_time_to_first_token_seconds_sum{model_name="qwen"} 0.5
+trtllm_time_per_output_token_seconds_count{model_name="qwen"} 4
+trtllm_time_per_output_token_seconds_sum{model_name="qwen"} 0.09
+trtllm_e2e_request_latency_seconds_count{model_name="qwen"} 4
+trtllm_e2e_request_latency_seconds_sum{model_name="qwen"} 1.9
+trtllm_request_queue_time_seconds_count{model_name="qwen"} 4
+trtllm_request_queue_time_seconds_sum{model_name="qwen"} 0.035
+trtllm_kv_cache_hit_rate{model_name="qwen"} 0.2
+trtllm_kv_cache_utilization{model_name="qwen"} 0.3
+""",
+        ]
+
+        json_snapshots = [
+            '[{"gpuMemUsage": 1000, "iterLatencyMS": 5, "kvCacheStats": {"usedNumBlocks": 2, "maxNumBlocks": 10, "cacheHitRate": 0.1}, "numActiveRequests": 0}]',
+            '[{"gpuMemUsage": 2000, "iterLatencyMS": 7, "kvCacheStats": {"usedNumBlocks": 4, "maxNumBlocks": 10, "cacheHitRate": 0.4}, "numActiveRequests": 1}]',
+        ]
+
+        def http_get_combined(url, headers):
+            if url == "http://127.0.0.1:8001/prometheus/metrics":
+                return prometheus_snapshots.pop(0)
+            self.assertEqual(url, "http://127.0.0.1:8001/metrics")
+            return json_snapshots.pop(0)
+
+        def http_stream_json(url, headers, payload):
+            return {
+                "status": 200,
+                "events": [
+                    {
+                        "receivedMs": 8,
+                        "receivedAtUtc": "2026-07-09T12:00:00.008Z",
+                        "body": {"id": "chatcmpl-stream", "model": laptop_smoke_model(), "choices": [{"delta": {"content": "ok"}}]},
+                    },
+                    {
+                        "receivedMs": 18,
+                        "receivedAtUtc": "2026-07-09T12:00:00.018Z",
+                        "body": {
+                            "id": "chatcmpl-stream",
+                            "model": laptop_smoke_model(),
+                            "choices": [{"delta": {}, "finish_reason": "stop"}],
+                            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+                        },
+                    },
+                ],
+            }
+
+        result = run_serving_producer(
+            engine={
+                "engine": "tensorrt-llm",
+                "baseUrl": "http://127.0.0.1:8001",
+                "collectNativeMetrics": True,
+            },
+            request={
+                "model": laptop_smoke_model(),
+                "messages": [{"role": "user", "content": "Say ok."}],
+                "maxTokens": 16,
+            },
+            artifact_dir=self.tmp_dir,
+            workload={"hardware": "local stream engine", "operatingPoint": "laptop-smoke"},
+            pricing={"usdPerGpuHour": 1, "gpuCount": 1, "powerWattsPerGpu": 100},
+            http_stream_json=http_stream_json,
+            http_get_text=http_get_combined,
+        )
+
+        self.assertEqual(prometheus_snapshots, [])
+        self.assertEqual(json_snapshots, [])
+        sample = result["samples"][0]
+        self.assertTrue(sample["nativeTelemetryAvailable"])
+        self.assertAlmostEqual(sample["nativeTtftMs"], 200)
+        self.assertAlmostEqual(sample["nativeTpotMs"], 30)
+        self.assertAlmostEqual(sample["nativeE2eLatencyMs"], 700)
+        self.assertAlmostEqual(sample["queueWaitMs"], 5)
+        self.assertAlmostEqual(sample["kvCacheUsagePct"], 0.3)
+        self.assertAlmostEqual(sample["cacheHitRate"], 0.2)
+        self.assertAlmostEqual(sample["nativeIterationLatencyMs"], 7)
+        self.assertAlmostEqual(sample["nativeGpuMemoryBytes"], 2000)
+        self.assertAlmostEqual(sample["nativeKvCacheUsedBlocks"], 4)
+        self.assertAlmostEqual(sample["nativeKvCacheMaxBlocks"], 10)
+        self.assertAlmostEqual(sample["nativeTelemetry"]["trtllmIterationLatencyMs"], 7)
+        self.assertAlmostEqual(sample["nativeTelemetry"]["trtllmGpuMemoryBytes"], 2000)
+        sample_rows = [row for row in result["measurements"] if row.get("surface") == "serving_request_sample"]
+        self.assertAlmostEqual(sample_rows[0]["nativeIterationLatencyMs"], 7)
+        self.assertAlmostEqual(sample_rows[0]["nativeGpuMemoryBytes"], 2000)
+        self.assertAlmostEqual(result["measurements"][0]["avgNativeIterationLatencyMs"], 7)
+
+        json_snapshots = [
+            '[{"gpuMemUsage": 1000, "iterLatencyMS": 5, "kvCacheStats": {"usedNumBlocks": 2, "maxNumBlocks": 10, "cacheHitRate": 0.1}, "numActiveRequests": 0}]',
+            '[{"gpuMemUsage": 2000, "iterLatencyMS": 7, "kvCacheStats": {"usedNumBlocks": 4, "maxNumBlocks": 10, "cacheHitRate": 0.4}, "numActiveRequests": 1}]',
+        ]
+
+        def http_get_json(url, headers):
+            self.assertEqual(url, "http://127.0.0.1:8001/metrics")
+            return json_snapshots.pop(0)
+
+        json_result = run_serving_producer(
+            engine={
+                "engine": "tensorrt-llm",
+                "baseUrl": "http://127.0.0.1:8001",
+                "metricsUrl": "http://127.0.0.1:8001/metrics",
+            },
+            request={
+                "model": laptop_smoke_model(),
+                "messages": [{"role": "user", "content": "Say ok."}],
+                "maxTokens": 16,
+            },
+            artifact_dir=self.tmp_dir,
+            workload={"hardware": "local stream engine", "operatingPoint": "laptop-smoke"},
+            pricing={"usdPerGpuHour": 1, "gpuCount": 1, "powerWattsPerGpu": 100},
+            http_stream_json=http_stream_json,
+            http_get_text=http_get_json,
+        )
+
+        self.assertEqual(json_snapshots, [])
+        json_sample = json_result["samples"][0]
+        self.assertTrue(json_sample["nativeTelemetryAvailable"])
+        self.assertEqual(json_sample["runningRequests"], 1)
+        self.assertAlmostEqual(json_sample["kvCacheUsagePct"], 0.4)
+        self.assertAlmostEqual(json_sample["cacheHitRate"], 0.4)
+        self.assertAlmostEqual(json_sample["nativeIterationLatencyMs"], 7)
+        self.assertAlmostEqual(json_sample["nativeGpuMemoryBytes"], 2000)
+        self.assertAlmostEqual(json_sample["nativeKvCacheUsedBlocks"], 4)
+        self.assertAlmostEqual(json_sample["nativeKvCacheMaxBlocks"], 10)
+        self.assertAlmostEqual(json_sample["nativeTelemetry"]["trtllmIterationLatencyMs"], 7)
+        self.assertAlmostEqual(json_sample["nativeTelemetry"]["trtllmGpuMemoryBytes"], 2000)
+        json_sample_rows = [row for row in json_result["measurements"] if row.get("surface") == "serving_request_sample"]
+        self.assertAlmostEqual(json_sample_rows[0]["nativeIterationLatencyMs"], 7)
+        self.assertAlmostEqual(json_sample_rows[0]["nativeGpuMemoryBytes"], 2000)
+        self.assertAlmostEqual(json_result["measurements"][0]["avgNativeIterationLatencyMs"], 7)
+
     def test_serving_producer_captures_token_logprobs_and_dcgm_metrics(self):
         metric_snapshots = [
             """
@@ -1008,6 +1263,97 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         )
         with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
             self.assertEqual(serving_smoke_main(["--verify-proof", proof_path]), 0)
+
+        rows = extract_proof_rows(proof_path, verification=verification)
+        self.assertEqual(rows["rowCounts"]["submissions"], 3)
+        self.assertEqual(rows["rowCounts"]["servingRequestSamples"], 3)
+        self.assertEqual(rows["rowCounts"]["servingTokenTimeline"], 6)
+        self.assertEqual(rows["rowCounts"]["requestReceipts"], 3)
+        self.assertEqual({row["engine"] for row in rows["servingRequestSamples"]}, {"vllm", "sglang", "tensorrt-llm"})
+        self.assertTrue(all(row.get("campaignId") for row in rows["servingTokenTimeline"]))
+        rows_path = os.path.join(self.tmp_dir, "proof-rows.json")
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            self.assertEqual(serving_smoke_main(["--verify-proof", proof_path, "--dump-proof-rows", rows_path]), 0)
+        with open(rows_path, encoding="utf-8") as handle:
+            persisted_rows = json.load(handle)
+        self.assertEqual(persisted_rows["schemaVersion"], "performance-iq.serving-proof-rows.v1")
+        self.assertEqual(persisted_rows["rowCounts"]["servingTokenTimeline"], 6)
+        self.assertEqual(write_proof_rows(proof_path, rows_path)["rowCounts"]["servingRequestSamples"], 3)
+
+    def test_serving_smoke_writes_kafka_ready_event_log(self):
+        proof_path, summary = self.write_full_serving_proof()
+        event_log_path = os.path.join(self.tmp_dir, "serving-events.jsonl")
+        summary["eventLogPath"] = event_log_path
+        write_proof_summary(summary, self.tmp_dir, summary_out=proof_path)
+
+        events = build_serving_event_records(summary)
+        write_serving_event_log(summary, event_log_path)
+
+        event_types = [event["eventType"] for event in events]
+        self.assertIn("serving.submission", event_types)
+        self.assertIn("serving.measurement.result", event_types)
+        self.assertIn("serving.measurement.serving_request_sample", event_types)
+        self.assertIn("serving.measurement.serving_token_timeline", event_types)
+        self.assertIn("serving.native_telemetry", event_types)
+        self.assertIn("serving.hardware_telemetry", event_types)
+        self.assertIn("serving.request_receipt", event_types)
+        self.assertTrue(all(event["topic"] == "performance-iq.serving.telemetry.v1" for event in events))
+        self.assertTrue(all(len(event["eventId"]) == 64 for event in events))
+        with open(event_log_path, encoding="utf-8") as handle:
+            lines = [json.loads(line) for line in handle if line.strip()]
+        self.assertEqual(len(lines), len(events))
+        published: list[dict[str, object]] = []
+
+        class FakeFuture:
+            def get(self, timeout=None):
+                return {"timeout": timeout}
+
+        class FakeKafkaProducer:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def send(self, topic, key=None, value=None):
+                published.append({
+                    "topic": topic,
+                    "key": key.decode("utf-8"),
+                    "value": json.loads(value.decode("utf-8")),
+                })
+                return FakeFuture()
+
+            def flush(self, timeout=None):
+                published.append({"flush": timeout})
+
+            def close(self, timeout=None):
+                published.append({"close": timeout})
+
+        publication = publish_serving_event_log(
+            event_log_path,
+            bootstrap_servers="kafka:9092",
+            producer_factory=FakeKafkaProducer,
+        )
+        self.assertEqual(publication["schemaVersion"], "performance-iq.serving-kafka-publication.v1")
+        self.assertEqual(publication["publishedCount"], len(events))
+        self.assertEqual(
+            publication["eventCounts"]["serving.measurement.serving_token_timeline"],
+            event_types.count("serving.measurement.serving_token_timeline"),
+        )
+        sent_events = [item for item in published if "value" in item]
+        self.assertEqual(len(sent_events), len(events))
+        self.assertTrue(all(item["topic"] == "performance-iq.serving.telemetry.v1" for item in sent_events))
+        summary["kafkaPublication"] = publication
+        write_proof_summary(summary, self.tmp_dir, summary_out=proof_path)
+        verification = verify_proof_summary(proof_path)
+        self.assertTrue(verification["ok"], json.dumps(verification, indent=2))
+        self.assertGreaterEqual(verification["eventCounts"]["serving.measurement.serving_request_sample"], 3)
+        self.assertGreaterEqual(verification["eventCounts"]["serving.measurement.serving_token_timeline"], 3)
+        lines[0]["payload"]["campaignId"] = "tampered"
+        with open(event_log_path, "w", encoding="utf-8") as handle:
+            for event in lines:
+                json.dump(event, handle, sort_keys=True)
+                handle.write("\n")
+        tampered_verification = verify_proof_summary(proof_path)
+        self.assertFalse(tampered_verification["ok"])
+        self.assertTrue(any("eventId digest" in error for error in tampered_verification["errors"]))
 
     def test_serving_smoke_verifies_partial_proof_only_when_allowed(self):
         proof_path, summary = self.write_full_serving_proof()

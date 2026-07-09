@@ -1,0 +1,784 @@
+{
+  "schemaVersion": "performance-iq.serving-smoke-proof.v1",
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "runSuffix": "strict-event-log-combined-20260709T154942Z",
+  "artifactDir": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log",
+  "submissions": [
+    {
+      "engine": "vllm",
+      "runtimeFramework": "vLLM",
+      "requestCount": 1,
+      "successCount": 1,
+      "errorCount": 0,
+      "status": "accepted",
+      "liveProofReady": false,
+      "campaignId": "serving-vllm-strict-event-log-combined-20260709T154942Z",
+      "runId": "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+      "artifactPath": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T15-49-42-041987Z.json",
+      "artifactSha256": "55edde49df93997cac664f73d75eaca7ddaf5703d8e7df543964bd7b61132bc3",
+      "manifestPath": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T15-49-42-041987Z-manifest.json",
+      "errors": []
+    },
+    {
+      "engine": "sglang",
+      "runtimeFramework": "SGLang",
+      "requestCount": 1,
+      "successCount": 1,
+      "errorCount": 0,
+      "status": "accepted",
+      "liveProofReady": false,
+      "campaignId": "serving-sglang-strict-event-log-combined-20260709T154942Z",
+      "runId": "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+      "artifactPath": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/sglang-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T15-49-42-047096Z.json",
+      "artifactSha256": "82627491170be9686796c68fc450027b489ba3958c29e4bd55223bc31b6c6810",
+      "manifestPath": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/sglang-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T15-49-42-047096Z-manifest.json",
+      "errors": []
+    },
+    {
+      "engine": "tensorrt-llm",
+      "runtimeFramework": "TensorRT-LLM",
+      "requestCount": 1,
+      "successCount": 1,
+      "errorCount": 0,
+      "status": "accepted",
+      "liveProofReady": false,
+      "campaignId": "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+      "runId": "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+      "artifactPath": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/tensorrt-llm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T15-49-42-051251Z.json",
+      "artifactSha256": "9339cca5ba64c197357b557a647482abc17e1b2dff1d2d8c5bd04d542274af21",
+      "manifestPath": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/tensorrt-llm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T15-49-42-051251Z-manifest.json",
+      "errors": []
+    }
+  ],
+  "preflight": {
+    "host": {
+      "system": "Darwin",
+      "machine": "arm64",
+      "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+      "python": "/opt/homebrew/opt/python@3.14/bin/python3.14"
+    },
+    "localRuntime": {
+      "commandProbeTimeoutSeconds": 30,
+      "vllmCommand": {
+        "command": "vllm",
+        "available": false,
+        "status": "missing"
+      },
+      "vllmModule": {
+        "module": "vllm",
+        "available": false,
+        "origin": null
+      },
+      "vllmExtension": {
+        "module": "vllm._C",
+        "available": false,
+        "origin": null,
+        "findError": "No module named 'vllm'"
+      },
+      "sglangModule": {
+        "module": "sglang",
+        "available": false,
+        "origin": null
+      },
+      "tensorrtLlmServeCommand": {
+        "command": "trtllm-serve",
+        "available": false,
+        "status": "missing"
+      },
+      "nvidiaSmiCommand": {
+        "command": "nvidia-smi",
+        "available": false,
+        "status": "missing"
+      }
+    },
+    "storage": {
+      "path": "/Users/admin/dev/cw/performance-iq-sdk",
+      "available": true,
+      "totalBytes": 1995218165760,
+      "freeBytes": 90824265728,
+      "freeGiB": 84.59,
+      "lowFreeSpace": false
+    },
+    "missingEngineUrls": [],
+    "endpoints": [
+      {
+        "engine": "vllm",
+        "url": "http://127.0.0.1:52495/v1/models",
+        "reachable": true,
+        "status": 200,
+        "ok": true,
+        "bodyPreview": "{\"object\": \"list\", \"data\": [{\"id\": \"Qwen/Qwen2.5-0.5B-Instruct\", \"object\": \"model\"}]}",
+        "modelChecked": true,
+        "servedModels": [
+          "Qwen/Qwen2.5-0.5B-Instruct"
+        ],
+        "modelAvailable": true
+      },
+      {
+        "engine": "sglang",
+        "url": "http://127.0.0.1:52496/v1/models",
+        "reachable": true,
+        "status": 200,
+        "ok": true,
+        "bodyPreview": "{\"object\": \"list\", \"data\": [{\"id\": \"Qwen/Qwen2.5-0.5B-Instruct\", \"object\": \"model\"}]}",
+        "modelChecked": true,
+        "servedModels": [
+          "Qwen/Qwen2.5-0.5B-Instruct"
+        ],
+        "modelAvailable": true
+      },
+      {
+        "engine": "tensorrt-llm",
+        "url": "http://127.0.0.1:52497/v1/models",
+        "reachable": true,
+        "status": 200,
+        "ok": true,
+        "bodyPreview": "{\"object\": \"list\", \"data\": [{\"id\": \"Qwen/Qwen2.5-0.5B-Instruct\", \"object\": \"model\"}]}",
+        "modelChecked": true,
+        "servedModels": [
+          "Qwen/Qwen2.5-0.5B-Instruct"
+        ],
+        "modelAvailable": true
+      }
+    ],
+    "configuredEngineCount": 3,
+    "launchPlan": {
+      "model": "Qwen/Qwen2.5-0.5B-Instruct",
+      "host": {
+        "system": "Darwin",
+        "machine": "arm64"
+      },
+      "storage": {
+        "path": "/Users/admin/dev/cw/performance-iq-sdk",
+        "available": true,
+        "totalBytes": 1995218165760,
+        "freeBytes": 90824265728,
+        "freeGiB": 84.59,
+        "lowFreeSpace": false
+      },
+      "warnings": [],
+      "endpointEnv": {
+        "PIQ_VLLM_URL": "http://127.0.0.1:8000",
+        "PIQ_SGLANG_URL": "http://127.0.0.1:30000",
+        "PIQ_TENSORRT_LLM_URL": "http://127.0.0.1:8001",
+        "PIQ_VLLM_METRICS_URL": "http://127.0.0.1:8000/metrics",
+        "PIQ_SGLANG_METRICS_URL": "http://127.0.0.1:30000/metrics",
+        "PIQ_TENSORRT_LLM_METRICS_URL": "http://127.0.0.1:8001/prometheus/metrics",
+        "PIQ_TENSORRT_LLM_JSON_METRICS_URL": "http://127.0.0.1:8001/metrics"
+      },
+      "strictProof": {
+        "mode": "strict-recorded-smoke",
+        "requires": [
+          "OpenAI-compatible streaming chat completions for all configured engines",
+          "OpenAI-compatible token logprobs plus response or tokenizer-resolved token IDs",
+          "native engine Prometheus metrics",
+          "DCGM exporter Prometheus metrics",
+          "configured per-GPU hourly cost",
+          "Performance IQ dashboard query access"
+        ],
+        "dashboardSurfaces": [
+          "price_performance",
+          "capacity_best",
+          "campaign_provenance",
+          "run_details",
+          "serving_request_samples",
+          "serving_token_timeline"
+        ],
+        "command": "PIQ_SERVING_MODEL=Qwen/Qwen2.5-0.5B-Instruct PIQ_SERVING_USD_PER_GPU_HOUR=<actual-blended-gpu-hourly-cost> PIQ_SERVING_CAPTURE_TOKEN_DETAILS=true PIQ_SERVING_TOP_LOGPROBS=5 PIQ_SERVING_RESOLVE_TOKEN_IDS_WITH_TOKENIZER=true PIQ_SERVING_COLLECT_HARDWARE_METRICS=true PIQ_SERVING_REQUIRE_NATIVE_TELEMETRY=true PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true bash ops/serving-producers/run-smoke.sh strict-recorded-smoke",
+        "verify": "bash ops/serving-producers/run-smoke.sh verify-proof $PIQ_ARTIFACT_DIR/serving-smoke-proof-<suffix>.json"
+      },
+      "engines": {
+        "vllm": {
+          "localSupport": "apple-silicon-source-build-required",
+          "install": [
+            "git clone https://github.com/vllm-project/vllm.git",
+            "cd vllm",
+            "uv venv --python 3.12 --seed --managed-python",
+            "source .venv/bin/activate",
+            "uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match",
+            "uv pip install -e ."
+          ],
+          "serve": "vllm serve Qwen/Qwen2.5-0.5B-Instruct --host 127.0.0.1 --port 8000 --served-model-name Qwen/Qwen2.5-0.5B-Instruct",
+          "verify": "curl -fsS http://127.0.0.1:8000/v1/models"
+        },
+        "sglang": {
+          "localSupport": "apple-metal-source-build-required",
+          "install": [
+            "git clone https://github.com/sgl-project/sglang.git",
+            "cd sglang",
+            "uv venv -p 3.12 sglang-metal",
+            "source sglang-metal/bin/activate",
+            "uv pip install --upgrade pip",
+            "uv run sgl-kernel/setup_metal.py install",
+            "rm -f python/pyproject.toml",
+            "mv python/pyproject_other.toml python/pyproject.toml",
+            "uv pip install -e \"python[all_mps]\""
+          ],
+          "serve": "SGLANG_USE_MLX=1 python -m sglang.launch_server --model Qwen/Qwen2.5-0.5B-Instruct --disable-cuda-graph --host 127.0.0.1 --port 30000 --served-model-name Qwen/Qwen2.5-0.5B-Instruct --enable-metrics",
+          "verify": "curl -fsS http://127.0.0.1:30000/v1/models"
+        },
+        "tensorrt-llm": {
+          "localSupport": "requires-linux-nvidia-target-or-remote-endpoint",
+          "install": [
+            "Run TensorRT-LLM on a Linux x86_64/aarch64 host with a supported NVIDIA GPU.",
+            "Expose its OpenAI-compatible server to this smoke runner and set PIQ_TENSORRT_LLM_URL."
+          ],
+          "serve": "trtllm-serve Qwen/Qwen2.5-0.5B-Instruct --host 127.0.0.1 --port 8001",
+          "verify": "curl -fsS http://127.0.0.1:8001/v1/models"
+        }
+      }
+    },
+    "ready": true
+  },
+  "receiptProxies": [
+    {
+      "engine": "vllm",
+      "listenUrl": "http://127.0.0.1:52495",
+      "targetBaseUrl": "http://127.0.0.1:52491",
+      "receiptLogPath": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/serving-request-receipts-strict-event-log-combined-20260709T154942Z.jsonl"
+    },
+    {
+      "engine": "sglang",
+      "listenUrl": "http://127.0.0.1:52496",
+      "targetBaseUrl": "http://127.0.0.1:52492",
+      "receiptLogPath": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/serving-request-receipts-strict-event-log-combined-20260709T154942Z.jsonl"
+    },
+    {
+      "engine": "tensorrt-llm",
+      "listenUrl": "http://127.0.0.1:52497",
+      "targetBaseUrl": "http://127.0.0.1:52493",
+      "receiptLogPath": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/serving-request-receipts-strict-event-log-combined-20260709T154942Z.jsonl"
+    }
+  ],
+  "dashboard": {
+    "storeProvider": "local-strict-stub",
+    "rowCounts": {
+      "price_performance": 3,
+      "capacity_best": 3,
+      "campaign_provenance": 3,
+      "run_details": 3,
+      "serving_request_samples": 3,
+      "serving_token_timeline": 3
+    },
+    "rows": {
+      "price_performance": [
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local strict fake engines",
+          "vLLM",
+          "serving-vllm-strict-event-log-combined-20260709T154942Z"
+        ],
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local strict fake engines",
+          "SGLang",
+          "serving-sglang-strict-event-log-combined-20260709T154942Z"
+        ],
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local strict fake engines",
+          "TensorRT-LLM",
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z"
+        ]
+      ],
+      "capacity_best": [
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "vLLM"
+        ],
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "SGLang"
+        ],
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "TensorRT-LLM"
+        ]
+      ],
+      "campaign_provenance": [
+        [
+          "serving-vllm-strict-event-log-combined-20260709T154942Z",
+          "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+          "vLLM"
+        ],
+        [
+          "serving-sglang-strict-event-log-combined-20260709T154942Z",
+          "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+          "SGLang"
+        ],
+        [
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+          "TensorRT-LLM"
+        ]
+      ],
+      "run_details": [
+        [
+          "serving-vllm-strict-event-log-combined-20260709T154942Z",
+          "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+          "vLLM"
+        ],
+        [
+          "serving-sglang-strict-event-log-combined-20260709T154942Z",
+          "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+          "SGLang"
+        ],
+        [
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+          "TensorRT-LLM"
+        ]
+      ],
+      "serving_request_samples": [
+        [
+          "serving-vllm-strict-event-log-combined-20260709T154942Z",
+          "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+          "vLLM",
+          "request-sample"
+        ],
+        [
+          "serving-sglang-strict-event-log-combined-20260709T154942Z",
+          "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+          "SGLang",
+          "request-sample"
+        ],
+        [
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+          "TensorRT-LLM",
+          "request-sample"
+        ]
+      ],
+      "serving_token_timeline": [
+        [
+          "serving-vllm-strict-event-log-combined-20260709T154942Z",
+          "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+          "vLLM",
+          "token-timeline"
+        ],
+        [
+          "serving-sglang-strict-event-log-combined-20260709T154942Z",
+          "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+          "SGLang",
+          "token-timeline"
+        ],
+        [
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+          "TensorRT-LLM",
+          "token-timeline"
+        ]
+      ]
+    },
+    "campaignIds": [
+      "serving-sglang-strict-event-log-combined-20260709T154942Z",
+      "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+      "serving-vllm-strict-event-log-combined-20260709T154942Z"
+    ],
+    "surfaceCampaignIds": {
+      "campaign_provenance": [
+        "serving-sglang-strict-event-log-combined-20260709T154942Z",
+        "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+        "serving-vllm-strict-event-log-combined-20260709T154942Z"
+      ],
+      "run_details": [
+        "serving-sglang-strict-event-log-combined-20260709T154942Z",
+        "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+        "serving-vllm-strict-event-log-combined-20260709T154942Z"
+      ],
+      "serving_request_samples": [
+        "serving-sglang-strict-event-log-combined-20260709T154942Z",
+        "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+        "serving-vllm-strict-event-log-combined-20260709T154942Z"
+      ],
+      "serving_token_timeline": [
+        "serving-sglang-strict-event-log-combined-20260709T154942Z",
+        "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+        "serving-vllm-strict-event-log-combined-20260709T154942Z"
+      ]
+    },
+    "submittedCampaignRows": {
+      "campaign_provenance": [
+        [
+          "serving-vllm-strict-event-log-combined-20260709T154942Z",
+          "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+          "vLLM"
+        ],
+        [
+          "serving-sglang-strict-event-log-combined-20260709T154942Z",
+          "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+          "SGLang"
+        ],
+        [
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+          "TensorRT-LLM"
+        ]
+      ],
+      "run_details": [
+        [
+          "serving-vllm-strict-event-log-combined-20260709T154942Z",
+          "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+          "vLLM"
+        ],
+        [
+          "serving-sglang-strict-event-log-combined-20260709T154942Z",
+          "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+          "SGLang"
+        ],
+        [
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+          "TensorRT-LLM"
+        ]
+      ],
+      "serving_request_samples": [
+        [
+          "serving-vllm-strict-event-log-combined-20260709T154942Z",
+          "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+          "vLLM",
+          "request-sample"
+        ],
+        [
+          "serving-sglang-strict-event-log-combined-20260709T154942Z",
+          "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+          "SGLang",
+          "request-sample"
+        ],
+        [
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+          "TensorRT-LLM",
+          "request-sample"
+        ]
+      ],
+      "serving_token_timeline": [
+        [
+          "serving-vllm-strict-event-log-combined-20260709T154942Z",
+          "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+          "vLLM",
+          "token-timeline"
+        ],
+        [
+          "serving-sglang-strict-event-log-combined-20260709T154942Z",
+          "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+          "SGLang",
+          "token-timeline"
+        ],
+        [
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+          "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+          "TensorRT-LLM",
+          "token-timeline"
+        ]
+      ]
+    },
+    "runtimeFrameworks": [
+      "SGLang",
+      "TensorRT-LLM",
+      "vLLM"
+    ]
+  },
+  "receiptLogPath": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/serving-request-receipts-strict-event-log-combined-20260709T154942Z.jsonl",
+  "eventLogPath": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/serving-events-strict-event-log-combined-20260709T154942Z.jsonl",
+  "proofSummaryPath": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/serving-smoke-proof-strict-event-log-combined-20260709T154942Z.json",
+  "evidenceIndex": {
+    "schemaVersion": "performance-iq.serving-evidence-index.v1",
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "engines": {
+      "vllm": {
+        "runtimeFramework": "vLLM",
+        "campaignId": "serving-vllm-strict-event-log-combined-20260709T154942Z",
+        "runId": "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+        "requestCount": 1,
+        "successCount": 1,
+        "artifact": {
+          "path": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T15-49-42-041987Z.json",
+          "sha256": "55edde49df93997cac664f73d75eaca7ddaf5703d8e7df543964bd7b61132bc3",
+          "schemaVersion": "performance-iq.serving-producer-summary.v1"
+        },
+        "manifest": {
+          "path": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T15-49-42-041987Z-manifest.json",
+          "schemaVersion": "performance-iq.producer-manifest.v1"
+        },
+        "requestTraceIds": [
+          "piq-vllm-serving-vllm-strict-event-log-combined-20260709T154942Z-run-request-1"
+        ],
+        "receiptIds": [
+          "piq-vllm-serving-vllm-strict-event-log-combined-20260709T154942Z-run-request-1"
+        ],
+        "measurement": {
+          "model": "Qwen/Qwen2.5-0.5B-Instruct",
+          "runtimeFramework": "vLLM",
+          "runtimeEngine": "vllm",
+          "requestCount": 1,
+          "successCount": 1,
+          "promptTokens": 8.0,
+          "completionTokens": 3.0,
+          "totalTokens": 11.0,
+          "outputTpm": 172043.01083653484,
+          "totalTpm": 630824.3730672944,
+          "avgLatencyMs": 1.046249999490101,
+          "p50LatencyMs": 1.046249999490101,
+          "p95LatencyMs": 1.046249999490101,
+          "p99LatencyMs": 1.046249999490101,
+          "avgTtftMs": 0.7889579974289518,
+          "avgTpotMs": 0.012833501386921853,
+          "avgTtfotMs": 0.7889579974289518,
+          "metricCompleteness": 1.0,
+          "tags": "serving-producer,vllm,vLLM,Qwen/Qwen2.5-0.5B-Instruct"
+        },
+        "dashboard": {
+          "rowCounts": {
+            "price_performance": 3,
+            "capacity_best": 3,
+            "campaign_provenance": 3,
+            "run_details": 3,
+            "serving_request_samples": 3,
+            "serving_token_timeline": 3
+          },
+          "surfaces": {
+            "campaign_provenance": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-vllm-strict-event-log-combined-20260709T154942Z",
+                  "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+                  "vLLM"
+                ]
+              ]
+            },
+            "run_details": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-vllm-strict-event-log-combined-20260709T154942Z",
+                  "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+                  "vLLM"
+                ]
+              ]
+            },
+            "serving_request_samples": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-vllm-strict-event-log-combined-20260709T154942Z",
+                  "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+                  "vLLM",
+                  "request-sample"
+                ]
+              ]
+            },
+            "serving_token_timeline": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-vllm-strict-event-log-combined-20260709T154942Z",
+                  "serving-vllm-strict-event-log-combined-20260709T154942Z-run",
+                  "vLLM",
+                  "token-timeline"
+                ]
+              ]
+            }
+          }
+        }
+      },
+      "sglang": {
+        "runtimeFramework": "SGLang",
+        "campaignId": "serving-sglang-strict-event-log-combined-20260709T154942Z",
+        "runId": "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+        "requestCount": 1,
+        "successCount": 1,
+        "artifact": {
+          "path": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/sglang-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T15-49-42-047096Z.json",
+          "sha256": "82627491170be9686796c68fc450027b489ba3958c29e4bd55223bc31b6c6810",
+          "schemaVersion": "performance-iq.serving-producer-summary.v1"
+        },
+        "manifest": {
+          "path": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/sglang-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T15-49-42-047096Z-manifest.json",
+          "schemaVersion": "performance-iq.producer-manifest.v1"
+        },
+        "requestTraceIds": [
+          "piq-sglang-serving-sglang-strict-event-log-combined-20260709T154942Z-run-request-1"
+        ],
+        "receiptIds": [
+          "piq-sglang-serving-sglang-strict-event-log-combined-20260709T154942Z-run-request-1"
+        ],
+        "measurement": {
+          "model": "Qwen/Qwen2.5-0.5B-Instruct",
+          "runtimeFramework": "SGLang",
+          "runtimeEngine": "sglang",
+          "requestCount": 1,
+          "successCount": 1,
+          "promptTokens": 8.0,
+          "completionTokens": 3.0,
+          "totalTokens": 11.0,
+          "outputTpm": 180000.0,
+          "totalTpm": 660000.0,
+          "avgLatencyMs": 0.8391250012209639,
+          "p50LatencyMs": 0.8391250012209639,
+          "p95LatencyMs": 0.8391250012209639,
+          "p99LatencyMs": 0.8391250012209639,
+          "avgTtftMs": 0.6505409983219579,
+          "avgTpotMs": 0.011125001037726179,
+          "avgTtfotMs": 0.6505409983219579,
+          "metricCompleteness": 1.0,
+          "tags": "serving-producer,sglang,SGLang,Qwen/Qwen2.5-0.5B-Instruct"
+        },
+        "dashboard": {
+          "rowCounts": {
+            "price_performance": 3,
+            "capacity_best": 3,
+            "campaign_provenance": 3,
+            "run_details": 3,
+            "serving_request_samples": 3,
+            "serving_token_timeline": 3
+          },
+          "surfaces": {
+            "campaign_provenance": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-sglang-strict-event-log-combined-20260709T154942Z",
+                  "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+                  "SGLang"
+                ]
+              ]
+            },
+            "run_details": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-sglang-strict-event-log-combined-20260709T154942Z",
+                  "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+                  "SGLang"
+                ]
+              ]
+            },
+            "serving_request_samples": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-sglang-strict-event-log-combined-20260709T154942Z",
+                  "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+                  "SGLang",
+                  "request-sample"
+                ]
+              ]
+            },
+            "serving_token_timeline": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-sglang-strict-event-log-combined-20260709T154942Z",
+                  "serving-sglang-strict-event-log-combined-20260709T154942Z-run",
+                  "SGLang",
+                  "token-timeline"
+                ]
+              ]
+            }
+          }
+        }
+      },
+      "tensorrt-llm": {
+        "runtimeFramework": "TensorRT-LLM",
+        "campaignId": "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+        "runId": "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+        "requestCount": 1,
+        "successCount": 1,
+        "artifact": {
+          "path": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/tensorrt-llm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T15-49-42-051251Z.json",
+          "sha256": "9339cca5ba64c197357b557a647482abc17e1b2dff1d2d8c5bd04d542274af21",
+          "schemaVersion": "performance-iq.serving-producer-summary.v1"
+        },
+        "manifest": {
+          "path": "/Users/admin/dev/cw/performance-iq-sdk/performance-iq-output/strict-event-log/tensorrt-llm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T15-49-42-051251Z-manifest.json",
+          "schemaVersion": "performance-iq.producer-manifest.v1"
+        },
+        "requestTraceIds": [
+          "piq-tensorrt-llm-serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run-request-1"
+        ],
+        "receiptIds": [
+          "piq-tensorrt-llm-serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run-request-1"
+        ],
+        "measurement": {
+          "model": "Qwen/Qwen2.5-0.5B-Instruct",
+          "runtimeFramework": "TensorRT-LLM",
+          "runtimeEngine": "tensorrt-llm",
+          "requestCount": 1,
+          "successCount": 1,
+          "promptTokens": 8.0,
+          "completionTokens": 3.0,
+          "totalTokens": 11.0,
+          "outputTpm": 180000.0,
+          "totalTpm": 660000.0,
+          "avgLatencyMs": 0.8493749992339872,
+          "p50LatencyMs": 0.8493749992339872,
+          "p95LatencyMs": 0.8493749992339872,
+          "p99LatencyMs": 0.8493749992339872,
+          "avgTtftMs": 0.637875000393251,
+          "avgTpotMs": 0.009354000212624669,
+          "avgTtfotMs": 0.637875000393251,
+          "metricCompleteness": 1.0,
+          "tags": "serving-producer,tensorrt-llm,TensorRT-LLM,Qwen/Qwen2.5-0.5B-Instruct"
+        },
+        "dashboard": {
+          "rowCounts": {
+            "price_performance": 3,
+            "capacity_best": 3,
+            "campaign_provenance": 3,
+            "run_details": 3,
+            "serving_request_samples": 3,
+            "serving_token_timeline": 3
+          },
+          "surfaces": {
+            "campaign_provenance": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+                  "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+                  "TensorRT-LLM"
+                ]
+              ]
+            },
+            "run_details": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+                  "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+                  "TensorRT-LLM"
+                ]
+              ]
+            },
+            "serving_request_samples": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+                  "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+                  "TensorRT-LLM",
+                  "request-sample"
+                ]
+              ]
+            },
+            "serving_token_timeline": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z",
+                  "serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run",
+                  "TensorRT-LLM",
+                  "token-timeline"
+                ]
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "smokeSummarySchemaVersion": "performance-iq.serving-smoke-summary.v1",
+  "writtenAtUtc": "2026-07-09T15:49:42.056579Z"
+}

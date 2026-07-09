@@ -55,7 +55,10 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
         if self.path == "/v1/models":
             self._write_json(200, {"object": "list", "data": [{"id": self.state.model, "object": "model"}]})
             return
-        if self.path == "/metrics":
+        if self.path == "/metrics" and self.state.engine == "tensorrt-llm":
+            self._write_tensorrt_json_metrics()
+            return
+        if self.path in {"/metrics", "/prometheus/metrics"}:
             self._write_metrics()
             return
         self._write_json(404, {"error": "not found"})
@@ -151,26 +154,72 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
 
     def _write_metrics(self) -> None:
         count = self.state.current_requests()
+        if self.state.engine == "sglang":
+            engine_metrics = [
+                f'sglang:time_to_first_token_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'sglang:time_to_first_token_seconds_sum{{model_name="{self.state.model}"}} {count * 0.125}',
+                f'sglang:time_per_output_token_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'sglang:time_per_output_token_seconds_sum{{model_name="{self.state.model}"}} {count * 0.015}',
+                f'sglang:e2e_request_latency_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'sglang:e2e_request_latency_seconds_sum{{model_name="{self.state.model}"}} {count * 0.240}',
+                f'sglang:request_queue_time_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'sglang:request_queue_time_seconds_sum{{model_name="{self.state.model}"}} {count * 0.002}',
+                f'sglang:per_stage_req_latency_seconds_count{{stage="prefill_forward",model_name="{self.state.model}"}} {count}',
+                f'sglang:per_stage_req_latency_seconds_sum{{stage="prefill_forward",model_name="{self.state.model}"}} {count * 0.070}',
+                f'sglang:per_stage_req_latency_seconds_count{{stage="decode_forward",model_name="{self.state.model}"}} {count}',
+                f'sglang:per_stage_req_latency_seconds_sum{{stage="decode_forward",model_name="{self.state.model}"}} {count * 0.110}',
+                f'sglang:num_running_reqs{{model_name="{self.state.model}"}} 1',
+                f'sglang:num_queue_reqs{{model_name="{self.state.model}"}} 0',
+                f'sglang:token_usage{{model_name="{self.state.model}"}} {0.05 + count * 0.01}',
+                f'sglang:cache_hit_rate{{model_name="{self.state.model}"}} 0.2',
+                f'sglang:prompt_tokens_cached_total{{model_name="{self.state.model}"}} {count * 3}',
+                f'sglang:request_prefill_kv_computed_tokens_sum{{model_name="{self.state.model}"}} {count * 8}',
+            ]
+        elif self.state.engine == "tensorrt-llm":
+            engine_metrics = [
+                f'trtllm_time_to_first_token_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'trtllm_time_to_first_token_seconds_sum{{model_name="{self.state.model}"}} {count * 0.125}',
+                f'trtllm_time_per_output_token_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'trtllm_time_per_output_token_seconds_sum{{model_name="{self.state.model}"}} {count * 0.015}',
+                f'trtllm_e2e_request_latency_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'trtllm_e2e_request_latency_seconds_sum{{model_name="{self.state.model}"}} {count * 0.240}',
+                f'trtllm_request_queue_time_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'trtllm_request_queue_time_seconds_sum{{model_name="{self.state.model}"}} {count * 0.002}',
+                f'trtllm_request_prefill_time_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'trtllm_request_prefill_time_seconds_sum{{model_name="{self.state.model}"}} {count * 0.070}',
+                f'trtllm_request_decode_time_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'trtllm_request_decode_time_seconds_sum{{model_name="{self.state.model}"}} {count * 0.110}',
+                f'trtllm_num_active_requests{{model_name="{self.state.model}"}} 1',
+                f'trtllm_num_queued_requests{{model_name="{self.state.model}"}} 0',
+                f'trtllm_kv_cache_utilization{{model_name="{self.state.model}"}} {0.05 + count * 0.01}',
+                f'trtllm_kv_cache_hit_rate{{model_name="{self.state.model}"}} 0.2',
+                f'trtllm_prompt_tokens_cached_total{{model_name="{self.state.model}"}} {count * 3}',
+                f'trtllm_request_prefill_kv_computed_tokens_sum{{model_name="{self.state.model}"}} {count * 8}',
+            ]
+        else:
+            engine_metrics = [
+                f'vllm:time_to_first_token_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'vllm:time_to_first_token_seconds_sum{{model_name="{self.state.model}"}} {count * 0.125}',
+                f'vllm:request_time_per_output_token_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'vllm:request_time_per_output_token_seconds_sum{{model_name="{self.state.model}"}} {count * 0.015}',
+                f'vllm:e2e_request_latency_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'vllm:e2e_request_latency_seconds_sum{{model_name="{self.state.model}"}} {count * 0.240}',
+                f'vllm:request_queue_time_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'vllm:request_queue_time_seconds_sum{{model_name="{self.state.model}"}} {count * 0.002}',
+                f'vllm:request_prefill_time_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'vllm:request_prefill_time_seconds_sum{{model_name="{self.state.model}"}} {count * 0.070}',
+                f'vllm:request_decode_time_seconds_count{{model_name="{self.state.model}"}} {count}',
+                f'vllm:request_decode_time_seconds_sum{{model_name="{self.state.model}"}} {count * 0.110}',
+                f'vllm:num_requests_running{{model_name="{self.state.model}"}} 1',
+                f'vllm:num_requests_waiting{{model_name="{self.state.model}"}} 0',
+                f'vllm:kv_cache_usage_perc{{model_name="{self.state.model}"}} {0.05 + count * 0.01}',
+                f'vllm:prefix_cache_queries_total{{model_name="{self.state.model}"}} {count * 10}',
+                f'vllm:prefix_cache_hits_total{{model_name="{self.state.model}"}} {count * 2}',
+                f'vllm:prompt_tokens_cached_total{{model_name="{self.state.model}"}} {count * 3}',
+                f'vllm:request_prefill_kv_computed_tokens_sum{{model_name="{self.state.model}"}} {count * 8}',
+            ]
         metrics = "\n".join([
-            f'vllm:time_to_first_token_seconds_count{{model_name="{self.state.model}"}} {count}',
-            f'vllm:time_to_first_token_seconds_sum{{model_name="{self.state.model}"}} {count * 0.125}',
-            f'vllm:request_time_per_output_token_seconds_count{{model_name="{self.state.model}"}} {count}',
-            f'vllm:request_time_per_output_token_seconds_sum{{model_name="{self.state.model}"}} {count * 0.015}',
-            f'vllm:e2e_request_latency_seconds_count{{model_name="{self.state.model}"}} {count}',
-            f'vllm:e2e_request_latency_seconds_sum{{model_name="{self.state.model}"}} {count * 0.240}',
-            f'vllm:request_queue_time_seconds_count{{model_name="{self.state.model}"}} {count}',
-            f'vllm:request_queue_time_seconds_sum{{model_name="{self.state.model}"}} {count * 0.002}',
-            f'vllm:request_prefill_time_seconds_count{{model_name="{self.state.model}"}} {count}',
-            f'vllm:request_prefill_time_seconds_sum{{model_name="{self.state.model}"}} {count * 0.070}',
-            f'vllm:request_decode_time_seconds_count{{model_name="{self.state.model}"}} {count}',
-            f'vllm:request_decode_time_seconds_sum{{model_name="{self.state.model}"}} {count * 0.110}',
-            f'vllm:num_requests_running{{model_name="{self.state.model}"}} 1',
-            f'vllm:num_requests_waiting{{model_name="{self.state.model}"}} 0',
-            f'vllm:kv_cache_usage_perc{{model_name="{self.state.model}"}} {0.05 + count * 0.01}',
-            f'vllm:prefix_cache_queries_total{{model_name="{self.state.model}"}} {count * 10}',
-            f'vllm:prefix_cache_hits_total{{model_name="{self.state.model}"}} {count * 2}',
-            f'vllm:prompt_tokens_cached_total{{model_name="{self.state.model}"}} {count * 3}',
-            f'vllm:request_prefill_kv_computed_tokens_sum{{model_name="{self.state.model}"}} {count * 8}',
+            *engine_metrics,
             f'DCGM_FI_DEV_POWER_USAGE{{gpu="0",modelName="{self.state.model}"}} {120 + count}',
             f'DCGM_FI_DEV_GPU_UTIL{{gpu="0",modelName="{self.state.model}"}} {50 + count}',
             f'DCGM_FI_DEV_MEM_COPY_UTIL{{gpu="0",modelName="{self.state.model}"}} {20 + count}',
@@ -184,6 +233,24 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
         payload = metrics.encode("utf-8")
         self.send_response(200)
         self.send_header("content-type", "text/plain; version=0.0.4")
+        self.send_header("content-length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _write_tensorrt_json_metrics(self) -> None:
+        count = self.state.current_requests()
+        payload = json.dumps([{
+            "gpuMemUsage": 2_000_000_000 + count,
+            "iterLatencyMS": 7 + count,
+            "numActiveRequests": 1,
+            "kvCacheStats": {
+                "usedNumBlocks": 4 + count,
+                "maxNumBlocks": 10,
+                "cacheHitRate": 0.2,
+            },
+        }]).encode("utf-8")
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)

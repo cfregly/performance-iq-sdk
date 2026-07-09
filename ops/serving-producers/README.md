@@ -30,6 +30,36 @@ be added later as an optional ingestion transport after the producer has already
 captured timestamps, token details, raw operator artifacts, DCGM/native metrics,
 hashes, receipts, and provenance.
 
+Smoke runs now write a post-capture event log for Kafka-style ingestion:
+
+```bash
+export PIQ_SERVING_EVENT_LOG=$PIQ_ARTIFACT_DIR/serving-events.jsonl
+export PIQ_SERVING_KAFKA_TOPIC=performance-iq.serving.telemetry.v1
+```
+
+Each JSONL record is a self-contained event with `schemaVersion`, `topic`,
+`eventType`, `partitionKey`, `eventId`, campaign/run/request identifiers,
+artifact and manifest paths, and a payload. Events include submissions,
+artifact pointers, aggregate measurements, `serving_request_sample` rows,
+`serving_token_timeline` rows, native telemetry, DCGM telemetry, token-detail
+summaries, request receipts, and the dashboard snapshot. This is the right
+Kafka boundary: publish these already-timestamped events downstream, not the
+live request stream used to measure TTFT/TPOT.
+
+To publish that event log to Kafka after capture, install the optional Kafka
+extra or use the smoke runner image, then opt in explicitly:
+
+```bash
+python -m pip install './python[kafka]'
+export PIQ_SERVING_PUBLISH_KAFKA=true
+export PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS=kafka-1:9092,kafka-2:9092
+export PIQ_SERVING_KAFKA_CLIENT_ID=performance-iq-serving-producer
+```
+
+When Kafka publication is enabled, the proof summary records a
+`kafkaPublication` report with the event log path, published event count,
+event-type counts, topic counts, client ID, and publication timestamp.
+
 Token-level detail is captured when the engine exposes OpenAI-compatible
 `logprobs`/`top_logprobs`. Enable it with:
 
@@ -73,6 +103,13 @@ when configured engines do not produce these native timing/cache/concurrency
 fields. DCGM sensor counters promoted into the same request rows include power,
 GPU/memory-copy utilization, temperature, SM and memory clocks, framebuffer
 used/free, and energy.
+
+TensorRT-LLM defaults to the Prometheus metrics endpoint
+`/prometheus/metrics` for strict native telemetry. The smoke runner also reads
+`PIQ_TENSORRT_LLM_JSON_METRICS_URL` (default `/metrics`) when available, so
+TensorRT iteration-stat JSON fields such as iteration latency, GPU memory
+usage, active requests, KV-cache block usage, and cache hit rate are preserved
+without losing Prometheus queue/prefill/decode timing.
 
 Runtime provenance has two layers. Dashboard rows get safe identifiers and
 hashes: framework version, model revision, image tag/digest, server-args hash,
@@ -200,7 +237,8 @@ bash ops/serving-producers/run-smoke.sh strict-recorded-smoke
 Use `smoke` only when request receipts are being captured by another layer.
 `recorded-smoke` starts in-process receipt proxies, routes all engine traffic
 through them, writes `PIQ_SERVING_RECEIPT_LOG`, submits the producer runs,
-queries the dashboard surfaces, and writes the proof summary.
+queries the dashboard surfaces, writes `PIQ_SERVING_EVENT_LOG`, and writes the
+proof summary.
 Use `strict-smoke` or `strict-recorded-smoke` for product proof: these require
 token IDs/logprobs, token ID provenance, native engine telemetry, DCGM hardware
 counters, dashboard rows, request receipts, and configured GPU cost.
@@ -210,6 +248,18 @@ Verify the saved proof bundle offline:
 ```bash
 bash ops/serving-producers/run-smoke.sh verify-proof \
   "$PIQ_ARTIFACT_DIR/serving-smoke-proof-<suffix>.json"
+```
+
+To inspect every generated row, add a proof-row dump. The output includes
+submitted runs, dashboard row snapshots, request samples, token timeline rows,
+native telemetry, DCGM telemetry, request trace rows, measurement rows, request
+receipts, and Kafka-ready event rows, with campaign/run/engine provenance
+attached to artifact-local rows:
+
+```bash
+bash ops/serving-producers/run-smoke.sh verify-proof \
+  "$PIQ_ARTIFACT_DIR/serving-smoke-proof-<suffix>.json" \
+  --dump-proof-rows "$PIQ_ARTIFACT_DIR/serving-proof-rows.json"
 ```
 
 Partial local proofs are allowed only when the caller opts in. This keeps the
@@ -243,6 +293,8 @@ Success requires:
   checking the manifests, endpoint preflight, submitted campaigns, dashboard
   surfaces, token timeline, native telemetry, DCGM counters, and runtime
   framework provenance.
+- `serving-events.jsonl` exists and `verify-proof` accepts its Kafka-ready
+  event schema, including request-sample and token-timeline events.
 
 ## Mac / Apple Silicon
 

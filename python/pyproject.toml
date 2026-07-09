@@ -32,6 +32,9 @@ tokenizers = [
   "transformers>=4.41,<5",
   "tokenizers>=0.19",
 ]
+kafka = [
+  "kafka-python>=2.0.2,<3",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

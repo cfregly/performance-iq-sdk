@@ -332,6 +332,12 @@ describe("performance-iq-sdk js", () => {
         podName: "pod-a",
         nodeName: "node-a",
         hostName: "host-a",
+        nativeTelemetry: {
+          trtllmIterationLatencyMs: 7,
+          trtllmGpuMemoryBytes: 2000,
+          trtllmKvCacheUsedBlocks: 4,
+          trtllmKvCacheMaxBlocks: 10,
+        },
       },
       request: {
         model: laptopSmokeModel(),
@@ -364,6 +370,10 @@ describe("performance-iq-sdk js", () => {
     expect(sample.kvCacheUsagePct).toBeCloseTo(0.25)
     expect(sample.promptTokensCachedDelta).toBe(3)
     expect(sample.promptTokensComputedDelta).toBe(8)
+    expect(sample.nativeIterationLatencyMs).toBe(7)
+    expect(sample.nativeGpuMemoryBytes).toBe(2000)
+    expect(sample.nativeKvCacheUsedBlocks).toBe(4)
+    expect(sample.nativeKvCacheMaxBlocks).toBe(10)
     expect(sample.engineVersion).toBe("vllm-test")
     expect(sample.modelRevision).toBe("revision-a")
     expect(sample.imageTag).toBe("vllm:test")
@@ -381,12 +391,70 @@ describe("performance-iq-sdk js", () => {
     expect(result.measurements[0].avgQueueWaitMs as number).toBeCloseTo(2)
     expect(result.measurements[0].avgPrefillMs as number).toBeCloseTo(60)
     expect(result.measurements[0].avgDecodeMs as number).toBeCloseTo(120)
+    expect(result.measurements[0].avgNativeIterationLatencyMs).toBe(7)
+    expect(result.measurements[0].avgNativeGpuMemoryBytes).toBe(2000)
     const sampleRows = result.measurements.filter((row) => row.surface === "serving_request_sample")
     expect(sampleRows[0].nativeTtftMs).toBeCloseTo(250)
     expect(sampleRows[0].runningRequests).toBe(1)
     expect(sampleRows[0].promptTokensCachedDelta).toBe(3)
+    expect(sampleRows[0].nativeIterationLatencyMs).toBe(7)
+    expect(sampleRows[0].nativeGpuMemoryBytes).toBe(2000)
     expect(sampleRows[0].engineVersion).toBe("vllm-test")
     expect(sampleRows[0].containerId).toBe("container-a")
+  })
+
+  it("defaults TensorRT-LLM native metrics collection to the Prometheus endpoint", async () => {
+    const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "piq-serving-trt-metrics-url-test-"))
+    tmpDirs.push(artifactDir)
+    const metricUrls: string[] = []
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url)
+      if (href.endsWith("/prometheus/metrics")) {
+        metricUrls.push(href)
+        return new Response("", { status: 200, headers: { "content-type": "text/plain" } })
+      }
+      if (href.endsWith("/metrics")) {
+        metricUrls.push(href)
+        return new Response('[{"gpuMemUsage": 2000, "iterLatencyMS": 7, "kvCacheStats": {"usedNumBlocks": 4, "maxNumBlocks": 10, "cacheHitRate": 0.4}, "numActiveRequests": 1}]', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      const body = [
+        { id: "chatcmpl-test", model: laptopSmokeModel(), choices: [{ delta: { content: "ok" } }] },
+        { id: "chatcmpl-test", model: laptopSmokeModel(), choices: [], usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 } },
+      ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })
+    })
+
+    await runServingProducer({
+      engine: {
+        engine: "tensorrt-llm",
+        baseUrl: "http://127.0.0.1:8001",
+        collectNativeMetrics: true,
+      },
+      request: {
+        model: laptopSmokeModel(),
+        messages: [{ role: "user", content: "Say ok." }],
+      },
+      artifactDir,
+      workload: {
+        hardware: "local mock engine",
+        operatingPoint: "laptop-smoke",
+      },
+      pricing: { usdPerGpuHour: 1, gpuCount: 1, powerWattsPerGpu: 100 },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    expect(metricUrls).toEqual([
+      "http://127.0.0.1:8001/prometheus/metrics",
+      "http://127.0.0.1:8001/metrics",
+      "http://127.0.0.1:8001/prometheus/metrics",
+      "http://127.0.0.1:8001/metrics",
+    ])
   })
 
   it("captures response token logprobs and DCGM hardware metrics", async () => {

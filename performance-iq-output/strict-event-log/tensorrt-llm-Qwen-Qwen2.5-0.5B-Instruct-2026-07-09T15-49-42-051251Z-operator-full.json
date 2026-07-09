@@ -1,0 +1,357 @@
+{
+  "schemaVersion": "performance-iq.serving-operator-full-raw.v1",
+  "confidentiality": "operator-full",
+  "capturedAtUtc": "2026-07-09T15:49:42.051251Z",
+  "engine": "tensorrt-llm",
+  "engineLabel": "TensorRT-LLM",
+  "requestPayload": {
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Return a short acknowledgement."
+      }
+    ],
+    "max_tokens": 8,
+    "temperature": 0,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "logprobs": true,
+    "top_logprobs": 2
+  },
+  "captures": [
+    {
+      "requestId": "piq-tensorrt-llm-serving-tensorrt-llm-strict-event-log-combined-20260709T154942Z-run-request-1",
+      "endpoint": "http://127.0.0.1:52497/v1/chat/completions",
+      "requestPayload": {
+        "model": "Qwen/Qwen2.5-0.5B-Instruct",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Return a short acknowledgement."
+          }
+        ],
+        "max_tokens": 8,
+        "temperature": 0,
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "logprobs": true,
+        "top_logprobs": 2
+      },
+      "responseEvents": [
+        {
+          "body": {
+            "id": "tensorrt-llm-fake-1",
+            "object": "chat.completion.chunk",
+            "model": "Qwen/Qwen2.5-0.5B-Instruct",
+            "choices": [
+              {
+                "index": 0,
+                "delta": {
+                  "content": "o"
+                },
+                "logprobs": {
+                  "content": [
+                    {
+                      "token": "o",
+                      "token_id": 101,
+                      "logprob": -0.1,
+                      "bytes": [
+                        111
+                      ],
+                      "top_logprobs": [
+                        {
+                          "token": "o",
+                          "token_id": 101,
+                          "logprob": -0.1,
+                          "bytes": [
+                            111
+                          ]
+                        },
+                        {
+                          "token": "O",
+                          "token_id": 102,
+                          "logprob": -2.1,
+                          "bytes": [
+                            79
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "raw": "{\"id\": \"tensorrt-llm-fake-1\", \"object\": \"chat.completion.chunk\", \"model\": \"Qwen/Qwen2.5-0.5B-Instruct\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"o\"}, \"logprobs\": {\"content\": [{\"token\": \"o\", \"token_id\": 101, \"logprob\": -0.1, \"bytes\": [111], \"top_logprobs\": [{\"token\": \"o\", \"token_id\": 101, \"logprob\": -0.1, \"bytes\": [111]}, {\"token\": \"O\", \"token_id\": 102, \"logprob\": -2.1, \"bytes\": [79]}]}]}}]}",
+          "receivedMs": 0.637875000393251,
+          "receivedAtUtc": "2026-07-09T15:49:42.052774Z"
+        },
+        {
+          "body": {
+            "id": "tensorrt-llm-fake-1",
+            "object": "chat.completion.chunk",
+            "model": "Qwen/Qwen2.5-0.5B-Instruct",
+            "choices": [
+              {
+                "index": 0,
+                "delta": {
+                  "content": "k"
+                },
+                "logprobs": {
+                  "content": [
+                    {
+                      "token": "k",
+                      "token_id": 202,
+                      "logprob": -0.2,
+                      "bytes": [
+                        107
+                      ],
+                      "top_logprobs": [
+                        {
+                          "token": "k",
+                          "token_id": 202,
+                          "logprob": -0.2,
+                          "bytes": [
+                            107
+                          ]
+                        },
+                        {
+                          "token": "K",
+                          "token_id": 203,
+                          "logprob": -2.2,
+                          "bytes": [
+                            75
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "raw": "{\"id\": \"tensorrt-llm-fake-1\", \"object\": \"chat.completion.chunk\", \"model\": \"Qwen/Qwen2.5-0.5B-Instruct\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"k\"}, \"logprobs\": {\"content\": [{\"token\": \"k\", \"token_id\": 202, \"logprob\": -0.2, \"bytes\": [107], \"top_logprobs\": [{\"token\": \"k\", \"token_id\": 202, \"logprob\": -0.2, \"bytes\": [107]}, {\"token\": \"K\", \"token_id\": 203, \"logprob\": -2.2, \"bytes\": [75]}]}]}}]}",
+          "receivedMs": 0.6497909998870455,
+          "receivedAtUtc": "2026-07-09T15:49:42.052786Z"
+        },
+        {
+          "body": {
+            "id": "tensorrt-llm-fake-1",
+            "object": "chat.completion.chunk",
+            "model": "Qwen/Qwen2.5-0.5B-Instruct",
+            "choices": [
+              {
+                "index": 0,
+                "delta": {
+                  "content": "."
+                },
+                "logprobs": {
+                  "content": [
+                    {
+                      "token": ".",
+                      "token_id": 303,
+                      "logprob": -0.3,
+                      "bytes": [
+                        46
+                      ],
+                      "top_logprobs": [
+                        {
+                          "token": ".",
+                          "token_id": 303,
+                          "logprob": -0.3,
+                          "bytes": [
+                            46
+                          ]
+                        },
+                        {
+                          "token": ".",
+                          "token_id": 304,
+                          "logprob": -2.3,
+                          "bytes": [
+                            46
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "raw": "{\"id\": \"tensorrt-llm-fake-1\", \"object\": \"chat.completion.chunk\", \"model\": \"Qwen/Qwen2.5-0.5B-Instruct\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \".\"}, \"logprobs\": {\"content\": [{\"token\": \".\", \"token_id\": 303, \"logprob\": -0.3, \"bytes\": [46], \"top_logprobs\": [{\"token\": \".\", \"token_id\": 303, \"logprob\": -0.3, \"bytes\": [46]}, {\"token\": \".\", \"token_id\": 304, \"logprob\": -2.3, \"bytes\": [46]}]}]}}]}",
+          "receivedMs": 0.6565830008185003,
+          "receivedAtUtc": "2026-07-09T15:49:42.052793Z"
+        },
+        {
+          "body": {
+            "id": "tensorrt-llm-fake-1",
+            "object": "chat.completion.chunk",
+            "model": "Qwen/Qwen2.5-0.5B-Instruct",
+            "choices": [
+              {
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 8,
+              "completion_tokens": 3,
+              "total_tokens": 11
+            }
+          },
+          "raw": "{\"id\": \"tensorrt-llm-fake-1\", \"object\": \"chat.completion.chunk\", \"model\": \"Qwen/Qwen2.5-0.5B-Instruct\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 8, \"completion_tokens\": 3, \"total_tokens\": 11}}",
+          "receivedMs": 0.6625409987464081,
+          "receivedAtUtc": "2026-07-09T15:49:42.052799Z"
+        },
+        {
+          "done": true,
+          "raw": "[DONE]",
+          "receivedMs": 0.6677909987047315,
+          "receivedAtUtc": "2026-07-09T15:49:42.052804Z"
+        }
+      ],
+      "outputText": "ok.",
+      "tokenDetails": [
+        {
+          "tokenText": "o",
+          "tokenSha256": "65c74c15a686187bb6bbf9958f494fc6b80068034a659a9ad44991b08c58f2d2",
+          "tokenBytes": 1,
+          "tokenId": 101,
+          "tokenIdSource": "response-logprobs",
+          "logprob": -0.1,
+          "topLogprobs": [
+            {
+              "tokenSha256": "65c74c15a686187bb6bbf9958f494fc6b80068034a659a9ad44991b08c58f2d2",
+              "tokenBytes": 1,
+              "tokenId": 101,
+              "tokenIdSource": "response-logprobs",
+              "logprob": -0.1
+            },
+            {
+              "tokenSha256": "c4694f2e93d5c4e7d51f9c5deb75e6cc8be5e1114178c6a45b6fc2c566a0aa8c",
+              "tokenBytes": 1,
+              "tokenId": 102,
+              "tokenIdSource": "response-logprobs",
+              "logprob": -2.1
+            }
+          ],
+          "chunkIndex": 0
+        },
+        {
+          "tokenText": "k",
+          "tokenSha256": "8254c329a92850f6d539dd376f4816ee2764517da5e0235514af433164480d7a",
+          "tokenBytes": 1,
+          "tokenId": 202,
+          "tokenIdSource": "response-logprobs",
+          "logprob": -0.2,
+          "topLogprobs": [
+            {
+              "tokenSha256": "8254c329a92850f6d539dd376f4816ee2764517da5e0235514af433164480d7a",
+              "tokenBytes": 1,
+              "tokenId": 202,
+              "tokenIdSource": "response-logprobs",
+              "logprob": -0.2
+            },
+            {
+              "tokenSha256": "86be9a55762d316a3026c2836d044f5fc76e34da10e1b45feee5f18be7edb177",
+              "tokenBytes": 1,
+              "tokenId": 203,
+              "tokenIdSource": "response-logprobs",
+              "logprob": -2.2
+            }
+          ],
+          "chunkIndex": 1
+        },
+        {
+          "tokenText": ".",
+          "tokenSha256": "cdb4ee2aea69cc6a83331bbe96dc2caa9a299d21329efb0336fc02a82e1839a8",
+          "tokenBytes": 1,
+          "tokenId": 303,
+          "tokenIdSource": "response-logprobs",
+          "logprob": -0.3,
+          "topLogprobs": [
+            {
+              "tokenSha256": "cdb4ee2aea69cc6a83331bbe96dc2caa9a299d21329efb0336fc02a82e1839a8",
+              "tokenBytes": 1,
+              "tokenId": 303,
+              "tokenIdSource": "response-logprobs",
+              "logprob": -0.3
+            },
+            {
+              "tokenSha256": "cdb4ee2aea69cc6a83331bbe96dc2caa9a299d21329efb0336fc02a82e1839a8",
+              "tokenBytes": 1,
+              "tokenId": 304,
+              "tokenIdSource": "response-logprobs",
+              "logprob": -2.3
+            }
+          ],
+          "chunkIndex": 2
+        }
+      ],
+      "nativeTelemetry": {
+        "available": true,
+        "source": "not-exposed-by-openai-compatible-response+prometheus-delta+native-json-snapshot",
+        "engineVersion": null,
+        "modelRevision": null,
+        "serverArgs": null,
+        "queueWaitMs": 2.0,
+        "prefillMs": 70.0,
+        "decodeMs": 110.0,
+        "batchSize": null,
+        "concurrency": null,
+        "kvCacheUsagePct": 0.060000000000000005,
+        "cacheHitRate": 0.2,
+        "metricsUrl": "http://127.0.0.1:52493/prometheus/metrics",
+        "nativeJsonMetricsUrl": "http://127.0.0.1:52493/metrics",
+        "beforeCapturedAtUtc": "2026-07-09T15:49:42.051264Z",
+        "afterCapturedAtUtc": "2026-07-09T15:49:42.053020Z",
+        "nativeTtftMs": 125.0,
+        "nativeTpotMs": 15.0,
+        "nativeE2eLatencyMs": 240.0,
+        "runningRequests": 1.0,
+        "waitingRequests": 0.0,
+        "trtllmIterationLatencyMs": 8.0,
+        "trtllmGpuMemoryBytes": 2000000001.0,
+        "trtllmKvCacheUsedBlocks": 5.0,
+        "trtllmKvCacheMaxBlocks": 10.0,
+        "promptTokensCachedDelta": 3.0,
+        "promptTokensComputedDelta": 8.0
+      },
+      "hardwareTelemetry": {
+        "available": true,
+        "source": "dcgm-prometheus-delta",
+        "metricsUrl": "http://127.0.0.1:52493/prometheus/metrics",
+        "beforeCapturedAtUtc": "2026-07-09T15:49:42.052133Z",
+        "afterCapturedAtUtc": "2026-07-09T15:49:42.053830Z",
+        "powerWatts": 121.0,
+        "powerWattsPerGpu": 121.0,
+        "gpuUtilizationPct": 51.0,
+        "memoryCopyUtilizationPct": 21.0,
+        "gpuTemperatureC": 61.0,
+        "smClockMHz": 1801.0,
+        "memoryClockMHz": 5001.0,
+        "fbUsedMiB": 4097.0,
+        "fbFreeMiB": 8191.0,
+        "energyJoules": 1.5
+      },
+      "runtimeProvenance": {
+        "engineVersion": null,
+        "modelRevision": null,
+        "imageTag": null,
+        "imageDigest": null,
+        "serverArgsSha256": null,
+        "processId": null,
+        "containerId": null,
+        "podName": null,
+        "nodeName": null,
+        "hostName": null
+      }
+    }
+  ]
+}
