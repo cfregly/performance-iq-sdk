@@ -630,6 +630,118 @@ vllm:prefix_cache_hits_total{model_name="qwen"} 7
         self.assertAlmostEqual(aggregate["avgPrefillMs"], 60)
         self.assertAlmostEqual(aggregate["avgDecodeMs"], 120)
 
+    def test_serving_producer_captures_token_logprobs_and_dcgm_metrics(self):
+        metric_snapshots = [
+            """
+DCGM_FI_DEV_POWER_USAGE{gpu="0"} 100
+DCGM_FI_DEV_GPU_UTIL{gpu="0"} 40
+DCGM_FI_DEV_MEM_COPY_UTIL{gpu="0"} 12
+DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 1000
+""",
+            """
+DCGM_FI_DEV_POWER_USAGE{gpu="0"} 120
+DCGM_FI_DEV_GPU_UTIL{gpu="0"} 50
+DCGM_FI_DEV_MEM_COPY_UTIL{gpu="0"} 20
+DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
+""",
+        ]
+
+        def http_get_text(url, headers):
+            self.assertEqual(url, "http://127.0.0.1:9400/metrics")
+            self.assertEqual(headers["accept"], "text/plain")
+            return metric_snapshots.pop(0)
+
+        def http_stream_json(url, headers, payload):
+            self.assertTrue(payload["stream"])
+            self.assertTrue(payload["logprobs"])
+            self.assertEqual(payload["top_logprobs"], 2)
+            return {
+                "status": 200,
+                "events": [
+                    {
+                        "receivedMs": 10,
+                        "receivedAtUtc": "2026-07-09T12:00:00.010Z",
+                        "body": {
+                            "id": "chatcmpl-stream",
+                            "model": laptop_smoke_model(),
+                            "choices": [{
+                                "delta": {"content": "o"},
+                                "logprobs": {
+                                    "content": [{
+                                        "token": "o",
+                                        "token_id": 101,
+                                        "logprob": -0.1,
+                                        "top_logprobs": [
+                                            {"token": "o", "token_id": 101, "logprob": -0.1},
+                                            {"token": "O", "token_id": 102, "logprob": -2.0},
+                                        ],
+                                    }],
+                                },
+                            }],
+                        },
+                    },
+                    {
+                        "receivedMs": 30,
+                        "receivedAtUtc": "2026-07-09T12:00:00.030Z",
+                        "body": {
+                            "id": "chatcmpl-stream",
+                            "model": laptop_smoke_model(),
+                            "choices": [{
+                                "delta": {"content": "k"},
+                                "finish_reason": "stop",
+                                "logprobs": {"content": [{"token": "k", "token_id": 202, "logprob": -0.2}]},
+                            }],
+                            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+                        },
+                    },
+                ],
+            }
+
+        result = run_serving_producer(
+            engine={
+                "engine": "vllm",
+                "baseUrl": "http://127.0.0.1:8000",
+                "hardwareMetricsUrl": "http://127.0.0.1:9400/metrics",
+            },
+            request={
+                "model": laptop_smoke_model(),
+                "messages": [{"role": "user", "content": "Say ok."}],
+                "maxTokens": 16,
+                "captureTokenDetails": True,
+                "topLogprobs": 2,
+            },
+            artifact_dir=self.tmp_dir,
+            workload={"hardware": "local dcgm engine", "operatingPoint": "laptop-smoke"},
+            pricing={"usdPerGpuHour": 1, "gpuCount": 1},
+            http_stream_json=http_stream_json,
+            http_get_text=http_get_text,
+        )
+
+        self.assertEqual(metric_snapshots, [])
+        sample = result["samples"][0]
+        self.assertTrue(sample["hardwareTelemetryAvailable"])
+        self.assertTrue(sample["tokenDetailsAvailable"])
+        self.assertTrue(sample["tokenIdsAvailable"])
+        self.assertTrue(sample["logprobsAvailable"])
+        self.assertEqual(sample["tokenDetailCount"], 2)
+        self.assertEqual(sample["tokenTimeline"][0]["tokenId"], 101)
+        self.assertAlmostEqual(sample["tokenTimeline"][0]["tokenLogprob"], -0.1)
+        self.assertIn("topLogprobsJson", sample["tokenTimeline"][0])
+        self.assertAlmostEqual(sample["avgPowerWatts"], 120)
+        self.assertAlmostEqual(sample["avgPowerWattsPerGpu"], 120)
+        self.assertAlmostEqual(sample["gpuUtilizationPct"], 50)
+        self.assertAlmostEqual(sample["energyJoules"], 1.5)
+        aggregate = result["measurements"][0]
+        self.assertTrue(aggregate["dcgmGrounded"])
+        self.assertEqual(aggregate["hardwareTelemetryAvailableCount"], 1)
+        self.assertEqual(aggregate["tokenDetailsAvailableCount"], 1)
+        self.assertEqual(aggregate["tokenIdsAvailableCount"], 1)
+        self.assertEqual(aggregate["logprobsAvailableCount"], 1)
+        self.assertEqual(aggregate["powerSource"], "dcgm")
+        token_rows = [row for row in result["measurements"] if row.get("surface") == "serving_token_timeline"]
+        self.assertEqual(token_rows[0]["tokenId"], 101)
+        self.assertAlmostEqual(token_rows[1]["tokenLogprob"], -0.2)
+
     def test_serving_smoke_runs_all_configured_engines(self):
         calls = []
         submissions = []

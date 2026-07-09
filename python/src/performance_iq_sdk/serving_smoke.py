@@ -50,6 +50,11 @@ ENGINE_METRICS_URL_ENV = {
     "sglang": "PIQ_SGLANG_METRICS_URL",
     "tensorrt-llm": "PIQ_TENSORRT_LLM_METRICS_URL",
 }
+ENGINE_HARDWARE_METRICS_URL_ENV = {
+    "vllm": "PIQ_VLLM_HARDWARE_METRICS_URL",
+    "sglang": "PIQ_SGLANG_HARDWARE_METRICS_URL",
+    "tensorrt-llm": "PIQ_TENSORRT_LLM_HARDWARE_METRICS_URL",
+}
 QUERY_NAMES = (
     "price_performance",
     "capacity_best",
@@ -123,10 +128,15 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
             continue
         api_key = _env(ENGINE_API_KEY_ENV[engine])
         metrics_url = _env(ENGINE_METRICS_URL_ENV[engine], f"{url.rstrip('/')}/metrics")
+        hardware_metrics_url = _env(ENGINE_HARDWARE_METRICS_URL_ENV[engine])
+        if getattr(args, "collect_hardware_metrics", False) and not hardware_metrics_url:
+            hardware_metrics_url = metrics_url
         configs.append({
             "engine": engine,
             "baseUrl": url,
             "metricsUrl": metrics_url,
+            **({"hardwareMetricsUrl": hardware_metrics_url} if hardware_metrics_url else {}),
+            **({"requireHardwareTelemetry": True} if getattr(args, "require_hardware_telemetry", False) else {}),
             **({"apiKey": api_key} if api_key else {}),
             **({"frameworkVersion": args.framework_version} if args.framework_version else {}),
             **({"imageDigest": args.image_digest} if args.image_digest else {}),
@@ -1177,6 +1187,14 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                         errors.append(f"{engine} samples[{index}].ttftSource is required.")
                     if sample.get("tokenCountSource") not in {"response-usage", "client-estimate"}:
                         errors.append(f"{engine} samples[{index}].tokenCountSource must describe token count provenance.")
+                    if not isinstance(sample.get("tokenDetailSource"), str) or not sample.get("tokenDetailSource"):
+                        errors.append(f"{engine} samples[{index}].tokenDetailSource must describe token detail provenance.")
+                    if not isinstance(sample.get("hardwareTelemetryAvailable"), bool):
+                        errors.append(f"{engine} samples[{index}].hardwareTelemetryAvailable must be a boolean.")
+                    if sample.get("logprobsAvailable") and not sample.get("tokenDetailsAvailable"):
+                        errors.append(f"{engine} samples[{index}].logprobsAvailable requires tokenDetailsAvailable.")
+                    if sample.get("tokenIdsAvailable") and not sample.get("tokenDetailsAvailable"):
+                        errors.append(f"{engine} samples[{index}].tokenIdsAvailable requires tokenDetailsAvailable.")
                     if not _is_positive_number(sample.get("outputTokenCount")):
                         errors.append(f"{engine} samples[{index}].outputTokenCount must be a positive number.")
                     if not isinstance(sample.get("promptSha256"), str) or len(sample.get("promptSha256")) != 64:
@@ -1212,6 +1230,20 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
             token_timeline = artifact.get("tokenTimeline")
             if not isinstance(token_timeline, list) or not token_timeline:
                 errors.append(f"{engine} summary artifact tokenTimeline must include streaming chunk rows.")
+            else:
+                for token_index, token_row in enumerate(token_timeline):
+                    if not isinstance(token_row, dict):
+                        errors.append(f"{engine} tokenTimeline[{token_index}] must be an object.")
+                        continue
+                    if not isinstance(token_row.get("tokenDetailSource"), str) or not token_row.get("tokenDetailSource"):
+                        errors.append(f"{engine} tokenTimeline[{token_index}].tokenDetailSource is required.")
+                    if token_row.get("tokenLogprob") is not None and not _is_number(token_row.get("tokenLogprob")):
+                        errors.append(f"{engine} tokenTimeline[{token_index}].tokenLogprob must be numeric when present.")
+                    if token_row.get("tokenId") is not None and not isinstance(token_row.get("tokenId"), int):
+                        errors.append(f"{engine} tokenTimeline[{token_index}].tokenId must be an integer when present.")
+            hardware_telemetry = artifact.get("hardwareTelemetry")
+            if not isinstance(hardware_telemetry, list) or len(hardware_telemetry) != request_count:
+                errors.append(f"{engine} summary artifact hardwareTelemetry must match requestCount.")
             capture_policy = artifact.get("capturePolicy") if isinstance(artifact.get("capturePolicy"), dict) else {}
             if capture_policy.get("mode") != "operator-full":
                 errors.append(f"{engine} summary artifact capturePolicy.mode must be operator-full.")
@@ -1420,6 +1452,8 @@ def run_serving_smoke(
     operating_point: str,
     pricing: dict[str, Any],
     run_suffix: str | None = None,
+    capture_token_details: bool = False,
+    top_logprobs: int | None = None,
     submit: bool = True,
     http_post_json: HttpPostJson | None = None,
     http_stream_json: HttpStreamJson | None = None,
@@ -1436,6 +1470,8 @@ def run_serving_smoke(
                 "messages": [{"role": "user", "content": prompt}],
                 "repetitions": repetitions,
                 "maxTokens": max_tokens,
+                **({"captureTokenDetails": True} if capture_token_details else {}),
+                **({"topLogprobs": top_logprobs} if top_logprobs is not None else {}),
             },
             performance_iq=performance_iq,
             submit=submit,
@@ -1499,6 +1535,10 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--usd-per-gpu-hour", type=float)
     parser.add_argument("--gpu-count", type=float, default=1)
     parser.add_argument("--power-watts-per-gpu", type=float)
+    parser.add_argument("--capture-token-details", action="store_true", default=_env("PIQ_SERVING_CAPTURE_TOKEN_DETAILS", "false").lower() == "true", help="Request response token logprobs/top-logprobs when the serving engine supports them.")
+    parser.add_argument("--top-logprobs", type=int, default=int(_env("PIQ_SERVING_TOP_LOGPROBS", "0") or "0"), help="Number of top logprobs to request when token detail capture is enabled.")
+    parser.add_argument("--collect-hardware-metrics", action="store_true", default=_env("PIQ_SERVING_COLLECT_HARDWARE_METRICS", "false").lower() == "true", help="Read DCGM metrics from PIQ_*_HARDWARE_METRICS_URL, or engine /metrics when no dedicated URL is set.")
+    parser.add_argument("--require-hardware-telemetry", action="store_true", default=_env("PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY", "false").lower() == "true", help="Make proof completeness require DCGM hardware telemetry for configured engines.")
     parser.add_argument("--framework-version")
     parser.add_argument("--image-digest")
     parser.add_argument("--image-tag")
@@ -1591,6 +1631,8 @@ def main(argv: list[str] | None = None) -> int:
             operating_point=args.operating_point,
             pricing=pricing,
             run_suffix=run_suffix,
+            capture_token_details=args.capture_token_details,
+            top_logprobs=args.top_logprobs if args.top_logprobs > 0 else None,
             submit=not args.no_submit,
         )
         if preflight is not None:

@@ -254,4 +254,208 @@ describe("performance-iq-sdk js", () => {
     expect(manifestArtifact.platform.requestTraceIds).toEqual(result.samples.map((sample) => sample.requestId))
     expect((await validateRun(result.runInput)).ok).toBe(true)
   })
+
+  it("captures native Prometheus telemetry deltas when a serving metrics URL is configured", async () => {
+    const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "piq-serving-native-test-"))
+    tmpDirs.push(artifactDir)
+    const metricBodies = [
+      [
+        'vllm:time_to_first_token_seconds_count{model_name="qwen"} 2',
+        'vllm:time_to_first_token_seconds_sum{model_name="qwen"} 0.4',
+        'vllm:request_time_per_output_token_seconds_count{model_name="qwen"} 2',
+        'vllm:request_time_per_output_token_seconds_sum{model_name="qwen"} 0.04',
+        'vllm:request_queue_time_seconds_count{model_name="qwen"} 2',
+        'vllm:request_queue_time_seconds_sum{model_name="qwen"} 0.01',
+        'vllm:request_prefill_time_seconds_count{model_name="qwen"} 2',
+        'vllm:request_prefill_time_seconds_sum{model_name="qwen"} 0.20',
+        'vllm:request_decode_time_seconds_count{model_name="qwen"} 2',
+        'vllm:request_decode_time_seconds_sum{model_name="qwen"} 0.30',
+        'vllm:prefix_cache_queries_total{model_name="qwen"} 10',
+        'vllm:prefix_cache_hits_total{model_name="qwen"} 1',
+      ].join("\n"),
+      [
+        'vllm:time_to_first_token_seconds_count{model_name="qwen"} 3',
+        'vllm:time_to_first_token_seconds_sum{model_name="qwen"} 0.65',
+        'vllm:request_time_per_output_token_seconds_count{model_name="qwen"} 3',
+        'vllm:request_time_per_output_token_seconds_sum{model_name="qwen"} 0.06',
+        'vllm:request_queue_time_seconds_count{model_name="qwen"} 3',
+        'vllm:request_queue_time_seconds_sum{model_name="qwen"} 0.012',
+        'vllm:request_prefill_time_seconds_count{model_name="qwen"} 3',
+        'vllm:request_prefill_time_seconds_sum{model_name="qwen"} 0.26',
+        'vllm:request_decode_time_seconds_count{model_name="qwen"} 3',
+        'vllm:request_decode_time_seconds_sum{model_name="qwen"} 0.42',
+        'vllm:prefix_cache_queries_total{model_name="qwen"} 15',
+        'vllm:prefix_cache_hits_total{model_name="qwen"} 2',
+      ].join("\n"),
+    ]
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url)
+      if (href.endsWith("/metrics")) {
+        return new Response(metricBodies.shift() ?? "", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        })
+      }
+      expect(init?.method).toBe("POST")
+      const body = [
+        { id: "chatcmpl-test", model: laptopSmokeModel(), choices: [{ delta: { content: "ok" } }] },
+        { id: "chatcmpl-test", model: laptopSmokeModel(), choices: [], usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 } },
+      ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })
+    })
+
+    const result = await runServingProducer({
+      engine: {
+        engine: "vllm",
+        baseUrl: "http://127.0.0.1:8000",
+        metricsUrl: "http://127.0.0.1:8000/metrics",
+      },
+      request: {
+        model: laptopSmokeModel(),
+        messages: [{ role: "user", content: "Say ok." }],
+      },
+      artifactDir,
+      workload: {
+        hardware: "local mock engine",
+        operatingPoint: "laptop-smoke",
+      },
+      pricing: { usdPerGpuHour: 1, gpuCount: 1, powerWattsPerGpu: 100 },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => new Date("2026-07-09T12:00:00Z"),
+    })
+
+    expect(metricBodies).toHaveLength(0)
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+    const sample = result.samples[0]
+    expect(sample.nativeTelemetryAvailable).toBe(true)
+    expect(sample.nativeTelemetry?.nativeTtftMs as number).toBeCloseTo(250)
+    expect(sample.nativeTelemetry?.nativeTpotMs as number).toBeCloseTo(20)
+    expect(sample.nativeTelemetry?.queueWaitMs as number).toBeCloseTo(2)
+    expect(sample.nativeTelemetry?.prefillMs as number).toBeCloseTo(60)
+    expect(sample.nativeTelemetry?.decodeMs as number).toBeCloseTo(120)
+    expect(sample.nativeTelemetry?.prefixCacheQueriesDelta).toBe(5)
+    expect(sample.nativeTelemetry?.prefixCacheHitsDelta).toBe(1)
+    expect(sample.nativeTelemetry?.cacheHitRate as number).toBeCloseTo(0.2)
+    expect(sample.queueWaitMs).toBeCloseTo(2)
+    expect(sample.prefillMs).toBeCloseTo(60)
+    expect(sample.decodeMs).toBeCloseTo(120)
+    expect(result.measurements[0].nativeTelemetryAvailableCount).toBe(1)
+    expect(result.measurements[0].avgQueueWaitMs as number).toBeCloseTo(2)
+    expect(result.measurements[0].avgPrefillMs as number).toBeCloseTo(60)
+    expect(result.measurements[0].avgDecodeMs as number).toBeCloseTo(120)
+  })
+
+  it("captures response token logprobs and DCGM hardware metrics", async () => {
+    const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "piq-serving-token-dcgm-test-"))
+    tmpDirs.push(artifactDir)
+    const metricBodies = [
+      [
+        'DCGM_FI_DEV_POWER_USAGE{gpu="0"} 100',
+        'DCGM_FI_DEV_GPU_UTIL{gpu="0"} 40',
+        'DCGM_FI_DEV_MEM_COPY_UTIL{gpu="0"} 12',
+        'DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 1000',
+      ].join("\n"),
+      [
+        'DCGM_FI_DEV_POWER_USAGE{gpu="0"} 120',
+        'DCGM_FI_DEV_GPU_UTIL{gpu="0"} 50',
+        'DCGM_FI_DEV_MEM_COPY_UTIL{gpu="0"} 20',
+        'DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500',
+      ].join("\n"),
+    ]
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url)
+      if (href.endsWith("/dcgm")) {
+        return new Response(metricBodies.shift() ?? "", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        })
+      }
+      expect(init?.method).toBe("POST")
+      const parsed = JSON.parse(String(init?.body))
+      expect(parsed.logprobs).toBe(true)
+      expect(parsed.top_logprobs).toBe(2)
+      const body = [
+        {
+          id: "chatcmpl-test",
+          model: laptopSmokeModel(),
+          choices: [{
+            delta: { content: "o" },
+            logprobs: {
+              content: [{
+                token: "o",
+                token_id: 101,
+                logprob: -0.1,
+                top_logprobs: [
+                  { token: "o", token_id: 101, logprob: -0.1 },
+                  { token: "O", token_id: 102, logprob: -2.0 },
+                ],
+              }],
+            },
+          }],
+        },
+        {
+          id: "chatcmpl-test",
+          model: laptopSmokeModel(),
+          choices: [{
+            delta: { content: "k" },
+            finish_reason: "stop",
+            logprobs: { content: [{ token: "k", token_id: 202, logprob: -0.2 }] },
+          }],
+          usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
+        },
+      ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })
+    })
+
+    const result = await runServingProducer({
+      engine: {
+        engine: "vllm",
+        baseUrl: "http://127.0.0.1:8000",
+        hardwareMetricsUrl: "http://127.0.0.1:9400/dcgm",
+      },
+      request: {
+        model: laptopSmokeModel(),
+        messages: [{ role: "user", content: "Say ok." }],
+        captureTokenDetails: true,
+        topLogprobs: 2,
+      },
+      artifactDir,
+      workload: {
+        hardware: "local dcgm engine",
+        operatingPoint: "laptop-smoke",
+      },
+      pricing: { usdPerGpuHour: 1, gpuCount: 1 },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => new Date("2026-07-09T12:00:00Z"),
+    })
+
+    expect(metricBodies).toHaveLength(0)
+    const sample = result.samples[0]
+    expect(sample.hardwareTelemetryAvailable).toBe(true)
+    expect(sample.tokenDetailsAvailable).toBe(true)
+    expect(sample.tokenIdsAvailable).toBe(true)
+    expect(sample.logprobsAvailable).toBe(true)
+    expect(sample.tokenDetailCount).toBe(2)
+    expect(sample.tokenTimeline?.[0].tokenId).toBe(101)
+    expect(sample.tokenTimeline?.[0].tokenLogprob).toBeCloseTo(-0.1)
+    expect(sample.avgPowerWatts).toBeCloseTo(120)
+    expect(sample.avgPowerWattsPerGpu).toBeCloseTo(120)
+    expect(sample.gpuUtilizationPct).toBeCloseTo(50)
+    expect(sample.energyJoules).toBeCloseTo(1.5)
+    expect(result.measurements[0].dcgmGrounded).toBe(true)
+    expect(result.measurements[0].hardwareTelemetryAvailableCount).toBe(1)
+    expect(result.measurements[0].tokenDetailsAvailableCount).toBe(1)
+    expect(result.measurements[0].tokenIdsAvailableCount).toBe(1)
+    expect(result.measurements[0].logprobsAvailableCount).toBe(1)
+    expect(result.measurements[0].powerSource).toBe("dcgm")
+    const timelineRows = result.measurements.filter((row) => row.surface === "serving_token_timeline")
+    expect(timelineRows[0].tokenId).toBe(101)
+    expect(timelineRows[1].tokenLogprob as number).toBeCloseTo(-0.2)
+  })
 })

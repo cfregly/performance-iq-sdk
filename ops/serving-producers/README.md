@@ -16,6 +16,42 @@ normalized summary artifacts and producer manifests, writes one overall smoke
 proof summary, submits producer runs, and verifies the fixed Performance IQ
 dashboard query surfaces.
 
+## Telemetry Model
+
+Streaming collection means the producer sends `stream: true` to the serving
+engine, reads the SSE response as each `data:` frame arrives, and timestamps
+first byte, first output token/content, every output chunk/token row, and
+request completion from the measuring client. This is request-path measurement,
+not Kafka streaming.
+
+Do not put Kafka between the producer and the serving engine for TTFT/TPOT
+measurement; a broker would add latency and change the measured path. Kafka can
+be added later as an optional ingestion transport after the producer has already
+captured timestamps, token details, raw operator artifacts, DCGM/native metrics,
+hashes, receipts, and provenance.
+
+Token-level detail is captured when the engine exposes OpenAI-compatible
+`logprobs`/`top_logprobs`. Enable it with:
+
+```bash
+export PIQ_SERVING_CAPTURE_TOKEN_DETAILS=true
+export PIQ_SERVING_TOP_LOGPROBS=5
+```
+
+DCGM hardware counters are captured from a Prometheus/DCGM exporter endpoint
+when configured:
+
+```bash
+export PIQ_VLLM_HARDWARE_METRICS_URL=http://dcgm-exporter:9400/metrics
+export PIQ_SGLANG_HARDWARE_METRICS_URL=http://dcgm-exporter:9400/metrics
+export PIQ_TENSORRT_LLM_HARDWARE_METRICS_URL=http://dcgm-exporter:9400/metrics
+```
+
+Use `PIQ_SERVING_COLLECT_HARDWARE_METRICS=true` to read DCGM metrics from each
+engine `/metrics` endpoint when DCGM is exposed there. Use
+`PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true` for a strict proof gate that fails
+metric completeness if configured engines do not produce hardware telemetry.
+
 ## Files
 
 - `performance-iq-serving.env.example` - environment contract for engines and

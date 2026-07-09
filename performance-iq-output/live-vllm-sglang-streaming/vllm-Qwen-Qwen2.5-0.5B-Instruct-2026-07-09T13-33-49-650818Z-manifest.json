@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "performance-iq.producer-manifest.v1",
+  "runClass": "measured",
+  "sourceType": "other-measured-producer",
+  "generatedAtUtc": "2026-07-09T13:33:50.130974Z",
+  "producer": {
+    "repo": "performance-iq-sdk",
+    "tool": "vllm-serving-producer",
+    "commitSha": "localservingproducer"
+  },
+  "campaign": {
+    "campaignId": "serving-vllm-streaming-native-20260709T133349Z",
+    "runId": "serving-vllm-streaming-native-20260709T133349Z-run",
+    "capturedAtUtc": "2026-07-09T13:33:49.650818Z",
+    "completedAtUtc": "2026-07-09T13:33:50.130961Z"
+  },
+  "workload": {
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "hardware": "local serving endpoint",
+    "operatingPoint": "serving-smoke",
+    "scenario": "Real endpoint smoke for vLLM"
+  },
+  "runtime": {
+    "imageDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "framework": "vLLM"
+  },
+  "artifacts": [
+    {
+      "kind": "normalized-summary",
+      "path": "./performance-iq-output/live-vllm-sglang-streaming/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T13-33-49-650818Z.json",
+      "sha256": "f26490c908533aa07042e6136a6b69df3918458dc787924a075ca4a042e66506",
+      "sizeBytes": 31141
+    },
+    {
+      "kind": "operator-full-serving-raw",
+      "path": "./performance-iq-output/live-vllm-sglang-streaming/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T13-33-49-650818Z-operator-full.json",
+      "sha256": "aea051168ba600010031f35c3afe93bab6baa3cd8c82d35ecf9c4afc4e8574fa",
+      "sizeBytes": 17801
+    }
+  ],
+  "store": {
+    "sourceTables": [
+      "platform_store.object_store.producer_runner_result_bundles",
+      "platform_store.iceberg.intake_store.producer_runner_results"
+    ],
+    "modelTables": [
+      "model_store.sdk_pending_ingest"
+    ],
+    "rowProof": [
+      {
+        "table": "model_store.sdk_pending_ingest",
+        "campaignId": "serving-vllm-streaming-native-20260709T133349Z",
+        "rowCount": 18,
+        "latestCapturedAtUtc": "2026-07-09T13:33:49.650818Z"
+      }
+    ]
+  },
+  "platform": {
+    "decisionBriefPath": "performance-iq://serving-producer",
+    "requestTraceIds": [
+      "piq-vllm-serving-vllm-streaming-native-20260709T133349Z-run-request-1"
+    ]
+  },
+  "methodology": "vLLM producer sent 1 OpenAI-compatible chat completion request(s) with x-performance-iq-* trace headers; default metrics come from client-side streaming SSE timings, response usage fields, and native telemetry when exposed.",
+  "limitations": [
+    "Serving producer captures client stream timing, request-path, usage, latency, and provenance; hardware-level power/kernel counters require engine-side or cluster instrumentation."
+  ],
+  "confidentiality": "operator-full"
+}

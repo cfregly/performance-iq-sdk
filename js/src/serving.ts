@@ -23,6 +23,13 @@ export interface ServingEngineConfig {
   requestPath?: string
   metricsUrl?: string
   collectNativeMetrics?: boolean
+  hardwareMetricsUrl?: string
+  dcgmMetricsUrl?: string
+  collectHardwareMetrics?: boolean
+  requireNativeTelemetry?: boolean
+  requireHardwareTelemetry?: boolean
+  nativeTelemetry?: Record<string, unknown>
+  hardwareTelemetry?: Record<string, unknown>
   frameworkVersion?: string
   imageDigest?: string
   imageTag?: string
@@ -37,6 +44,9 @@ export interface ServingRequestConfig {
   topP?: number
   repetitions?: number
   stream?: boolean
+  captureTokenDetails?: boolean
+  logprobs?: boolean
+  topLogprobs?: number
 }
 
 export interface ServingProducerConfig {
@@ -95,6 +105,18 @@ export interface ServingRequestSample {
   outputBytes?: number
   nativeTelemetry?: Record<string, unknown>
   nativeTelemetryAvailable?: boolean
+  hardwareTelemetry?: Record<string, unknown>
+  hardwareTelemetryAvailable?: boolean
+  avgPowerWatts?: number | null
+  avgPowerWattsPerGpu?: number | null
+  gpuUtilizationPct?: number | null
+  memoryCopyUtilizationPct?: number | null
+  energyJoules?: number | null
+  tokenDetailsAvailable?: boolean
+  tokenIdsAvailable?: boolean
+  logprobsAvailable?: boolean
+  tokenDetailCount?: number
+  tokenDetailSource?: string
   queueWaitMs?: number | null
   prefillMs?: number | null
   decodeMs?: number | null
@@ -110,6 +132,12 @@ export interface ServingTokenTimelineChunk {
   contentBytes: number
   contentSha256: string
   isFirstOutput: boolean
+  tokenIndex?: number | null
+  tokenId?: number | null
+  tokenLogprob?: number | null
+  tokenTextSha256?: string | null
+  topLogprobsJson?: string | null
+  tokenDetailSource?: string
 }
 
 export interface ServingProducerResult {
@@ -182,6 +210,12 @@ function metricCompleteness(row: Record<string, unknown>): number {
   if (row.nativeTelemetryRequired) {
     required.push(row.nativeTelemetryAvailableCount === row.successCount ? row.nativeTelemetryAvailableCount : null)
   }
+  if (row.hardwareTelemetryRequired) {
+    required.push(row.hardwareTelemetryAvailableCount === row.successCount ? row.hardwareTelemetryAvailableCount : null)
+  }
+  if (row.tokenDetailsRequired) {
+    required.push(row.logprobsAvailableCount === row.successCount ? row.logprobsAvailableCount : null)
+  }
   return required.filter((value) => typeof value === "number" && finite(value)).length / required.length
 }
 
@@ -194,6 +228,12 @@ function requestPayload(config: ServingRequestConfig, stream?: boolean) {
     temperature: config.temperature ?? 0,
     ...(config.topP == null ? {} : { top_p: config.topP }),
     ...(streamEnabled ? { stream: true, stream_options: { include_usage: true } } : {}),
+    ...(config.captureTokenDetails || config.logprobs || config.topLogprobs != null
+      ? {
+          logprobs: config.logprobs ?? true,
+          ...(config.topLogprobs == null ? {} : { top_logprobs: config.topLogprobs }),
+        }
+      : {}),
   }
 }
 
@@ -297,11 +337,21 @@ function parsePrometheusMetrics(text: string): Record<string, number> {
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim()
     if (!line || line.startsWith("#")) continue
-    const match = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{[^}]*\})?\s+([-+0-9.eE]+)/)
+    const match = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+([-+0-9.eE]+)/)
     if (!match) continue
-    const value = Number(match[2])
+    const value = Number(match[3])
     if (!Number.isFinite(value)) continue
-    metrics[match[1]] = (metrics[match[1]] ?? 0) + value
+    const metricName = match[1]
+    metrics[metricName] = (metrics[metricName] ?? 0) + value
+    metrics[`${metricName}__sample_count`] = (metrics[`${metricName}__sample_count`] ?? 0) + 1
+    const labels = Object.fromEntries(Array.from((match[2] ?? "").matchAll(/([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"/g), (item) => [item[1], item[2]]))
+    for (const labelName of ["stage", "mode", "source", "reason", "finished_reason"]) {
+      const labelValue = labels[labelName]
+      if (!labelValue) continue
+      const labelledName = `${metricName}{${labelName}=${labelValue}}`
+      metrics[labelledName] = (metrics[labelledName] ?? 0) + value
+      metrics[`${labelledName}__sample_count`] = (metrics[`${labelledName}__sample_count`] ?? 0) + 1
+    }
   }
   return metrics
 }
@@ -340,10 +390,71 @@ async function readNativeMetrics(config: ServingProducerConfig): Promise<Record<
   }
 }
 
+function hardwareMetricsUrl(config: ServingProducerConfig): string | null {
+  const engine = config.engine
+  if (engine.hardwareMetricsUrl?.trim()) return engine.hardwareMetricsUrl.trim()
+  if (engine.dcgmMetricsUrl?.trim()) return engine.dcgmMetricsUrl.trim()
+  return engine.collectHardwareMetrics ? `${normalizeBaseUrl(engine.baseUrl)}/metrics` : null
+}
+
+function hardwareTelemetry(config: ServingProducerConfig): Record<string, unknown> {
+  const configured = config.engine.hardwareTelemetry
+  if (configured && typeof configured === "object" && !Array.isArray(configured)) {
+    return { available: true, source: "engine-config", ...configured }
+  }
+  return { available: false, source: "not-configured" }
+}
+
+async function readHardwareMetrics(config: ServingProducerConfig): Promise<Record<string, unknown>> {
+  const url = hardwareMetricsUrl(config)
+  if (!url) return { available: false, source: "hardware-metrics-url-not-configured" }
+  const fetchImpl = config.fetchImpl ?? fetch
+  try {
+    const response = await fetchImpl(url, {
+      method: "GET",
+      headers: {
+        accept: "text/plain",
+        ...(config.engine.apiKey ? { authorization: `Bearer ${config.engine.apiKey}` } : {}),
+      },
+    })
+    if (!response.ok) {
+      return { available: false, source: "hardware-prometheus-unavailable", metricsUrl: url, status: response.status }
+    }
+    const metrics = Object.fromEntries(
+      Object.entries(parsePrometheusMetrics(await response.text())).filter(([key]) => key.startsWith("DCGM_FI_")),
+    )
+    if (!Object.keys(metrics).length) return { available: false, source: "dcgm-prometheus-empty", metricsUrl: url }
+    return {
+      available: true,
+      source: "dcgm-prometheus-snapshot",
+      metricsUrl: url,
+      metrics,
+      capturedAtUtc: new Date().toISOString(),
+    }
+  } catch (error) {
+    return {
+      available: false,
+      source: "hardware-prometheus-unavailable",
+      metricsUrl: url,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
 function metricValue(metrics: Record<string, number>, candidates: string[]): number | null {
   for (const name of candidates) {
     const value = metrics[name]
     if (Number.isFinite(value)) return value
+  }
+  return null
+}
+
+function metricAverage(metrics: Record<string, number>, candidates: string[]): number | null {
+  for (const name of candidates) {
+    const value = metrics[name]
+    if (!Number.isFinite(value)) continue
+    const count = metrics[`${name}__sample_count`]
+    return Number.isFinite(count) && count > 0 ? value / count : value
   }
   return null
 }
@@ -399,6 +510,43 @@ function nativeMetricsDelta(
     "trtllm:prefix_cache_hits_total",
     "trtllm_prefix_cache_hits_total",
   ])
+  const nativeE2eLatencyMs = histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+    "vllm:e2e_request_latency_seconds",
+    "sglang:e2e_request_latency_seconds",
+    "sglang_e2e_request_latency_seconds",
+    "trtllm:e2e_request_latency_seconds",
+    "trtllm_e2e_request_latency_seconds",
+  ])
+  const queueWaitMs = histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+    "vllm:request_queue_time_seconds",
+    "sglang:queue_time_seconds",
+    "sglang:request_queue_time_seconds",
+    "sglang_request_queue_time_seconds",
+    "trtllm:request_queue_time_seconds",
+    "trtllm_request_queue_time_seconds",
+  ])
+  const prefillMs = histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+    "vllm:request_prefill_time_seconds",
+    "sglang:per_stage_req_latency_seconds{stage=prefill_forward}",
+    "sglang:per_stage_req_latency_seconds{mode=prefill_forward}",
+    "sglang:request_prefill_time_seconds",
+    "sglang_request_prefill_time_seconds",
+    "trtllm:request_prefill_time_seconds",
+    "trtllm_request_prefill_time_seconds",
+  ])
+  let decodeMs = histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+    "vllm:request_decode_time_seconds",
+    "sglang:per_stage_req_latency_seconds{stage=decode_forward}",
+    "sglang:per_stage_req_latency_seconds{mode=decode}",
+    "sglang:request_decode_time_seconds",
+    "sglang_request_decode_time_seconds",
+    "trtllm:request_decode_time_seconds",
+    "trtllm_request_decode_time_seconds",
+  ])
+  if (decodeMs == null && nativeE2eLatencyMs != null && queueWaitMs != null && prefillMs != null) {
+    const derivedDecodeMs = nativeE2eLatencyMs - queueWaitMs - prefillMs
+    if (derivedDecodeMs >= 0) decodeMs = derivedDecodeMs
+  }
   const values: Record<string, number | null> = {
     nativeTtftMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
       "vllm:time_to_first_token_seconds",
@@ -421,34 +569,10 @@ function nativeMetricsDelta(
       "trtllm:inter_token_latency_seconds",
       "trtllm_inter_token_latency_seconds",
     ]),
-    nativeE2eLatencyMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
-      "vllm:e2e_request_latency_seconds",
-      "sglang:e2e_request_latency_seconds",
-      "sglang_e2e_request_latency_seconds",
-      "trtllm:e2e_request_latency_seconds",
-      "trtllm_e2e_request_latency_seconds",
-    ]),
-    queueWaitMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
-      "vllm:request_queue_time_seconds",
-      "sglang:request_queue_time_seconds",
-      "sglang_request_queue_time_seconds",
-      "trtllm:request_queue_time_seconds",
-      "trtllm_request_queue_time_seconds",
-    ]),
-    prefillMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
-      "vllm:request_prefill_time_seconds",
-      "sglang:request_prefill_time_seconds",
-      "sglang_request_prefill_time_seconds",
-      "trtllm:request_prefill_time_seconds",
-      "trtllm_request_prefill_time_seconds",
-    ]),
-    decodeMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
-      "vllm:request_decode_time_seconds",
-      "sglang:request_decode_time_seconds",
-      "sglang_request_decode_time_seconds",
-      "trtllm:request_decode_time_seconds",
-      "trtllm_request_decode_time_seconds",
-    ]),
+    nativeE2eLatencyMs,
+    queueWaitMs,
+    prefillMs,
+    decodeMs,
     runningRequests: metricValue(afterMetrics, ["vllm:num_requests_running", "sglang:num_running_reqs", "sglang_num_running_reqs"]),
     waitingRequests: metricValue(afterMetrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs"]),
     kvCacheUsagePct: metricValue(afterMetrics, ["vllm:kv_cache_usage_perc", "sglang:token_usage", "sglang_token_usage"]),
@@ -477,6 +601,52 @@ function nativeMetricsDelta(
   }
 }
 
+function hardwareMetricsDelta(
+  config: ServingProducerConfig,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): Record<string, unknown> {
+  const configured = hardwareTelemetry(config)
+  if (configured.available) return configured
+  if (!before.available || !after.available) {
+    return {
+      available: false,
+      source: "dcgm-delta-unavailable",
+      metricsUrl: before.metricsUrl ?? after.metricsUrl ?? hardwareMetricsUrl(config),
+      before,
+      after,
+    }
+  }
+  const beforeMetrics = before.metrics && typeof before.metrics === "object" && !Array.isArray(before.metrics)
+    ? before.metrics as Record<string, number>
+    : {}
+  const afterMetrics = after.metrics && typeof after.metrics === "object" && !Array.isArray(after.metrics)
+    ? after.metrics as Record<string, number>
+    : {}
+  const energyMj = counterDelta(beforeMetrics, afterMetrics, ["DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION"])
+  const values: Record<string, number | null> = {
+    powerWatts: metricValue(afterMetrics, ["DCGM_FI_DEV_POWER_USAGE"]),
+    powerWattsPerGpu: metricAverage(afterMetrics, ["DCGM_FI_DEV_POWER_USAGE"]),
+    gpuUtilizationPct: metricAverage(afterMetrics, ["DCGM_FI_DEV_GPU_UTIL", "DCGM_FI_PROF_SM_ACTIVE"]),
+    memoryCopyUtilizationPct: metricAverage(afterMetrics, ["DCGM_FI_DEV_MEM_COPY_UTIL", "DCGM_FI_PROF_DRAM_ACTIVE"]),
+    gpuTemperatureC: metricAverage(afterMetrics, ["DCGM_FI_DEV_GPU_TEMP"]),
+    smClockMHz: metricAverage(afterMetrics, ["DCGM_FI_DEV_SM_CLOCK"]),
+    memoryClockMHz: metricAverage(afterMetrics, ["DCGM_FI_DEV_MEM_CLOCK"]),
+    fbUsedMiB: metricValue(afterMetrics, ["DCGM_FI_DEV_FB_USED"]),
+    fbFreeMiB: metricValue(afterMetrics, ["DCGM_FI_DEV_FB_FREE"]),
+    energyJoules: energyMj == null ? null : energyMj / 1000,
+  }
+  const availableValues = Object.fromEntries(Object.entries(values).filter(([, value]) => value != null))
+  return {
+    available: Object.keys(availableValues).length > 0,
+    source: "dcgm-prometheus-delta",
+    metricsUrl: after.metricsUrl ?? before.metricsUrl,
+    beforeCapturedAtUtc: before.capturedAtUtc,
+    afterCapturedAtUtc: after.capturedAtUtc,
+    ...availableValues,
+  }
+}
+
 function combineNativeTelemetry(...items: Array<Record<string, unknown>>): Record<string, unknown> {
   const combined: Record<string, unknown> = {}
   const sources: string[] = []
@@ -491,6 +661,68 @@ function combineNativeTelemetry(...items: Array<Record<string, unknown>>): Recor
 
 function numberFrom(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null
+}
+
+function tokenIdFrom(item: Record<string, any>): number | null {
+  for (const key of ["token_id", "tokenId", "id"]) {
+    const value = item[key]
+    if (Number.isInteger(value)) return value
+    if (typeof value === "string" && /^\d+$/.test(value)) return Number(value)
+  }
+  return null
+}
+
+function sanitizeTopLogprobs(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return []
+    const raw = item as Record<string, any>
+    const token = typeof raw.token === "string" ? raw.token : ""
+    return [{
+      tokenSha256: token ? sha256Text(token) : null,
+      tokenBytes: token ? Buffer.byteLength(token) : null,
+      tokenId: tokenIdFrom(raw),
+      logprob: numberFrom(raw.logprob),
+    }]
+  })
+}
+
+function choiceTokenDetails(body: Record<string, any>): Array<Record<string, any>> {
+  const content = choice(body).logprobs?.content
+  if (!Array.isArray(content)) return []
+  return content.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return []
+    const raw = item as Record<string, any>
+    const token = typeof raw.token === "string" ? raw.token : ""
+    const bytes = Array.isArray(raw.bytes) ? raw.bytes : null
+    return [{
+      tokenText: token,
+      tokenSha256: token ? sha256Text(token) : null,
+      tokenBytes: token ? Buffer.byteLength(token) : bytes?.length ?? null,
+      tokenId: tokenIdFrom(raw),
+      logprob: numberFrom(raw.logprob),
+      topLogprobs: sanitizeTopLogprobs(raw.top_logprobs ?? raw.topLogprobs),
+    }]
+  })
+}
+
+function tokenDetailSummary(details: Array<Record<string, any>>, requested: boolean): Record<string, unknown> {
+  if (!details.length) {
+    return {
+      tokenDetailsAvailable: false,
+      tokenIdsAvailable: false,
+      logprobsAvailable: false,
+      tokenDetailCount: 0,
+      tokenDetailSource: requested ? "requested-not-exposed" : "not-requested",
+    }
+  }
+  return {
+    tokenDetailsAvailable: true,
+    tokenIdsAvailable: details.some((detail) => detail.tokenId != null),
+    logprobsAvailable: details.some((detail) => detail.logprob != null),
+    tokenDetailCount: details.length,
+    tokenDetailSource: "response-logprobs",
+  }
 }
 
 async function readSseEvents(response: Response, started: number): Promise<Array<Record<string, any>>> {
@@ -556,6 +788,8 @@ async function sendChatCompletion(
   const stream = config.request.stream !== false
   const payload = requestPayload(config.request, stream)
   const nativeBefore = await readNativeMetrics(config)
+  const hardwareBefore = await readHardwareMetrics(config)
+  const tokenDetailsRequested = Boolean((payload as Record<string, unknown>).logprobs)
   const started = performance.now()
   const requestStartedAtUtc = new Date().toISOString()
   try {
@@ -572,13 +806,20 @@ async function sendChatCompletion(
       const events = await readSseEvents(response, started)
       const latencyMs = performance.now() - started
       const requestCompletedAtUtc = new Date().toISOString()
-      const outputChunks: Array<{ chunkIndex: number; content: string; receivedMs: number; receivedAtUtc: string }> = []
+      const outputChunks: Array<{
+        chunkIndex: number
+        content: string
+        receivedMs: number
+        receivedAtUtc: string
+        tokenDetails: Array<Record<string, any>>
+      }> = []
       let responseId: string | undefined
       let responseModel: string | undefined
       let finishReason: string | undefined
       let usage: Record<string, any> = {}
       let lastBody: Record<string, any> = {}
       let telemetry = nativeTelemetry(config)
+      const rawTokenDetails: Array<Record<string, any>> = []
       for (const event of events) {
         const body = event.body && typeof event.body === "object" ? event.body as Record<string, any> : {}
         if (Object.keys(body).length) {
@@ -592,16 +833,21 @@ async function sendChatCompletion(
         }
         const content = choiceContent(body)
         if (content) {
+          const tokenDetails = choiceTokenDetails(body)
+          rawTokenDetails.push(...tokenDetails.map((detail) => ({ ...detail, chunkIndex: outputChunks.length })))
           outputChunks.push({
             chunkIndex: outputChunks.length,
             content,
             receivedMs: Number(event.receivedMs),
             receivedAtUtc: String(event.receivedAtUtc),
+            tokenDetails,
           })
         }
       }
       const nativeAfter = await readNativeMetrics(config)
+      const hardwareAfter = await readHardwareMetrics(config)
       telemetry = combineNativeTelemetry(telemetry, nativeMetricsDelta(config, nativeBefore, nativeAfter))
+      const hwTelemetry = hardwareMetricsDelta(config, hardwareBefore, hardwareAfter)
       const firstChunk = events[0]
       const firstOutput = outputChunks[0]
       const lastOutput = outputChunks[outputChunks.length - 1]
@@ -615,15 +861,51 @@ async function sendChatCompletion(
         ? (lastOutput.receivedMs - firstOutput.receivedMs) / Math.max(outputTokenCount - 1, 1)
         : null
       const gaps = outputChunks.slice(1).map((chunk, index) => chunk.receivedMs - outputChunks[index].receivedMs)
-      const tokenTimeline = outputChunks.map((chunk): ServingTokenTimelineChunk => ({
-        requestId,
-        chunkIndex: chunk.chunkIndex,
-        receivedAtUtc: chunk.receivedAtUtc,
-        relativeMs: chunk.receivedMs,
-        contentBytes: Buffer.byteLength(chunk.content),
-        contentSha256: sha256Text(chunk.content),
-        isFirstOutput: chunk.chunkIndex === 0,
-      }))
+      const tokenSummary = tokenDetailSummary(rawTokenDetails, tokenDetailsRequested)
+      const tokenTimeline: ServingTokenTimelineChunk[] = []
+      let tokenIndex = 0
+      for (const chunk of outputChunks) {
+        const details = Array.isArray((chunk as Record<string, any>).tokenDetails)
+          ? (chunk as Record<string, any>).tokenDetails as Array<Record<string, any>>
+          : []
+        if (details.length) {
+          for (const detail of details) {
+            const topLogprobs = Array.isArray(detail.topLogprobs) ? detail.topLogprobs : []
+            tokenTimeline.push({
+              requestId,
+              chunkIndex: chunk.chunkIndex,
+              tokenIndex,
+              receivedAtUtc: chunk.receivedAtUtc,
+              relativeMs: chunk.receivedMs,
+              contentBytes: detail.tokenBytes ?? Buffer.byteLength(chunk.content),
+              contentSha256: detail.tokenSha256 ?? sha256Text(chunk.content),
+              isFirstOutput: tokenIndex === 0,
+              tokenId: numberFrom(detail.tokenId),
+              tokenLogprob: numberFrom(detail.logprob),
+              tokenTextSha256: typeof detail.tokenSha256 === "string" ? detail.tokenSha256 : null,
+              topLogprobsJson: topLogprobs.length ? JSON.stringify(topLogprobs) : null,
+              tokenDetailSource: String(tokenSummary.tokenDetailSource),
+            })
+            tokenIndex += 1
+          }
+        } else {
+          tokenTimeline.push({
+            requestId,
+            chunkIndex: chunk.chunkIndex,
+            tokenIndex: null,
+            receivedAtUtc: chunk.receivedAtUtc,
+            relativeMs: chunk.receivedMs,
+            contentBytes: Buffer.byteLength(chunk.content),
+            contentSha256: sha256Text(chunk.content),
+            isFirstOutput: chunk.chunkIndex === 0,
+            tokenId: null,
+            tokenLogprob: null,
+            tokenTextSha256: null,
+            topLogprobsJson: null,
+            tokenDetailSource: String(tokenSummary.tokenDetailSource),
+          })
+        }
+      }
       const redacted = redactedRequest(payload)
       return {
         requestId,
@@ -660,6 +942,20 @@ async function sendChatCompletion(
         outputBytes: Buffer.byteLength(outputText),
         nativeTelemetry: telemetry,
         nativeTelemetryAvailable: Boolean(telemetry.available),
+        hardwareTelemetry: hwTelemetry,
+        hardwareTelemetryAvailable: Boolean(hwTelemetry.available),
+        avgPowerWatts: numberFrom(hwTelemetry.powerWatts),
+        avgPowerWattsPerGpu: numberFrom(hwTelemetry.powerWattsPerGpu),
+        gpuUtilizationPct: numberFrom(hwTelemetry.gpuUtilizationPct),
+        memoryCopyUtilizationPct: numberFrom(hwTelemetry.memoryCopyUtilizationPct),
+        energyJoules: numberFrom(hwTelemetry.energyJoules),
+        ...(tokenSummary as {
+          tokenDetailsAvailable: boolean
+          tokenIdsAvailable: boolean
+          logprobsAvailable: boolean
+          tokenDetailCount: number
+          tokenDetailSource: string
+        }),
         queueWaitMs: numberFrom(telemetry.queueWaitMs),
         prefillMs: numberFrom(telemetry.prefillMs),
         decodeMs: numberFrom(telemetry.decodeMs),
@@ -671,6 +967,8 @@ async function sendChatCompletion(
           requestPayload: payload,
           responseEvents: events,
           outputText,
+          tokenDetails: rawTokenDetails,
+          hardwareTelemetry: hwTelemetry,
         },
       }
     }
@@ -681,10 +979,29 @@ async function sendChatCompletion(
     const usage = body.usage ?? {}
     const outputText = choiceContent(body)
     const nativeAfter = await readNativeMetrics(config)
+    const hardwareAfter = await readHardwareMetrics(config)
     const telemetry = combineNativeTelemetry(
       nativeTelemetry(config, body),
       nativeMetricsDelta(config, nativeBefore, nativeAfter),
     )
+    const hwTelemetry = hardwareMetricsDelta(config, hardwareBefore, hardwareAfter)
+    const rawTokenDetails = choiceTokenDetails(body)
+    const tokenSummary = tokenDetailSummary(rawTokenDetails, tokenDetailsRequested)
+    const tokenTimeline = rawTokenDetails.map((detail, index): ServingTokenTimelineChunk => ({
+      requestId,
+      chunkIndex: 0,
+      tokenIndex: index,
+      receivedAtUtc: requestCompletedAtUtc,
+      relativeMs: latencyMs,
+      contentBytes: numberFrom(detail.tokenBytes) ?? 0,
+      contentSha256: typeof detail.tokenSha256 === "string" ? detail.tokenSha256 : "",
+      isFirstOutput: index === 0,
+      tokenId: numberFrom(detail.tokenId),
+      tokenLogprob: numberFrom(detail.logprob),
+      tokenTextSha256: typeof detail.tokenSha256 === "string" ? detail.tokenSha256 : null,
+      topLogprobsJson: Array.isArray(detail.topLogprobs) && detail.topLogprobs.length ? JSON.stringify(detail.topLogprobs) : null,
+      tokenDetailSource: String(tokenSummary.tokenDetailSource),
+    }))
     const redacted = redactedRequest(payload)
     return {
       requestId,
@@ -718,10 +1035,24 @@ async function sendChatCompletion(
       outputBytes: Buffer.byteLength(outputText),
       nativeTelemetry: telemetry,
       nativeTelemetryAvailable: Boolean(telemetry.available),
+      hardwareTelemetry: hwTelemetry,
+      hardwareTelemetryAvailable: Boolean(hwTelemetry.available),
+      avgPowerWatts: numberFrom(hwTelemetry.powerWatts),
+      avgPowerWattsPerGpu: numberFrom(hwTelemetry.powerWattsPerGpu),
+      gpuUtilizationPct: numberFrom(hwTelemetry.gpuUtilizationPct),
+      memoryCopyUtilizationPct: numberFrom(hwTelemetry.memoryCopyUtilizationPct),
+      energyJoules: numberFrom(hwTelemetry.energyJoules),
+      ...(tokenSummary as {
+        tokenDetailsAvailable: boolean
+        tokenIdsAvailable: boolean
+        logprobsAvailable: boolean
+        tokenDetailCount: number
+        tokenDetailSource: string
+      }),
       queueWaitMs: numberFrom(telemetry.queueWaitMs),
       prefillMs: numberFrom(telemetry.prefillMs),
       decodeMs: numberFrom(telemetry.decodeMs),
-      tokenTimeline: [],
+      tokenTimeline,
       error: response.ok ? undefined : JSON.stringify(body),
       rawCapture: {
         requestId,
@@ -729,6 +1060,8 @@ async function sendChatCompletion(
         requestPayload: payload,
         responseBody: body,
         outputText,
+        tokenDetails: rawTokenDetails,
+        hardwareTelemetry: hwTelemetry,
       },
     }
   } catch (error) {
@@ -758,6 +1091,13 @@ async function sendChatCompletion(
       streaming: stream,
       nativeTelemetry: nativeTelemetry(config),
       nativeTelemetryAvailable: false,
+      hardwareTelemetry: hardwareTelemetry(config),
+      hardwareTelemetryAvailable: false,
+      tokenDetailsAvailable: false,
+      tokenIdsAvailable: false,
+      logprobsAvailable: false,
+      tokenDetailCount: 0,
+      tokenDetailSource: "error",
       error: error instanceof Error ? error.message : String(error),
     }
   }
@@ -776,9 +1116,12 @@ function buildMeasurements(
   const promptTokens = sum(successful.map((sample) => sample.promptTokens))
   const outputTpm = outputTokens / (durationSeconds / 60)
   const totalTpm = totalTokens / (durationSeconds / 60)
+  const avg = (values: number[]) => values.length ? sum(values) / values.length : null
   const gpuCount = config.pricing?.gpuCount ?? Number(config.workload?.parallelism ?? 1)
   const usdPerGpuHour = config.pricing?.usdPerGpuHour
-  const powerWattsPerGpu = config.pricing?.powerWattsPerGpu
+  const configuredPowerWattsPerGpu = config.pricing?.powerWattsPerGpu
+  const observedPowerWattsPerGpu = avg(successful.map((sample) => sample.avgPowerWattsPerGpu ?? null).filter(finite))
+  const powerWattsPerGpu = finite(configuredPowerWattsPerGpu) ? configuredPowerWattsPerGpu : observedPowerWattsPerGpu
   const costUsd = finite(usdPerGpuHour) ? (durationSeconds / 3600) * usdPerGpuHour * gpuCount : null
   const usdPer1mOutputTokens = costUsd != null && outputTokens > 0 ? costUsd / (outputTokens / 1_000_000) : null
   const usdPer1mTotalTokens = costUsd != null && totalTokens > 0 ? costUsd / (totalTokens / 1_000_000) : null
@@ -791,7 +1134,6 @@ function buildMeasurements(
   const tpots = successful.map((sample) => sample.tpotMs).filter(finite)
   const firstBytes = successful.map((sample) => sample.timeToFirstByteMs).filter(finite)
   const avgLatencyMs = successful.length ? sum(successful.map((sample) => sample.e2eLatencyMs)) / successful.length : null
-  const avg = (values: number[]) => values.length ? sum(values) / values.length : null
   const row: Record<string, unknown> = {
     surface: "result",
     model: config.request.model,
@@ -827,7 +1169,12 @@ function buildMeasurements(
     avgDecodeMs: avg(successful.map((sample) => sample.decodeMs ?? null).filter(finite)),
     usdPer1mOutputTokens,
     usdPer1mTotalTokens,
+    avgPowerWatts: avg(successful.map((sample) => sample.avgPowerWatts ?? null).filter(finite)),
     avgPowerWattsPerGpu: powerWattsPerGpu ?? null,
+    powerSource: finite(configuredPowerWattsPerGpu) ? "pricing-config" : observedPowerWattsPerGpu != null ? "dcgm" : "unknown",
+    avgGpuUtilizationPct: avg(successful.map((sample) => sample.gpuUtilizationPct ?? null).filter(finite)),
+    avgMemoryCopyUtilizationPct: avg(successful.map((sample) => sample.memoryCopyUtilizationPct ?? null).filter(finite)),
+    totalEnergyJoules: sum(successful.map((sample) => sample.energyJoules ?? 0)),
     tokensPerWatt,
     campaignCount: Math.max(successful.length, 1),
     latestCapturedAtUtc: capturedAtUtc,
@@ -836,10 +1183,16 @@ function buildMeasurements(
     verdictTier: successful.length === samples.length ? "request-captured" : "request-errors",
     solRigor: config.runClass === "measured" ? "l3" : "smoke",
     plotReadyPoints: 0,
-    dcgmGrounded: false,
+    dcgmGrounded: successful.length > 0 && successful.every((sample) => sample.hardwareTelemetryAvailable),
     streamingRequestCount: successful.filter((sample) => sample.streaming).length,
     nativeTelemetryAvailableCount: successful.filter((sample) => sample.nativeTelemetryAvailable).length,
-    nativeTelemetryRequired: Boolean((config.engine as unknown as Record<string, unknown>).requireNativeTelemetry),
+    nativeTelemetryRequired: Boolean(config.engine.requireNativeTelemetry),
+    hardwareTelemetryAvailableCount: successful.filter((sample) => sample.hardwareTelemetryAvailable).length,
+    hardwareTelemetryRequired: Boolean(config.engine.requireHardwareTelemetry || hardwareMetricsUrl(config)),
+    tokenDetailsAvailableCount: successful.filter((sample) => sample.tokenDetailsAvailable).length,
+    tokenIdsAvailableCount: successful.filter((sample) => sample.tokenIdsAvailable).length,
+    logprobsAvailableCount: successful.filter((sample) => sample.logprobsAvailable).length,
+    tokenDetailsRequired: Boolean(requestPayload(config.request, config.request.stream !== false).logprobs),
     hardwareProvenance: config.workload?.hardware && config.workload.hardware !== "unknown" ? "configured" : "unknown",
     tags: [
       "serving-producer",
@@ -882,6 +1235,17 @@ function buildMeasurements(
     requestPayloadSha256: sample.requestPayloadSha256,
     outputSha256: sample.outputSha256,
     nativeTelemetryAvailable: sample.nativeTelemetryAvailable,
+    hardwareTelemetryAvailable: sample.hardwareTelemetryAvailable,
+    avgPowerWatts: sample.avgPowerWatts,
+    avgPowerWattsPerGpu: sample.avgPowerWattsPerGpu,
+    gpuUtilizationPct: sample.gpuUtilizationPct,
+    memoryCopyUtilizationPct: sample.memoryCopyUtilizationPct,
+    energyJoules: sample.energyJoules,
+    tokenDetailsAvailable: sample.tokenDetailsAvailable,
+    tokenIdsAvailable: sample.tokenIdsAvailable,
+    logprobsAvailable: sample.logprobsAvailable,
+    tokenDetailCount: sample.tokenDetailCount,
+    tokenDetailSource: sample.tokenDetailSource,
     queueWaitMs: sample.queueWaitMs,
     prefillMs: sample.prefillMs,
     decodeMs: sample.decodeMs,
@@ -899,6 +1263,12 @@ function buildMeasurements(
     contentBytes: chunk.contentBytes,
     contentSha256: chunk.contentSha256,
     isFirstOutput: chunk.isFirstOutput,
+    tokenIndex: chunk.tokenIndex,
+    tokenId: chunk.tokenId,
+    tokenLogprob: chunk.tokenLogprob,
+    tokenTextSha256: chunk.tokenTextSha256,
+    topLogprobsJson: chunk.topLogprobsJson,
+    tokenDetailSource: chunk.tokenDetailSource,
     latestCapturedAtUtc: capturedAtUtc,
   })))
   return [row, ...sampleRows, ...timelineRows]
@@ -950,6 +1320,18 @@ async function writeSummaryArtifact(
     nativeTelemetry: samples.map((sample) => ({
       requestId: sample.requestId,
       ...(sample.nativeTelemetry ?? {}),
+    })),
+    hardwareTelemetry: samples.map((sample) => ({
+      requestId: sample.requestId,
+      ...(sample.hardwareTelemetry ?? {}),
+    })),
+    tokenDetails: samples.map((sample) => ({
+      requestId: sample.requestId,
+      tokenDetailsAvailable: sample.tokenDetailsAvailable,
+      tokenIdsAvailable: sample.tokenIdsAvailable,
+      logprobsAvailable: sample.logprobsAvailable,
+      tokenDetailCount: sample.tokenDetailCount,
+      tokenDetailSource: sample.tokenDetailSource,
     })),
     measurements,
   }, null, 2) + "\n")
@@ -1058,10 +1440,10 @@ export async function runServingProducer(config: ServingProducerConfig): Promise
       `to ${normalizeBaseUrl(config.engine.baseUrl)}${config.engine.requestPath ?? "/v1/chat/completions"}`,
       `for model ${config.request.model}.`,
       "Each request includes x-performance-iq-* trace headers.",
-      "Metrics are derived from client-side streaming SSE timings, response usage fields, and native telemetry when exposed.",
+      "Metrics are derived from client-side streaming SSE timings, response usage fields, response token logprobs/IDs when exposed, native telemetry when exposed, and DCGM hardware metrics when a hardware metrics endpoint is configured.",
     ].join(" "),
     limitations: [
-      "Serving producer captures client stream timing, request-path, usage, latency, and provenance; hardware-level power/kernel counters require engine-side or cluster instrumentation.",
+      "Serving producer captures client stream timing, request-path, usage, latency, token logprobs/IDs when exposed, and provenance; hardware-level DCGM counters require a reachable DCGM/Prometheus metrics endpoint or configured hardware telemetry.",
       ...(samples.some((sample) => !sample.ok) ? ["One or more serving requests failed; see normalized-summary artifact for per-request errors."] : []),
     ],
   }

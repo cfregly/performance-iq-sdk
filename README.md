@@ -47,6 +47,32 @@ PIQ_BASE_URL=https://performance-iq.example.com PIQ_TOKEN=... \
   piq submit-manifest ./manifest.json
 ```
 
+## Offline buyer verification (`piq verify-packet`)
+
+`verify-packet` is the "don't trust us — replay it" primitive. A **buyer's**
+own engineers can check a Performance IQ deal-proof packet with plain Node and
+nothing else: **no server, no token, no license.** It is the demand-side lever
+of the flywheel — the format spreads because buyers can verify it without
+depending on the vendor.
+
+```bash
+piq verify-packet ./deal-packet.json
+#   --max-age-days <n>   freshness window (default 30)
+#   --allow-rehearsal    inspect non-measured packets instead of rejecting them
+#   --artifacts <dir>    directory holding raw artifacts, to recompute hashes
+#   --json               machine-readable result
+```
+
+It is fail-closed. It rejects example/template/rehearsal packets (only
+`runClass: measured` is quote-grade), stale evidence, artifact hashes that do
+not match shipped raw files, customer-facing packets that leak operator-only
+detail (absolute paths, private hosts), and incomplete replay recipes. A
+customer-safe packet that ships hashes but not raw files is treated as
+declared-only, not a failure — re-run the producer to reproduce. Exit code is
+`0` on pass, `1` on fail. See
+`workbench/apps/data-platforms/performance-iq/RFP_LANGUAGE.md` for the
+buyer-facing procurement clause that references it.
+
 ## Python
 
 ```py

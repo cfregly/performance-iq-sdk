@@ -3,18 +3,71 @@
 import crypto from "node:crypto"
 import fs from "node:fs/promises"
 
+import { verifyPacket, DEFAULT_FRESHNESS_MAX_DAYS } from "../src/verify-packet.mjs"
+
 const [, , command, ...args] = process.argv
 
 function usage() {
   console.error(`Usage:
-  piq validate <manifest.json>
-  piq submit-manifest <manifest.json>
-  piq status <run-id>
+  piq validate <manifest.json>          (server-side validation; needs PIQ_BASE_URL)
+  piq submit-manifest <manifest.json>   (needs PIQ_BASE_URL + PIQ_TOKEN)
+  piq status <run-id>                   (needs PIQ_BASE_URL)
+  piq verify-packet <packet.json>       (OFFLINE buyer verification; no server, no token)
+
+verify-packet options:
+  --max-age-days <n>   freshness window (default ${DEFAULT_FRESHNESS_MAX_DAYS})
+  --allow-rehearsal    inspect non-measured packets instead of rejecting them
+  --artifacts <dir>    directory holding raw artifacts, to recompute hashes
+  --json               print the full machine-readable result
 
 Environment:
-  PIQ_BASE_URL   Performance IQ base URL
+  PIQ_BASE_URL   Performance IQ base URL (server commands only)
   PIQ_TOKEN      Service token for write APIs`)
   process.exit(2)
+}
+
+function takeFlagValue(argv, name) {
+  const index = argv.indexOf(name)
+  if (index === -1) return undefined
+  const value = argv[index + 1]
+  argv.splice(index, 2)
+  return value
+}
+
+function takeFlag(argv, name) {
+  const index = argv.indexOf(name)
+  if (index === -1) return false
+  argv.splice(index, 1)
+  return true
+}
+
+async function runVerifyPacket(argv) {
+  const rest = [...argv]
+  const maxAge = takeFlagValue(rest, "--max-age-days")
+  const allowRehearsal = takeFlag(rest, "--allow-rehearsal")
+  const artifactRoot = takeFlagValue(rest, "--artifacts")
+  const asJson = takeFlag(rest, "--json")
+  const [packetPath] = rest
+  if (!packetPath) usage()
+
+  const packet = JSON.parse(await fs.readFile(packetPath, "utf8"))
+  const result = verifyPacket(packet, {
+    freshnessMaxDays: maxAge !== undefined ? Number(maxAge) : DEFAULT_FRESHNESS_MAX_DAYS,
+    requireMeasured: !allowRehearsal,
+    artifactRoot: artifactRoot ?? null,
+  })
+
+  if (asJson) {
+    console.log(JSON.stringify(result, null, 2))
+  } else {
+    for (const check of result.checks) {
+      const mark = check.ok ? (check.severity === "warning" ? "!" : "✓") : "✗"
+      console.log(`  ${mark} ${check.name}: ${check.detail}`)
+    }
+    console.log("")
+    console.log(result.summary)
+  }
+  process.exit(result.ok ? 0 : 1)
 }
 
 function baseUrl() {
@@ -59,6 +112,10 @@ async function get(path) {
 
 async function main() {
   if (!command) usage()
+  if (command === "verify-packet") {
+    await runVerifyPacket(args)
+    return
+  }
   if (command === "validate") {
     const [manifestPath] = args
     if (!manifestPath) usage()

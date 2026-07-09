@@ -2,7 +2,8 @@
   "name": "performance-iq-sdk",
   "version": "0.1.0",
   "type": "module",
-  "description": "Producer-first JavaScript SDK for submitting benchmark results into Performance IQ.",
+  "license": "MIT",
+  "description": "Producer-first JavaScript SDK for submitting benchmark results into Performance IQ, including the offline buyer-side packet verifier.",
   "main": "src/index.ts",
   "types": "src/index.ts",
   "bin": {

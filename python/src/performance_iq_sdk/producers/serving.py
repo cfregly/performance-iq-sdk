@@ -32,7 +32,8 @@ HttpPostJson = Callable[[str, dict[str, str], dict[str, Any]], ServingPostResult
 HttpStreamJson = Callable[[str, dict[str, str], dict[str, Any]], dict[str, Any]]
 HttpGetText = Callable[[str, dict[str, str]], str]
 
-PROMETHEUS_SAMPLE_RE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{[^}]*\})?\s+([-+0-9.eE]+)")
+PROMETHEUS_SAMPLE_RE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+([-+0-9.eE]+)")
+PROMETHEUS_LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"')
 
 
 def laptop_smoke_model() -> str:
@@ -149,6 +150,11 @@ def _request_payload(request: dict[str, Any], *, stream: bool | None = None) -> 
     if stream_enabled:
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
+    if request.get("captureTokenDetails") or request.get("logprobs") or request.get("topLogprobs") is not None or request.get("top_logprobs") is not None:
+        payload["logprobs"] = bool(request.get("logprobs", True))
+        top_logprobs = request.get("topLogprobs", request.get("top_logprobs"))
+        if top_logprobs is not None:
+            payload["top_logprobs"] = int(top_logprobs)
     return payload
 
 
@@ -270,11 +276,57 @@ def _parse_prometheus_metrics(text: str) -> dict[str, float]:
         if not match:
             continue
         try:
-            value = float(match.group(2))
+            value = float(match.group(3))
         except ValueError:
             continue
-        metrics[match.group(1)] = metrics.get(match.group(1), 0.0) + value
+        metric_name = match.group(1)
+        metrics[metric_name] = metrics.get(metric_name, 0.0) + value
+        metrics[f"{metric_name}__sample_count"] = metrics.get(f"{metric_name}__sample_count", 0.0) + 1
+        labels = dict(PROMETHEUS_LABEL_RE.findall(match.group(2) or ""))
+        for label_name in ("stage", "mode", "source", "reason", "finished_reason"):
+            label_value = labels.get(label_name)
+            if label_value:
+                labelled_name = f"{metric_name}{{{label_name}={label_value}}}"
+                metrics[labelled_name] = metrics.get(labelled_name, 0.0) + value
+                metrics[f"{labelled_name}__sample_count"] = metrics.get(f"{labelled_name}__sample_count", 0.0) + 1
     return metrics
+
+
+def _hardware_metrics_url(engine: dict[str, Any]) -> str | None:
+    configured = engine.get("hardwareMetricsUrl") or engine.get("dcgmMetricsUrl")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    if engine.get("collectHardwareMetrics") is True:
+        return f"{_normalize_base_url(str(engine['baseUrl']))}/metrics"
+    return None
+
+
+def _hardware_telemetry(engine: dict[str, Any]) -> dict[str, Any]:
+    configured = engine.get("hardwareTelemetry")
+    if isinstance(configured, dict):
+        return {"available": True, "source": "engine-config", **configured}
+    return {"available": False, "source": "not-configured"}
+
+
+def _read_hardware_metrics(engine: dict[str, Any], http_get_text: HttpGetText | None = None) -> dict[str, Any]:
+    url = _hardware_metrics_url(engine)
+    if not url:
+        return {"available": False, "source": "hardware-metrics-url-not-configured"}
+    try:
+        text = (http_get_text or _get_text)(url, _metrics_headers(engine))
+    except Exception as exc:
+        return {"available": False, "source": "hardware-prometheus-unavailable", "metricsUrl": url, "error": str(exc)}
+    metrics = _parse_prometheus_metrics(text)
+    dcgm_metrics = {key: value for key, value in metrics.items() if key.startswith("DCGM_FI_")}
+    if not dcgm_metrics:
+        return {"available": False, "source": "dcgm-prometheus-empty", "metricsUrl": url}
+    return {
+        "available": True,
+        "source": "dcgm-prometheus-snapshot",
+        "metricsUrl": url,
+        "metrics": dcgm_metrics,
+        "capturedAtUtc": _now_iso(),
+    }
 
 
 def _read_native_metrics(engine: dict[str, Any], http_get_text: HttpGetText | None = None) -> dict[str, Any]:
@@ -302,6 +354,18 @@ def _metric_value(metrics: dict[str, float], candidates: list[str]) -> float | N
         value = metrics.get(name)
         if isinstance(value, (int, float)):
             return float(value)
+    return None
+
+
+def _metric_average(metrics: dict[str, float], candidates: list[str]) -> float | None:
+    for name in candidates:
+        value = metrics.get(name)
+        if not isinstance(value, (int, float)):
+            continue
+        count = metrics.get(f"{name}__sample_count")
+        if isinstance(count, (int, float)) and count > 0:
+            return float(value) / float(count)
+        return float(value)
     return None
 
 
@@ -367,6 +431,7 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
     ])
     queue_wait_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
         "vllm:request_queue_time_seconds",
+        "sglang:queue_time_seconds",
         "sglang:request_queue_time_seconds",
         "sglang_request_queue_time_seconds",
         "trtllm:request_queue_time_seconds",
@@ -374,6 +439,8 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
     ])
     prefill_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
         "vllm:request_prefill_time_seconds",
+        "sglang:per_stage_req_latency_seconds{stage=prefill_forward}",
+        "sglang:per_stage_req_latency_seconds{mode=prefill_forward}",
         "sglang:request_prefill_time_seconds",
         "sglang_request_prefill_time_seconds",
         "trtllm:request_prefill_time_seconds",
@@ -381,11 +448,17 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
     ])
     decode_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
         "vllm:request_decode_time_seconds",
+        "sglang:per_stage_req_latency_seconds{stage=decode_forward}",
+        "sglang:per_stage_req_latency_seconds{mode=decode}",
         "sglang:request_decode_time_seconds",
         "sglang_request_decode_time_seconds",
         "trtllm:request_decode_time_seconds",
         "trtllm_request_decode_time_seconds",
     ])
+    if decode_ms is None and native_e2e_ms is not None and queue_wait_ms is not None and prefill_ms is not None:
+        derived_decode_ms = native_e2e_ms - queue_wait_ms - prefill_ms
+        if derived_decode_ms >= 0:
+            decode_ms = derived_decode_ms
     prefix_queries = _counter_delta(before_metrics, after_metrics, [
         "vllm:prefix_cache_queries_total",
         "sglang:prefix_cache_queries_total",
@@ -437,6 +510,46 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
     }
 
 
+def _hardware_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    configured = _hardware_telemetry(engine)
+    if configured.get("available"):
+        return configured
+    if not before.get("available") or not after.get("available"):
+        return {
+            "available": False,
+            "source": "dcgm-delta-unavailable",
+            "metricsUrl": before.get("metricsUrl") or after.get("metricsUrl") or _hardware_metrics_url(engine),
+            "before": before,
+            "after": after,
+        }
+    before_metrics = before.get("metrics") if isinstance(before.get("metrics"), dict) else {}
+    after_metrics = after.get("metrics") if isinstance(after.get("metrics"), dict) else {}
+    if not isinstance(before_metrics, dict) or not isinstance(after_metrics, dict):
+        return {"available": False, "source": "dcgm-delta-invalid"}
+    energy_mj = _counter_delta(before_metrics, after_metrics, ["DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION"])
+    values = {
+        "powerWatts": _metric_value(after_metrics, ["DCGM_FI_DEV_POWER_USAGE"]),
+        "powerWattsPerGpu": _metric_average(after_metrics, ["DCGM_FI_DEV_POWER_USAGE"]),
+        "gpuUtilizationPct": _metric_average(after_metrics, ["DCGM_FI_DEV_GPU_UTIL", "DCGM_FI_PROF_SM_ACTIVE"]),
+        "memoryCopyUtilizationPct": _metric_average(after_metrics, ["DCGM_FI_DEV_MEM_COPY_UTIL", "DCGM_FI_PROF_DRAM_ACTIVE"]),
+        "gpuTemperatureC": _metric_average(after_metrics, ["DCGM_FI_DEV_GPU_TEMP"]),
+        "smClockMHz": _metric_average(after_metrics, ["DCGM_FI_DEV_SM_CLOCK"]),
+        "memoryClockMHz": _metric_average(after_metrics, ["DCGM_FI_DEV_MEM_CLOCK"]),
+        "fbUsedMiB": _metric_value(after_metrics, ["DCGM_FI_DEV_FB_USED"]),
+        "fbFreeMiB": _metric_value(after_metrics, ["DCGM_FI_DEV_FB_FREE"]),
+        "energyJoules": (energy_mj / 1000) if energy_mj is not None else None,
+    }
+    available_values = {key: value for key, value in values.items() if value is not None}
+    return {
+        "available": bool(available_values),
+        "source": "dcgm-prometheus-delta",
+        "metricsUrl": after.get("metricsUrl") or before.get("metricsUrl"),
+        "beforeCapturedAtUtc": before.get("capturedAtUtc"),
+        "afterCapturedAtUtc": after.get("capturedAtUtc"),
+        **available_values,
+    }
+
+
 def _combine_native_telemetry(*items: dict[str, Any]) -> dict[str, Any]:
     combined: dict[str, Any] = {}
     sources: list[str] = []
@@ -450,6 +563,86 @@ def _combine_native_telemetry(*items: dict[str, Any]) -> dict[str, Any]:
     if sources:
         combined["source"] = "+".join(dict.fromkeys(sources))
     return combined
+
+
+def _extract_token_id(item: dict[str, Any]) -> int | None:
+    for key in ("token_id", "tokenId", "id"):
+        value = item.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
+def _sanitize_top_logprobs(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    sanitized = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        token = item.get("token") if isinstance(item.get("token"), str) else ""
+        sanitized.append({
+            "tokenSha256": _sha256_text(token) if token else None,
+            "tokenBytes": len(token.encode("utf-8")) if token else None,
+            "tokenId": _extract_token_id(item),
+            "logprob": item.get("logprob") if isinstance(item.get("logprob"), (int, float)) else None,
+        })
+    return sanitized
+
+
+def _choice_token_details(body: dict[str, Any]) -> list[dict[str, Any]]:
+    logprobs = _choice(body).get("logprobs")
+    if not isinstance(logprobs, dict):
+        return []
+    content = logprobs.get("content")
+    if not isinstance(content, list):
+        return []
+    details = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        token = item.get("token") if isinstance(item.get("token"), str) else ""
+        token_bytes = item.get("bytes") if isinstance(item.get("bytes"), list) else None
+        details.append({
+            "tokenText": token,
+            "tokenSha256": _sha256_text(token) if token else None,
+            "tokenBytes": len(token.encode("utf-8")) if token else (len(token_bytes) if token_bytes else None),
+            "tokenId": _extract_token_id(item),
+            "logprob": item.get("logprob") if isinstance(item.get("logprob"), (int, float)) else None,
+            "topLogprobs": _sanitize_top_logprobs(item.get("top_logprobs", item.get("topLogprobs"))),
+        })
+    return details
+
+
+def _redacted_token_details(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            key: value
+            for key, value in detail.items()
+            if key != "tokenText"
+        }
+        for detail in details
+    ]
+
+
+def _token_detail_summary(details: list[dict[str, Any]], requested: bool) -> dict[str, Any]:
+    if not details:
+        return {
+            "tokenDetailsAvailable": False,
+            "tokenIdsAvailable": False,
+            "logprobsAvailable": False,
+            "tokenDetailCount": 0,
+            "tokenDetailSource": "requested-not-exposed" if requested else "not-requested",
+        }
+    return {
+        "tokenDetailsAvailable": True,
+        "tokenIdsAvailable": any(detail.get("tokenId") is not None for detail in details),
+        "logprobsAvailable": any(detail.get("logprob") is not None for detail in details),
+        "tokenDetailCount": len(details),
+        "tokenDetailSource": "response-logprobs",
+    }
 
 
 def _avg_numbers(samples: list[dict[str, Any]], key: str) -> float | None:
@@ -495,6 +688,8 @@ def _send_streaming_chat_completion(
         headers["authorization"] = f"Bearer {engine['apiKey']}"
     payload = _request_payload(request, stream=True)
     native_before = _read_native_metrics(engine, http_get_text)
+    hardware_before = _read_hardware_metrics(engine, http_get_text)
+    token_details_requested = bool(payload.get("logprobs"))
     started = time.perf_counter()
     request_started_at_utc = _now_iso()
     try:
@@ -529,6 +724,7 @@ def _send_streaming_chat_completion(
                     native_telemetry = telemetry
             content = _choice_content(body)
             if content:
+                token_details = _choice_token_details(body)
                 output_chunks.append({
                     "chunkIndex": len(output_chunks),
                     "content": content,
@@ -536,12 +732,15 @@ def _send_streaming_chat_completion(
                     "contentSha256": _sha256_text(content),
                     "receivedMs": event["receivedMs"],
                     "receivedAtUtc": event["receivedAtUtc"],
+                    "tokenDetails": token_details,
                 })
         native_after = _read_native_metrics(engine, http_get_text)
+        hardware_after = _read_hardware_metrics(engine, http_get_text)
         native_telemetry = _combine_native_telemetry(
             native_telemetry,
             _native_metrics_delta(engine, native_before, native_after),
         )
+        hardware_telemetry = _hardware_metrics_delta(engine, hardware_before, hardware_after)
         first_chunk = events[0] if events else None
         first_output = output_chunks[0] if output_chunks else None
         last_output = output_chunks[-1] if output_chunks else None
@@ -560,6 +759,51 @@ def _send_streaming_chat_completion(
             float(output_chunks[index]["receivedMs"]) - float(output_chunks[index - 1]["receivedMs"])
             for index in range(1, len(output_chunks))
         ]
+        raw_token_details = [
+            {**detail, "chunkIndex": chunk["chunkIndex"]}
+            for chunk in output_chunks
+            for detail in (chunk.get("tokenDetails") or [])
+        ]
+        token_summary = _token_detail_summary(raw_token_details, token_details_requested)
+        token_timeline = []
+        token_index = 0
+        for chunk in output_chunks:
+            chunk_details = chunk.get("tokenDetails") or []
+            if chunk_details:
+                for detail in chunk_details:
+                    top_logprobs = detail.get("topLogprobs") if isinstance(detail.get("topLogprobs"), list) else []
+                    token_timeline.append({
+                        "requestId": request_id,
+                        "chunkIndex": chunk["chunkIndex"],
+                        "tokenIndex": token_index,
+                        "receivedAtUtc": chunk["receivedAtUtc"],
+                        "relativeMs": chunk["receivedMs"],
+                        "contentBytes": detail.get("tokenBytes") or chunk["contentBytes"],
+                        "contentSha256": detail.get("tokenSha256") or chunk["contentSha256"],
+                        "isFirstOutput": token_index == 0,
+                        "tokenId": detail.get("tokenId"),
+                        "tokenLogprob": detail.get("logprob"),
+                        "tokenTextSha256": detail.get("tokenSha256"),
+                        "topLogprobsJson": _stable_json(top_logprobs) if top_logprobs else None,
+                        "tokenDetailSource": token_summary["tokenDetailSource"],
+                    })
+                    token_index += 1
+            else:
+                token_timeline.append({
+                    "requestId": request_id,
+                    "chunkIndex": chunk["chunkIndex"],
+                    "tokenIndex": None,
+                    "receivedAtUtc": chunk["receivedAtUtc"],
+                    "relativeMs": chunk["receivedMs"],
+                    "contentBytes": chunk["contentBytes"],
+                    "contentSha256": chunk["contentSha256"],
+                    "isFirstOutput": chunk["chunkIndex"] == 0,
+                    "tokenId": None,
+                    "tokenLogprob": None,
+                    "tokenTextSha256": None,
+                    "topLogprobsJson": None,
+                    "tokenDetailSource": token_summary["tokenDetailSource"],
+                })
         return {
             "requestId": request_id,
             "requestIndex": request_index,
@@ -595,21 +839,18 @@ def _send_streaming_chat_completion(
             "outputBytes": len(output_text.encode("utf-8")),
             "nativeTelemetry": native_telemetry,
             "nativeTelemetryAvailable": bool(native_telemetry.get("available")),
+            "hardwareTelemetry": hardware_telemetry,
+            "hardwareTelemetryAvailable": bool(hardware_telemetry.get("available")),
+            "avgPowerWatts": hardware_telemetry.get("powerWatts"),
+            "avgPowerWattsPerGpu": hardware_telemetry.get("powerWattsPerGpu"),
+            "gpuUtilizationPct": hardware_telemetry.get("gpuUtilizationPct"),
+            "memoryCopyUtilizationPct": hardware_telemetry.get("memoryCopyUtilizationPct"),
+            "energyJoules": hardware_telemetry.get("energyJoules"),
             "queueWaitMs": native_telemetry.get("queueWaitMs"),
             "prefillMs": native_telemetry.get("prefillMs"),
             "decodeMs": native_telemetry.get("decodeMs"),
-            "tokenTimeline": [
-                {
-                    "requestId": request_id,
-                    "chunkIndex": chunk["chunkIndex"],
-                    "receivedAtUtc": chunk["receivedAtUtc"],
-                    "relativeMs": chunk["receivedMs"],
-                    "contentBytes": chunk["contentBytes"],
-                    "contentSha256": chunk["contentSha256"],
-                    "isFirstOutput": chunk["chunkIndex"] == 0,
-                }
-                for chunk in output_chunks
-            ],
+            **token_summary,
+            "tokenTimeline": token_timeline,
             "error": None if 200 <= status < 300 else json.dumps(last_body),
             "_rawCapture": {
                 "requestId": request_id,
@@ -617,6 +858,8 @@ def _send_streaming_chat_completion(
                 "requestPayload": payload,
                 "responseEvents": events,
                 "outputText": output_text,
+                "tokenDetails": raw_token_details,
+                "hardwareTelemetry": hardware_telemetry,
             },
         }
     except Exception as exc:
@@ -645,6 +888,13 @@ def _send_streaming_chat_completion(
             "streaming": True,
             "nativeTelemetry": _native_telemetry(engine),
             "nativeTelemetryAvailable": False,
+            "hardwareTelemetry": _hardware_telemetry(engine),
+            "hardwareTelemetryAvailable": False,
+            "tokenDetailsAvailable": False,
+            "tokenIdsAvailable": False,
+            "logprobsAvailable": False,
+            "tokenDetailCount": 0,
+            "tokenDetailSource": "error",
             "error": str(exc),
         }
 
@@ -668,6 +918,8 @@ def _send_non_streaming_chat_completion(
         headers["authorization"] = f"Bearer {engine['apiKey']}"
     payload = _request_payload(request, stream=False)
     native_before = _read_native_metrics(engine, http_get_text)
+    hardware_before = _read_hardware_metrics(engine, http_get_text)
+    token_details_requested = bool(payload.get("logprobs"))
     started = time.perf_counter()
     request_started_at_utc = _now_iso()
     try:
@@ -679,10 +931,32 @@ def _send_non_streaming_chat_completion(
         status = int(result.get("status", 0))
         output_text = _choice_content(body)
         native_after = _read_native_metrics(engine, http_get_text)
+        hardware_after = _read_hardware_metrics(engine, http_get_text)
         native_telemetry = _combine_native_telemetry(
             _native_telemetry(engine, body),
             _native_metrics_delta(engine, native_before, native_after),
         )
+        hardware_telemetry = _hardware_metrics_delta(engine, hardware_before, hardware_after)
+        raw_token_details = _choice_token_details(body)
+        token_summary = _token_detail_summary(raw_token_details, token_details_requested)
+        token_timeline = [
+            {
+                "requestId": request_id,
+                "chunkIndex": 0,
+                "tokenIndex": index,
+                "receivedAtUtc": request_completed_at_utc,
+                "relativeMs": latency_ms,
+                "contentBytes": detail.get("tokenBytes"),
+                "contentSha256": detail.get("tokenSha256"),
+                "isFirstOutput": index == 0,
+                "tokenId": detail.get("tokenId"),
+                "tokenLogprob": detail.get("logprob"),
+                "tokenTextSha256": detail.get("tokenSha256"),
+                "topLogprobsJson": _stable_json(detail.get("topLogprobs")) if detail.get("topLogprobs") else None,
+                "tokenDetailSource": token_summary["tokenDetailSource"],
+            }
+            for index, detail in enumerate(raw_token_details)
+        ]
         return {
             "requestId": request_id,
             "requestIndex": request_index,
@@ -715,10 +989,18 @@ def _send_non_streaming_chat_completion(
             "outputBytes": len(output_text.encode("utf-8")),
             "nativeTelemetry": native_telemetry,
             "nativeTelemetryAvailable": bool(native_telemetry.get("available")),
+            "hardwareTelemetry": hardware_telemetry,
+            "hardwareTelemetryAvailable": bool(hardware_telemetry.get("available")),
+            "avgPowerWatts": hardware_telemetry.get("powerWatts"),
+            "avgPowerWattsPerGpu": hardware_telemetry.get("powerWattsPerGpu"),
+            "gpuUtilizationPct": hardware_telemetry.get("gpuUtilizationPct"),
+            "memoryCopyUtilizationPct": hardware_telemetry.get("memoryCopyUtilizationPct"),
+            "energyJoules": hardware_telemetry.get("energyJoules"),
             "queueWaitMs": native_telemetry.get("queueWaitMs"),
             "prefillMs": native_telemetry.get("prefillMs"),
             "decodeMs": native_telemetry.get("decodeMs"),
-            "tokenTimeline": [],
+            **token_summary,
+            "tokenTimeline": token_timeline,
             "error": None if 200 <= status < 300 else json.dumps(body),
             "_rawCapture": {
                 "requestId": request_id,
@@ -726,6 +1008,8 @@ def _send_non_streaming_chat_completion(
                 "requestPayload": payload,
                 "responseBody": body,
                 "outputText": output_text,
+                "tokenDetails": raw_token_details,
+                "hardwareTelemetry": hardware_telemetry,
             },
         }
     except Exception as exc:
@@ -755,6 +1039,13 @@ def _send_non_streaming_chat_completion(
             "streaming": False,
             "nativeTelemetry": _native_telemetry(engine),
             "nativeTelemetryAvailable": False,
+            "hardwareTelemetry": _hardware_telemetry(engine),
+            "hardwareTelemetryAvailable": False,
+            "tokenDetailsAvailable": False,
+            "tokenIdsAvailable": False,
+            "logprobsAvailable": False,
+            "tokenDetailCount": 0,
+            "tokenDetailSource": "error",
             "error": str(exc),
         }
 
@@ -811,7 +1102,13 @@ def _build_measurements(
         if isinstance(sample.get("timeToFirstByteMs"), (int, float))
     ]
     usd_per_gpu_hour = (pricing or {}).get("usdPerGpuHour")
-    power_watts_per_gpu = (pricing or {}).get("powerWattsPerGpu")
+    configured_power_watts_per_gpu = (pricing or {}).get("powerWattsPerGpu")
+    observed_power_watts_per_gpu = _avg_numbers(successful, "avgPowerWattsPerGpu")
+    power_watts_per_gpu = (
+        configured_power_watts_per_gpu
+        if isinstance(configured_power_watts_per_gpu, (int, float))
+        else observed_power_watts_per_gpu
+    )
     gpu_count = float((pricing or {}).get("gpuCount") or workload.get("parallelism") or 1)
     cost_usd = (
         (duration_seconds / 3600) * float(usd_per_gpu_hour) * gpu_count
@@ -853,7 +1150,12 @@ def _build_measurements(
         "avgDecodeMs": _avg_numbers(successful, "decodeMs"),
         "usdPer1mOutputTokens": cost_usd / (output_tokens / 1_000_000) if cost_usd and output_tokens else None,
         "usdPer1mTotalTokens": cost_usd / (total_tokens / 1_000_000) if cost_usd and total_tokens else None,
+        "avgPowerWatts": _avg_numbers(successful, "avgPowerWatts"),
         "avgPowerWattsPerGpu": power_watts_per_gpu if isinstance(power_watts_per_gpu, (int, float)) else None,
+        "powerSource": "pricing-config" if isinstance(configured_power_watts_per_gpu, (int, float)) else ("dcgm" if observed_power_watts_per_gpu is not None else "unknown"),
+        "avgGpuUtilizationPct": _avg_numbers(successful, "gpuUtilizationPct"),
+        "avgMemoryCopyUtilizationPct": _avg_numbers(successful, "memoryCopyUtilizationPct"),
+        "totalEnergyJoules": _sum(successful, "energyJoules"),
         "tokensPerWatt": (
             (total_tokens / duration_seconds) / (float(power_watts_per_gpu) * gpu_count)
             if isinstance(power_watts_per_gpu, (int, float)) and power_watts_per_gpu > 0
@@ -866,10 +1168,16 @@ def _build_measurements(
         "verdictTier": "request-captured" if len(successful) == len(samples) else "request-errors",
         "solRigor": "smoke",
         "plotReadyPoints": 0,
-        "dcgmGrounded": False,
+        "dcgmGrounded": bool(successful) and all(sample.get("hardwareTelemetryAvailable") for sample in successful),
         "streamingRequestCount": sum(1 for sample in successful if sample.get("streaming")),
         "nativeTelemetryAvailableCount": sum(1 for sample in successful if sample.get("nativeTelemetryAvailable")),
         "nativeTelemetryRequired": bool(engine.get("requireNativeTelemetry")),
+        "hardwareTelemetryAvailableCount": sum(1 for sample in successful if sample.get("hardwareTelemetryAvailable")),
+        "hardwareTelemetryRequired": bool(engine.get("requireHardwareTelemetry") or _hardware_metrics_url(engine)),
+        "tokenDetailsAvailableCount": sum(1 for sample in successful if sample.get("tokenDetailsAvailable")),
+        "tokenIdsAvailableCount": sum(1 for sample in successful if sample.get("tokenIdsAvailable")),
+        "logprobsAvailableCount": sum(1 for sample in successful if sample.get("logprobsAvailable")),
+        "tokenDetailsRequired": bool(_request_payload(request, stream=bool(request.get("stream", True))).get("logprobs")),
         "hardwareProvenance": "configured" if workload.get("hardware") and workload.get("hardware") != "unknown" else "unknown",
         "tags": ",".join(["serving-producer", engine_id, engine_label, request["model"]]),
     }
@@ -889,6 +1197,18 @@ def _build_measurements(
         required.append(
             row["nativeTelemetryAvailableCount"]
             if row["nativeTelemetryAvailableCount"] == row["successCount"]
+            else None
+        )
+    if row["hardwareTelemetryRequired"]:
+        required.append(
+            row["hardwareTelemetryAvailableCount"]
+            if row["hardwareTelemetryAvailableCount"] == row["successCount"]
+            else None
+        )
+    if row["tokenDetailsRequired"]:
+        required.append(
+            row["logprobsAvailableCount"]
+            if row["logprobsAvailableCount"] == row["successCount"]
             else None
         )
     row["metricCompleteness"] = sum(isinstance(value, (int, float)) for value in required) / len(required)
@@ -926,6 +1246,17 @@ def _build_measurements(
             "requestPayloadSha256": sample.get("requestPayloadSha256"),
             "outputSha256": sample.get("outputSha256"),
             "nativeTelemetryAvailable": sample.get("nativeTelemetryAvailable"),
+            "hardwareTelemetryAvailable": sample.get("hardwareTelemetryAvailable"),
+            "avgPowerWatts": sample.get("avgPowerWatts"),
+            "avgPowerWattsPerGpu": sample.get("avgPowerWattsPerGpu"),
+            "gpuUtilizationPct": sample.get("gpuUtilizationPct"),
+            "memoryCopyUtilizationPct": sample.get("memoryCopyUtilizationPct"),
+            "energyJoules": sample.get("energyJoules"),
+            "tokenDetailsAvailable": sample.get("tokenDetailsAvailable"),
+            "tokenIdsAvailable": sample.get("tokenIdsAvailable"),
+            "logprobsAvailable": sample.get("logprobsAvailable"),
+            "tokenDetailCount": sample.get("tokenDetailCount"),
+            "tokenDetailSource": sample.get("tokenDetailSource"),
             "queueWaitMs": sample.get("queueWaitMs"),
             "prefillMs": sample.get("prefillMs"),
             "decodeMs": sample.get("decodeMs"),
@@ -946,6 +1277,12 @@ def _build_measurements(
                 "contentBytes": chunk.get("contentBytes"),
                 "contentSha256": chunk.get("contentSha256"),
                 "isFirstOutput": chunk.get("isFirstOutput"),
+                "tokenIndex": chunk.get("tokenIndex"),
+                "tokenId": chunk.get("tokenId"),
+                "tokenLogprob": chunk.get("tokenLogprob"),
+                "tokenTextSha256": chunk.get("tokenTextSha256"),
+                "topLogprobsJson": chunk.get("topLogprobsJson"),
+                "tokenDetailSource": chunk.get("tokenDetailSource"),
                 "latestCapturedAtUtc": captured_at_utc,
             })
     return [row, *sample_rows, *timeline_rows]
@@ -1013,6 +1350,24 @@ def _write_summary_artifact(
                     {
                         "requestId": sample.get("requestId"),
                         **(sample.get("nativeTelemetry") if isinstance(sample.get("nativeTelemetry"), dict) else {}),
+                    }
+                    for sample in samples
+                ],
+                "hardwareTelemetry": [
+                    {
+                        "requestId": sample.get("requestId"),
+                        **(sample.get("hardwareTelemetry") if isinstance(sample.get("hardwareTelemetry"), dict) else {}),
+                    }
+                    for sample in samples
+                ],
+                "tokenDetails": [
+                    {
+                        "requestId": sample.get("requestId"),
+                        "tokenDetailsAvailable": sample.get("tokenDetailsAvailable"),
+                        "tokenIdsAvailable": sample.get("tokenIdsAvailable"),
+                        "logprobsAvailable": sample.get("logprobsAvailable"),
+                        "tokenDetailCount": sample.get("tokenDetailCount"),
+                        "tokenDetailSource": sample.get("tokenDetailSource"),
                     }
                     for sample in samples
                 ],
@@ -1166,10 +1521,12 @@ def run_serving_producer(
             f"{serving_engine_label(engine['engine'])} producer sent {repetitions} "
             "OpenAI-compatible chat completion request(s) with x-performance-iq-* "
             "trace headers; default metrics come from client-side streaming SSE "
-            "timings, response usage fields, and native telemetry when exposed."
+            "timings, response usage fields, response token logprobs/IDs when "
+            "exposed, native telemetry when exposed, and DCGM hardware metrics "
+            "when a hardware metrics endpoint is configured."
         ),
         "limitations": [
-            "Serving producer captures client stream timing, request-path, usage, latency, and provenance; hardware-level power/kernel counters require engine-side or cluster instrumentation."
+            "Serving producer captures client stream timing, request-path, usage, latency, token logprobs/IDs when exposed, and provenance; hardware-level DCGM counters require a reachable DCGM/Prometheus metrics endpoint or configured hardware telemetry."
         ],
     }
     if not run_input["runtime"].get("imageTag"):
