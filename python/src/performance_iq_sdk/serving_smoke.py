@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
+import importlib
 import importlib.util
 import json
 import os
@@ -11,6 +13,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from typing import Any
@@ -18,10 +21,16 @@ from typing import Any
 from performance_iq_sdk.client import PerformanceIQ
 from performance_iq_sdk.producers.serving import (
     HttpPostJson,
+    HttpStreamJson,
     ServingEngineId,
     laptop_smoke_model,
     run_serving_producer,
     serving_engine_label,
+)
+from performance_iq_sdk.serving_receipts import (
+    REQUEST_RECEIPT_SCHEMA_VERSION,
+    load_receipts,
+    recording_proxy_server,
 )
 
 ENGINE_IDS: tuple[ServingEngineId, ...] = ("vllm", "sglang", "tensorrt-llm")
@@ -35,18 +44,33 @@ ENGINE_API_KEY_ENV = {
     "sglang": "PIQ_SGLANG_API_KEY",
     "tensorrt-llm": "PIQ_TENSORRT_LLM_API_KEY",
 }
-QUERY_NAMES = ("price_performance", "capacity_best", "campaign_provenance", "run_details")
+QUERY_NAMES = (
+    "price_performance",
+    "capacity_best",
+    "campaign_provenance",
+    "run_details",
+    "serving_request_samples",
+    "serving_token_timeline",
+)
 CAMPAIGN_ID_QUERY_COLUMN = {
     "campaign_provenance": 0,
     "run_details": 0,
+    "serving_request_samples": 0,
+    "serving_token_timeline": 0,
 }
 ENGINE_DEFAULT_PORT = {
     "vllm": 8000,
     "sglang": 30000,
     "tensorrt-llm": 8001,
 }
+PROOF_SCHEMA_VERSION = "performance-iq.serving-smoke-proof.v1"
+PROOF_VERIFICATION_SCHEMA_VERSION = "performance-iq.serving-smoke-proof-verification.v1"
+EVIDENCE_INDEX_SCHEMA_VERSION = "performance-iq.serving-evidence-index.v1"
+SERVING_SUMMARY_SCHEMA_VERSION = "performance-iq.serving-producer-summary.v1"
+PRODUCER_MANIFEST_SCHEMA_VERSION = "performance-iq.producer-manifest.v1"
 LOW_FREE_SPACE_BYTES = 30 * 1024 * 1024 * 1024
 SIZE_TIMEOUT_SECONDS = 15
+COMMAND_PROBE_TIMEOUT_SECONDS = 30
 
 
 def _utc_slug() -> str:
@@ -66,6 +90,17 @@ def _env(name: str, fallback: str | None = None) -> str | None:
     if value is None or not value.strip():
         return fallback
     return value.strip()
+
+
+def command_probe_timeout_seconds() -> float:
+    value = _env("PIQ_COMMAND_PROBE_TIMEOUT_SECONDS")
+    if value is None:
+        return COMMAND_PROBE_TIMEOUT_SECONDS
+    try:
+        timeout = float(value)
+    except ValueError:
+        return COMMAND_PROBE_TIMEOUT_SECONDS
+    return max(1.0, timeout)
 
 
 def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, Any]], list[str]]:
@@ -101,7 +136,7 @@ def command_probe(command: str, *args: str) -> dict[str, Any]:
             [path, *args],
             text=True,
             capture_output=True,
-            timeout=10,
+            timeout=command_probe_timeout_seconds(),
         )
     except Exception as exc:
         return {
@@ -129,6 +164,38 @@ def module_probe(module: str) -> dict[str, Any]:
         "available": spec is not None,
         "origin": spec.origin if spec else None,
     }
+
+
+def vllm_extension_probe() -> dict[str, Any]:
+    find_error = None
+    try:
+        spec = importlib.util.find_spec("vllm._C")
+    except ModuleNotFoundError as exc:
+        spec = None
+        find_error = str(exc)
+    result: dict[str, Any] = {
+        "module": "vllm._C",
+        "available": spec is not None,
+        "origin": spec.origin if spec else None,
+    }
+    if find_error:
+        result["findError"] = find_error
+    if spec is None:
+        return result
+    try:
+        importlib.import_module("vllm._C")
+        result["imported"] = True
+    except Exception as exc:
+        result["imported"] = False
+        result["importError"] = str(exc)
+        return result
+    try:
+        import torch  # type: ignore[import-not-found]
+
+        result["torchCInitCpuMemoryEnv"] = hasattr(torch.ops._C, "init_cpu_memory_env")
+    except Exception as exc:
+        result["torchProbeError"] = str(exc)
+    return result
 
 
 def storage_probe(path: str | None = None) -> dict[str, Any]:
@@ -291,6 +358,11 @@ def environment_diagnostics() -> dict[str, Any]:
         "PIQ_SGLANG_URL",
         "PIQ_TENSORRT_LLM_URL",
         "PIQ_TENSORRT_LLM_IMAGE",
+        "PIQ_PYTHON_BIN",
+        "PIQ_SERVING_BIN_DIR",
+        "PIQ_VLLM_SOURCE_PATH",
+        "PIQ_SGLANG_SOURCE_PATH",
+        "PIQ_COMMAND_PROBE_TIMEOUT_SECONDS",
         "HF_HOME",
         "HF_TOKEN",
         "HUGGING_FACE_HUB_TOKEN",
@@ -311,6 +383,10 @@ def real_engine_blockers(preflight: dict[str, Any], diagnostics: dict[str, Any])
     local = preflight.get("localRuntime", {})
     if not local.get("vllmModule", {}).get("available"):
         blockers.append("Python module 'vllm' is not importable in the smoke-runner Python environment.")
+    elif not local.get("vllmExtension", {}).get("available"):
+        blockers.append("Python module 'vllm' is importable, but compiled extension 'vllm._C' is missing.")
+    elif local.get("vllmExtension", {}).get("imported") is False:
+        blockers.append("Python module 'vllm._C' is present, but failed to import in the smoke-runner Python environment.")
     if not local.get("sglangModule", {}).get("available"):
         blockers.append("Python module 'sglang' is not importable in the smoke-runner Python environment.")
     if not local.get("tensorrtLlmServeCommand", {}).get("available"):
@@ -522,8 +598,10 @@ def runtime_preflight(engines: list[dict[str, Any]], missing_urls: list[str], mo
             "python": sys.executable,
         },
         "localRuntime": {
+            "commandProbeTimeoutSeconds": command_probe_timeout_seconds(),
             "vllmCommand": command_probe("vllm", "--version"),
             "vllmModule": module_probe("vllm"),
+            "vllmExtension": vllm_extension_probe(),
             "sglangModule": module_probe("sglang"),
             "tensorrtLlmServeCommand": command_probe("trtllm-serve", "--help"),
             "nvidiaSmiCommand": command_probe("nvidia-smi"),
@@ -531,8 +609,9 @@ def runtime_preflight(engines: list[dict[str, Any]], missing_urls: list[str], mo
         "storage": storage_probe(),
         "missingEngineUrls": missing_urls,
         "endpoints": endpoint_results,
+        "configuredEngineCount": len(endpoint_results),
         "launchPlan": runtime_launch_plan(model or laptop_smoke_model()),
-        "ready": not missing_urls and all(item.get("ok") for item in endpoint_results),
+        "ready": bool(endpoint_results) and not missing_urls and all(item.get("ok") for item in endpoint_results),
     }
 
 
@@ -553,7 +632,12 @@ def attach_endpoint_preflight(engines: list[dict[str, Any]], preflight: dict[str
     ]
 
 
-def query_dashboard(base_url: str, token: str | None = None) -> dict[str, Any]:
+def _dashboard_rows(body: dict[str, Any], name: str) -> list[Any]:
+    rows = body.get(name, {}).get("rows", [])
+    return rows if isinstance(rows, list) else []
+
+
+def query_dashboard(base_url: str, token: str | None = None, campaign_ids: list[str] | None = None) -> dict[str, Any]:
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/api/store/queries",
         data=json.dumps({"queries": list(QUERY_NAMES)}).encode("utf-8"),
@@ -565,29 +649,732 @@ def query_dashboard(base_url: str, token: str | None = None) -> dict[str, Any]:
     )
     with urllib.request.urlopen(request, timeout=60) as response:
         body = json.loads(response.read().decode("utf-8"))
+        rows = {name: _dashboard_rows(body, name) for name in QUERY_NAMES if name in body}
         surface_campaign_ids = {
             name: sorted({
                 row[index]
-                for row in body.get(name, {}).get("rows", [])
+                for row in rows.get(name, [])
                 if len(row) > index and isinstance(row[index], str)
             })
             for name, index in CAMPAIGN_ID_QUERY_COLUMN.items()
         }
+        submitted_campaign_ids = set(campaign_ids or [])
+        submitted_campaign_rows = {
+            name: [
+                row for row in rows.get(name, [])
+                if len(row) > index and row[index] in submitted_campaign_ids
+            ]
+            for name, index in CAMPAIGN_ID_QUERY_COLUMN.items()
+        } if submitted_campaign_ids else {}
         return {
             "storeProvider": response.headers.get("x-piq-store-provider"),
             "rowCounts": {name: body[name]["rowCount"] for name in QUERY_NAMES if name in body},
+            "rows": rows,
             "campaignIds": surface_campaign_ids.get("campaign_provenance", []),
             "surfaceCampaignIds": surface_campaign_ids,
+            "submittedCampaignRows": submitted_campaign_rows,
             "runtimeFrameworks": sorted({
                 row[2]
-                for row in body.get("price_performance", {}).get("rows", [])
+                for row in rows.get("price_performance", [])
                 if len(row) > 2
             }),
         }
 
 
+def sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _unique_candidates(candidates: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for candidate in candidates:
+        absolute = os.path.abspath(candidate)
+        if absolute not in seen:
+            unique.append(absolute)
+            seen.add(absolute)
+    return unique
+
+
+def _resolve_proof_member_path(path: Any, proof_dir: str) -> str:
+    if not isinstance(path, str) or not path:
+        return ""
+    if os.path.isabs(path):
+        return path
+    candidates = _unique_candidates([
+        path,
+        os.path.join(proof_dir, path),
+        os.path.join(proof_dir, os.path.basename(path)),
+    ])
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[0]
+
+
+def _load_json_file(path: str, errors: list[str], label: str) -> dict[str, Any] | None:
+    if not path:
+        errors.append(f"{label} path is missing.")
+        return None
+    if not os.path.exists(path):
+        errors.append(f"{label} does not exist: {path}")
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        errors.append(f"{label} is not readable JSON: {exc}")
+        return None
+    if not isinstance(value, dict):
+        errors.append(f"{label} must be a JSON object.")
+        return None
+    return value
+
+
+def _read_json_object(path: str | None) -> dict[str, Any]:
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _number(value: Any) -> float:
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _successful_status(value: Any) -> bool:
+    return isinstance(value, int) and 200 <= value < 300
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_positive_number(value: Any) -> bool:
+    return _is_number(value) and value > 0
+
+
+def _receipts_by_engine_and_request_id(receipts: list[dict[str, Any]]) -> dict[str, dict[str, dict[str, Any]]]:
+    by_engine: dict[str, dict[str, dict[str, Any]]] = {}
+    for receipt in receipts:
+        if receipt.get("schemaVersion") != REQUEST_RECEIPT_SCHEMA_VERSION:
+            continue
+        engine = receipt.get("engine")
+        request_id = receipt.get("requestId")
+        if isinstance(engine, str) and isinstance(request_id, str) and request_id:
+            by_engine.setdefault(engine, {})[request_id] = receipt
+    return by_engine
+
+
+def _validate_measurement_row(
+    *,
+    engine: str,
+    row: dict[str, Any],
+    expected_model: str | None,
+    expected_framework: str,
+    request_count: int | None,
+    success_count: int | None,
+    errors: list[str],
+) -> None:
+    expected_values = {
+        "surface": "result",
+        "model": expected_model,
+        "runtimeFramework": expected_framework,
+        "runtimeEngine": engine,
+        "basis": "per_engine",
+        "experimentFamily": "serving-producer",
+        "experimentStatus": "accepted",
+        "verdictTier": "request-captured",
+    }
+    for key, expected in expected_values.items():
+        if expected is not None and row.get(key) != expected:
+            errors.append(f"{engine} measurement {key} must be {expected}.")
+    if isinstance(request_count, int) and row.get("requestCount") != request_count:
+        errors.append(f"{engine} measurement requestCount must match proof submission.")
+    if isinstance(success_count, int) and row.get("successCount") != success_count:
+        errors.append(f"{engine} measurement successCount must match proof submission.")
+    if row.get("errorCount") not in (0, 0.0):
+        errors.append(f"{engine} measurement errorCount must be zero.")
+
+    for key in ["promptTokens", "completionTokens", "totalTokens", "outputTpm", "totalTpm"]:
+        if not _is_positive_number(row.get(key)):
+            errors.append(f"{engine} measurement {key} must be a positive number.")
+    for key in ["avgLatencyMs", "p95LatencyMs", "p50LatencyMs", "p99LatencyMs", "avgTtftMs", "avgTpotMs", "avgTtfotMs"]:
+        if not _is_number(row.get(key)) or row.get(key) < 0:
+            errors.append(f"{engine} measurement {key} must be a non-negative number.")
+    if not _is_number(row.get("metricCompleteness")) or not 0 <= row.get("metricCompleteness") <= 1:
+        errors.append(f"{engine} measurement metricCompleteness must be between 0 and 1.")
+
+    for key in ["operatingPoint", "latestCapturedAtUtc", "solRigor", "tags"]:
+        if not isinstance(row.get(key), str) or not row.get(key):
+            errors.append(f"{engine} measurement {key} is required.")
+    tags = str(row.get("tags") or "")
+    for fragment in ["serving-producer", engine, expected_framework, str(expected_model or "")]:
+        if fragment and fragment not in tags:
+            errors.append(f"{engine} measurement tags must include {fragment}.")
+
+
+def build_evidence_index(summary: dict[str, Any]) -> dict[str, Any]:
+    receipt_ids = receipt_ids_by_engine_safe(str(summary.get("receiptLogPath") or ""))
+    dashboard = summary.get("dashboard") if isinstance(summary.get("dashboard"), dict) else {}
+    submitted_rows = dashboard.get("submittedCampaignRows") if isinstance(dashboard.get("submittedCampaignRows"), dict) else {}
+    row_counts = dashboard.get("rowCounts") if isinstance(dashboard.get("rowCounts"), dict) else {}
+    engines: dict[str, Any] = {}
+    for submission in summary.get("submissions", []):
+        if not isinstance(submission, dict) or submission.get("engine") not in ENGINE_IDS:
+            continue
+        engine = str(submission["engine"])
+        artifact = _read_json_object(str(submission.get("artifactPath") or ""))
+        manifest = _read_json_object(str(submission.get("manifestPath") or ""))
+        samples = artifact.get("samples") if isinstance(artifact.get("samples"), list) else []
+        measurements = artifact.get("measurements") if isinstance(artifact.get("measurements"), list) else []
+        measurement = measurements[0] if measurements and isinstance(measurements[0], dict) else {}
+        request_trace_ids = [
+            sample["requestId"]
+            for sample in samples
+            if isinstance(sample, dict) and isinstance(sample.get("requestId"), str)
+        ]
+        campaign_id = str(submission.get("campaignId") or "")
+        dashboard_surfaces = {}
+        for name, index in CAMPAIGN_ID_QUERY_COLUMN.items():
+            rows = [
+                row for row in submitted_rows.get(name, [])
+                if isinstance(row, list) and len(row) > index and row[index] == campaign_id
+            ]
+            dashboard_surfaces[name] = {
+                "rowCount": len(rows),
+                "submittedRows": rows,
+            }
+        engines[engine] = {
+            "runtimeFramework": submission.get("runtimeFramework"),
+            "campaignId": submission.get("campaignId"),
+            "runId": submission.get("runId"),
+            "requestCount": submission.get("requestCount"),
+            "successCount": submission.get("successCount"),
+            "artifact": {
+                "path": submission.get("artifactPath"),
+                "sha256": submission.get("artifactSha256"),
+                "schemaVersion": artifact.get("schemaVersion"),
+            },
+            "manifest": {
+                "path": submission.get("manifestPath"),
+                "schemaVersion": manifest.get("schemaVersion"),
+            },
+            "requestTraceIds": request_trace_ids,
+            "receiptIds": sorted(receipt_ids.get(engine, set())),
+            "measurement": {
+                key: measurement.get(key)
+                for key in [
+                    "model",
+                    "runtimeFramework",
+                    "runtimeEngine",
+                    "requestCount",
+                    "successCount",
+                    "promptTokens",
+                    "completionTokens",
+                    "totalTokens",
+                    "outputTpm",
+                    "totalTpm",
+                    "avgLatencyMs",
+                    "p50LatencyMs",
+                    "p95LatencyMs",
+                    "p99LatencyMs",
+                    "avgTtftMs",
+                    "avgTpotMs",
+                    "avgTtfotMs",
+                    "metricCompleteness",
+                    "tags",
+                ]
+                if key in measurement
+            },
+            "dashboard": {
+                "rowCounts": dict(row_counts),
+                "surfaces": dashboard_surfaces,
+            },
+        }
+    return {
+        "schemaVersion": EVIDENCE_INDEX_SCHEMA_VERSION,
+        "model": summary.get("model"),
+        "engines": engines,
+    }
+
+
+def receipt_ids_by_engine_safe(receipt_log_path: str) -> dict[str, set[str]]:
+    if not receipt_log_path or not os.path.exists(receipt_log_path):
+        return {}
+    try:
+        receipts = load_receipts(receipt_log_path)
+    except ValueError:
+        return {}
+    return {
+        engine: set(receipts_by_request.keys())
+        for engine, receipts_by_request in _receipts_by_engine_and_request_id(receipts).items()
+    }
+
+
+def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -> dict[str, Any]:
+    proof_abs = os.path.abspath(proof_path)
+    proof_dir = os.path.dirname(proof_abs)
+    errors: list[str] = []
+    warnings: list[str] = []
+    artifact_hashes: dict[str, str] = {}
+    campaign_ids: list[str] = []
+    receipt_counts: dict[str, int] = {}
+
+    proof = _load_json_file(proof_abs, errors, "proof summary")
+    if not proof:
+        return {
+            "schemaVersion": PROOF_VERIFICATION_SCHEMA_VERSION,
+            "proofPath": proof_abs,
+            "ok": False,
+            "errors": errors,
+            "warnings": warnings,
+            "engineCount": 0,
+            "campaignIds": campaign_ids,
+            "artifactHashes": artifact_hashes,
+        }
+
+    if proof.get("schemaVersion") != PROOF_SCHEMA_VERSION:
+        errors.append(f"proof schemaVersion must be {PROOF_SCHEMA_VERSION}.")
+
+    expected_model = proof.get("model")
+    if not isinstance(expected_model, str) or not expected_model:
+        errors.append("proof model is required.")
+
+    submissions = proof.get("submissions")
+    if not isinstance(submissions, list) or not submissions:
+        errors.append("proof submissions must contain at least one item.")
+        submissions = []
+
+    submissions_by_engine: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(submissions):
+        if not isinstance(item, dict):
+            errors.append(f"submissions[{index}] must be an object.")
+            continue
+        engine = item.get("engine")
+        if engine not in ENGINE_IDS:
+            errors.append(f"submissions[{index}].engine must be one of {', '.join(ENGINE_IDS)}.")
+            continue
+        if engine in submissions_by_engine:
+            errors.append(f"duplicate submission for engine {engine}.")
+            continue
+        submissions_by_engine[engine] = item
+
+    expected_engines = list(ENGINE_IDS) if require_all_engines else list(submissions_by_engine.keys())
+    if require_all_engines:
+        missing = [engine for engine in ENGINE_IDS if engine not in submissions_by_engine]
+        if missing:
+            errors.append("proof is missing required engine submissions: " + ", ".join(missing) + ".")
+
+    evidence_index = proof.get("evidenceIndex")
+    evidence_engines: dict[str, Any] = {}
+    if not isinstance(evidence_index, dict):
+        errors.append("proof evidenceIndex is required.")
+    else:
+        if evidence_index.get("schemaVersion") != EVIDENCE_INDEX_SCHEMA_VERSION:
+            errors.append(f"proof evidenceIndex schemaVersion must be {EVIDENCE_INDEX_SCHEMA_VERSION}.")
+        if evidence_index.get("model") != expected_model:
+            errors.append("proof evidenceIndex model must match proof model.")
+        raw_engines = evidence_index.get("engines")
+        if isinstance(raw_engines, dict):
+            evidence_engines = raw_engines
+        else:
+            errors.append("proof evidenceIndex.engines must be an object.")
+
+    receipt_log_path = _resolve_proof_member_path(proof.get("receiptLogPath"), proof_dir)
+    receipt_by_engine: dict[str, dict[str, dict[str, Any]]] = {}
+    if not receipt_log_path:
+        errors.append("proof receiptLogPath is required for request receipt verification.")
+    elif not os.path.exists(receipt_log_path):
+        errors.append(f"receipt log does not exist: {receipt_log_path}")
+    else:
+        try:
+            receipts = load_receipts(receipt_log_path)
+            receipt_by_engine = _receipts_by_engine_and_request_id(receipts)
+            receipt_counts = {
+                engine: len(receipt_by_engine.get(engine, {}))
+                for engine in ENGINE_IDS
+            }
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    preflight = proof.get("preflight")
+    endpoint_preflight_by_engine: dict[str, dict[str, Any]] = {}
+    if not isinstance(preflight, dict):
+        errors.append("proof preflight object is required.")
+    else:
+        if preflight.get("ready") is not True:
+            errors.append("proof preflight.ready must be true.")
+        endpoints = preflight.get("endpoints")
+        if not isinstance(endpoints, list):
+            errors.append("proof preflight.endpoints must be a list.")
+        else:
+            for index, item in enumerate(endpoints):
+                if not isinstance(item, dict):
+                    errors.append(f"preflight.endpoints[{index}] must be an object.")
+                    continue
+                engine = item.get("engine")
+                if engine in ENGINE_IDS:
+                    endpoint_preflight_by_engine[str(engine)] = item
+            for engine in expected_engines:
+                item = endpoint_preflight_by_engine.get(engine)
+                if not item:
+                    errors.append(f"preflight is missing endpoint evidence for {engine}.")
+                    continue
+                if item.get("ok") is not True:
+                    errors.append(f"{engine} preflight endpoint is not ok.")
+                if item.get("modelAvailable") is not True:
+                    errors.append(f"{engine} preflight did not prove the smoke model is available.")
+                served_models = item.get("servedModels")
+                if isinstance(served_models, list) and expected_model and expected_model not in served_models:
+                    errors.append(f"{engine} preflight servedModels does not include {expected_model}.")
+
+    for engine, submission in submissions_by_engine.items():
+        expected_framework = serving_engine_label(engine)
+        evidence = evidence_engines.get(engine) if isinstance(evidence_engines.get(engine), dict) else None
+        if evidence is None:
+            errors.append(f"{engine} evidenceIndex entry is required.")
+        request_count = submission.get("requestCount")
+        success_count = submission.get("successCount")
+        if not isinstance(request_count, int) or request_count < 1:
+            errors.append(f"{engine} requestCount must be a positive integer.")
+        if success_count != request_count:
+            errors.append(f"{engine} successCount must equal requestCount.")
+        if submission.get("errorCount") not in (0, 0.0):
+            errors.append(f"{engine} errorCount must be zero.")
+        if submission.get("errors"):
+            errors.append(f"{engine} submission includes request errors.")
+        if submission.get("status") != "accepted":
+            errors.append(f"{engine} submission status must be accepted.")
+        if submission.get("runtimeFramework") != expected_framework:
+            errors.append(f"{engine} runtimeFramework must be {expected_framework}.")
+        if evidence:
+            for key in ["runtimeFramework", "campaignId", "runId", "requestCount", "successCount"]:
+                if evidence.get(key) != submission.get(key):
+                    errors.append(f"{engine} evidenceIndex {key} must match proof submission.")
+            evidence_artifact = evidence.get("artifact") if isinstance(evidence.get("artifact"), dict) else {}
+            if evidence_artifact.get("path") != submission.get("artifactPath"):
+                errors.append(f"{engine} evidenceIndex artifact.path must match proof submission.")
+            if evidence_artifact.get("sha256") != submission.get("artifactSha256"):
+                errors.append(f"{engine} evidenceIndex artifact.sha256 must match proof submission.")
+            evidence_manifest = evidence.get("manifest") if isinstance(evidence.get("manifest"), dict) else {}
+            if evidence_manifest.get("path") != submission.get("manifestPath"):
+                errors.append(f"{engine} evidenceIndex manifest.path must match proof submission.")
+
+        campaign_id = submission.get("campaignId")
+        run_id = submission.get("runId")
+        if isinstance(campaign_id, str) and campaign_id:
+            campaign_ids.append(campaign_id)
+        else:
+            errors.append(f"{engine} campaignId is required.")
+        if not isinstance(run_id, str) or not run_id:
+            errors.append(f"{engine} runId is required.")
+
+        artifact_path = _resolve_proof_member_path(submission.get("artifactPath"), proof_dir)
+        manifest_path = _resolve_proof_member_path(submission.get("manifestPath"), proof_dir)
+        artifact_sha = submission.get("artifactSha256")
+        manifest_artifacts: list[Any] = []
+        if not isinstance(artifact_sha, str) or len(artifact_sha) != 64:
+            errors.append(f"{engine} artifactSha256 must be a 64-character hex digest.")
+
+        artifact = _load_json_file(artifact_path, errors, f"{engine} summary artifact")
+        if artifact_path and os.path.exists(artifact_path):
+            computed_sha = sha256_file(artifact_path)
+            artifact_hashes[engine] = computed_sha
+            if artifact_sha != computed_sha:
+                errors.append(f"{engine} artifactSha256 does not match artifact contents.")
+
+        manifest = _load_json_file(manifest_path, errors, f"{engine} manifest")
+        if manifest:
+            if manifest.get("schemaVersion") != PRODUCER_MANIFEST_SCHEMA_VERSION:
+                errors.append(f"{engine} manifest schemaVersion must be {PRODUCER_MANIFEST_SCHEMA_VERSION}.")
+            manifest_campaign = manifest.get("campaign") if isinstance(manifest.get("campaign"), dict) else {}
+            if manifest_campaign.get("campaignId") != campaign_id:
+                errors.append(f"{engine} manifest campaignId does not match proof submission.")
+            if manifest_campaign.get("runId") != run_id:
+                errors.append(f"{engine} manifest runId does not match proof submission.")
+            manifest_workload = manifest.get("workload") if isinstance(manifest.get("workload"), dict) else {}
+            if expected_model and manifest_workload.get("model") != expected_model:
+                errors.append(f"{engine} manifest workload.model does not match proof model.")
+            manifest_runtime = manifest.get("runtime") if isinstance(manifest.get("runtime"), dict) else {}
+            if manifest_runtime.get("framework") != expected_framework:
+                errors.append(f"{engine} manifest runtime.framework must be {expected_framework}.")
+            manifest_platform = manifest.get("platform") if isinstance(manifest.get("platform"), dict) else {}
+            trace_ids = manifest_platform.get("requestTraceIds")
+            if not isinstance(trace_ids, list) or len(trace_ids) != request_count:
+                errors.append(f"{engine} manifest platform.requestTraceIds must match requestCount.")
+            manifest_artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), list) else []
+            first_artifact = manifest_artifacts[0] if isinstance(manifest_artifacts, list) and manifest_artifacts else {}
+            if not isinstance(first_artifact, dict):
+                errors.append(f"{engine} manifest must include an artifact entry.")
+            else:
+                if first_artifact.get("path") != submission.get("artifactPath"):
+                    errors.append(f"{engine} manifest artifact path does not match proof submission.")
+                if first_artifact.get("sha256") != artifact_sha:
+                    errors.append(f"{engine} manifest artifact sha256 does not match proof submission.")
+
+        if artifact:
+            if artifact.get("schemaVersion") != SERVING_SUMMARY_SCHEMA_VERSION:
+                errors.append(f"{engine} summary artifact schemaVersion must be {SERVING_SUMMARY_SCHEMA_VERSION}.")
+            if artifact.get("engine") != engine:
+                errors.append(f"{engine} summary artifact engine does not match proof submission.")
+            if expected_model and artifact.get("model") != expected_model:
+                errors.append(f"{engine} summary artifact model does not match proof model.")
+            artifact_preflight = artifact.get("endpointPreflight")
+            if not isinstance(artifact_preflight, dict):
+                errors.append(f"{engine} summary artifact is missing endpointPreflight.")
+            else:
+                if artifact_preflight.get("ok") is not True:
+                    errors.append(f"{engine} summary artifact endpointPreflight.ok must be true.")
+                if artifact_preflight.get("modelAvailable") is not True:
+                    errors.append(f"{engine} summary artifact endpointPreflight.modelAvailable must be true.")
+            samples = artifact.get("samples")
+            request_path = artifact.get("requestPath") or "/v1/chat/completions"
+            if not isinstance(samples, list):
+                errors.append(f"{engine} summary artifact samples must be a list.")
+            else:
+                if isinstance(request_count, int) and len(samples) != request_count:
+                    errors.append(f"{engine} sample count does not match requestCount.")
+                if sum(1 for sample in samples if isinstance(sample, dict) and sample.get("ok")) != success_count:
+                    errors.append(f"{engine} successful sample count does not match successCount.")
+                sample_trace_ids = []
+                for index, sample in enumerate(samples):
+                    if not isinstance(sample, dict):
+                        errors.append(f"{engine} samples[{index}] must be an object.")
+                        continue
+                    request_id = sample.get("requestId")
+                    if not isinstance(request_id, str) or not request_id:
+                        errors.append(f"{engine} samples[{index}].requestId is required.")
+                    else:
+                        sample_trace_ids.append(request_id)
+                    if not isinstance(sample.get("endpoint"), str) or not sample.get("endpoint"):
+                        errors.append(f"{engine} samples[{index}].endpoint is required.")
+                    if sample.get("streaming") is not True:
+                        errors.append(f"{engine} samples[{index}].streaming must be true for serving telemetry proof.")
+                    for key in ["e2eLatencyMs", "timeToFirstByteMs", "ttftMs", "ttfotMs", "tpotMs"]:
+                        if not _is_number(sample.get(key)) or sample.get(key) < 0:
+                            errors.append(f"{engine} samples[{index}].{key} must be a non-negative number.")
+                    if not isinstance(sample.get("ttftSource"), str) or not sample.get("ttftSource"):
+                        errors.append(f"{engine} samples[{index}].ttftSource is required.")
+                    if sample.get("tokenCountSource") not in {"response-usage", "client-estimate"}:
+                        errors.append(f"{engine} samples[{index}].tokenCountSource must describe token count provenance.")
+                    if not _is_positive_number(sample.get("outputTokenCount")):
+                        errors.append(f"{engine} samples[{index}].outputTokenCount must be a positive number.")
+                    if not isinstance(sample.get("promptSha256"), str) or len(sample.get("promptSha256")) != 64:
+                        errors.append(f"{engine} samples[{index}].promptSha256 must be a 64-character hex digest.")
+                    if not isinstance(sample.get("outputSha256"), str) or len(sample.get("outputSha256")) != 64:
+                        errors.append(f"{engine} samples[{index}].outputSha256 must be a 64-character hex digest.")
+                    receipt = receipt_by_engine.get(engine, {}).get(str(request_id))
+                    if not receipt:
+                        continue
+                    if receipt.get("method") != "POST":
+                        errors.append(f"{engine} receipt {request_id} must be a POST request.")
+                    if receipt.get("path") != request_path:
+                        errors.append(f"{engine} receipt {request_id} path must be {request_path}.")
+                    if not _successful_status(receipt.get("status")):
+                        errors.append(f"{engine} receipt {request_id} must have a successful 2xx status.")
+                    if receipt.get("campaignId") != campaign_id:
+                        errors.append(f"{engine} receipt {request_id} campaignId does not match proof submission.")
+                    if receipt.get("runId") != run_id:
+                        errors.append(f"{engine} receipt {request_id} runId does not match proof submission.")
+                if manifest and isinstance(trace_ids, list) and sample_trace_ids != trace_ids:
+                    errors.append(f"{engine} sample requestIds must match manifest platform.requestTraceIds.")
+                missing_receipts = sorted(set(sample_trace_ids) - set(receipt_by_engine.get(engine, {}).keys()))
+                if missing_receipts:
+                    errors.append(f"{engine} receipt log is missing requestIds: {', '.join(missing_receipts)}.")
+                if evidence:
+                    if evidence.get("requestTraceIds") != sample_trace_ids:
+                        errors.append(f"{engine} evidenceIndex requestTraceIds must match sample requestIds.")
+                    if sorted(evidence.get("receiptIds") or []) != sorted(sample_trace_ids):
+                        errors.append(f"{engine} evidenceIndex receiptIds must match sample requestIds.")
+            request_trace = artifact.get("requestTrace")
+            if not isinstance(request_trace, list) or len(request_trace) != request_count:
+                errors.append(f"{engine} summary artifact requestTrace must match requestCount.")
+            token_timeline = artifact.get("tokenTimeline")
+            if not isinstance(token_timeline, list) or not token_timeline:
+                errors.append(f"{engine} summary artifact tokenTimeline must include streaming chunk rows.")
+            capture_policy = artifact.get("capturePolicy") if isinstance(artifact.get("capturePolicy"), dict) else {}
+            if capture_policy.get("mode") != "operator-full":
+                errors.append(f"{engine} summary artifact capturePolicy.mode must be operator-full.")
+            raw_artifact_path = _resolve_proof_member_path(capture_policy.get("rawArtifactPath"), proof_dir)
+            if not raw_artifact_path or not os.path.exists(raw_artifact_path):
+                errors.append(f"{engine} operator-full raw artifact is required.")
+            raw_manifest_artifacts = [
+                item for item in manifest_artifacts
+                if isinstance(item, dict) and item.get("kind") == "operator-full-serving-raw"
+            ]
+            if not raw_manifest_artifacts:
+                errors.append(f"{engine} manifest must include an operator-full-serving-raw artifact.")
+            elif raw_manifest_artifacts[0].get("path") != capture_policy.get("rawArtifactPath"):
+                errors.append(f"{engine} manifest raw artifact path must match summary capturePolicy.")
+            measurements = artifact.get("measurements")
+            if not isinstance(measurements, list) or not measurements:
+                errors.append(f"{engine} summary artifact measurements must be non-empty.")
+            else:
+                first_measurement = measurements[0]
+                if not isinstance(first_measurement, dict):
+                    errors.append(f"{engine} summary artifact measurements[0] must be an object.")
+                else:
+                    _validate_measurement_row(
+                        engine=engine,
+                        row=first_measurement,
+                        expected_model=expected_model if isinstance(expected_model, str) else None,
+                        expected_framework=expected_framework,
+                        request_count=request_count if isinstance(request_count, int) else None,
+                        success_count=success_count if isinstance(success_count, int) else None,
+                        errors=errors,
+                    )
+                    if evidence:
+                        evidence_measurement = evidence.get("measurement") if isinstance(evidence.get("measurement"), dict) else {}
+                        for key in ["outputTpm", "totalTpm", "avgLatencyMs", "avgTtftMs", "avgTpotMs", "avgTtfotMs", "p95LatencyMs", "metricCompleteness"]:
+                            if evidence_measurement.get(key) != first_measurement.get(key):
+                                errors.append(f"{engine} evidenceIndex measurement {key} must match summary artifact.")
+
+    dashboard = proof.get("dashboard")
+    if not isinstance(dashboard, dict):
+        errors.append("proof dashboard object is required.")
+    else:
+        row_counts = dashboard.get("rowCounts") if isinstance(dashboard.get("rowCounts"), dict) else {}
+        dashboard_rows = dashboard.get("rows") if isinstance(dashboard.get("rows"), dict) else {}
+        expected_count = len(expected_engines)
+        for name in QUERY_NAMES:
+            if _number(row_counts.get(name)) < expected_count:
+                errors.append(f"dashboard {name} rowCount must be at least {expected_count}.")
+            rows = dashboard_rows.get(name) if isinstance(dashboard_rows, dict) else None
+            if not isinstance(rows, list) or not rows:
+                errors.append(f"dashboard {name} rows must include inspectable row data.")
+        surface_campaign_ids = dashboard.get("surfaceCampaignIds")
+        if not isinstance(surface_campaign_ids, dict):
+            errors.append("dashboard surfaceCampaignIds is required.")
+        else:
+            required_campaign_ids = set(campaign_ids)
+            for name in CAMPAIGN_ID_QUERY_COLUMN:
+                ids = surface_campaign_ids.get(name)
+                if not isinstance(ids, list) or not required_campaign_ids.issubset(set(ids)):
+                    errors.append(f"dashboard {name} is missing submitted campaign IDs.")
+        submitted_campaign_rows = dashboard.get("submittedCampaignRows")
+        if not isinstance(submitted_campaign_rows, dict):
+            errors.append("dashboard submittedCampaignRows is required.")
+        else:
+            required_campaign_ids = set(campaign_ids)
+            for name, index in CAMPAIGN_ID_QUERY_COLUMN.items():
+                rows = submitted_campaign_rows.get(name)
+                if not isinstance(rows, list):
+                    errors.append(f"dashboard {name} submittedCampaignRows must be a list.")
+                    continue
+                row_campaign_ids = {
+                    row[index]
+                    for row in rows
+                    if isinstance(row, list) and len(row) > index and isinstance(row[index], str)
+                }
+                if not required_campaign_ids.issubset(row_campaign_ids):
+                    errors.append(f"dashboard {name} submittedCampaignRows is missing submitted campaign rows.")
+        for engine, submission in submissions_by_engine.items():
+            evidence = evidence_engines.get(engine) if isinstance(evidence_engines.get(engine), dict) else None
+            if not evidence:
+                continue
+            evidence_dashboard = evidence.get("dashboard") if isinstance(evidence.get("dashboard"), dict) else {}
+            evidence_surfaces = evidence_dashboard.get("surfaces") if isinstance(evidence_dashboard.get("surfaces"), dict) else {}
+            for name in CAMPAIGN_ID_QUERY_COLUMN:
+                surface = evidence_surfaces.get(name) if isinstance(evidence_surfaces.get(name), dict) else {}
+                rows = surface.get("submittedRows")
+                if not isinstance(rows, list) or not rows:
+                    errors.append(f"{engine} evidenceIndex dashboard {name} must include submitted rows.")
+        runtime_frameworks = dashboard.get("runtimeFrameworks")
+        expected_frameworks = {serving_engine_label(engine) for engine in expected_engines}
+        if not isinstance(runtime_frameworks, list) or not expected_frameworks.issubset(set(runtime_frameworks)):
+            errors.append("dashboard runtimeFrameworks is missing submitted serving frameworks.")
+
+    return {
+        "schemaVersion": PROOF_VERIFICATION_SCHEMA_VERSION,
+        "proofPath": proof_abs,
+        "ok": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "engineCount": len(submissions_by_engine),
+        "requiredEngines": expected_engines,
+        "campaignIds": sorted(campaign_ids),
+        "artifactHashes": artifact_hashes,
+        "receiptLogPath": receipt_log_path or None,
+        "receiptCounts": receipt_counts,
+        "dashboard": proof.get("dashboard") if isinstance(proof.get("dashboard"), dict) else None,
+    }
+
+
 def default_proof_summary_path(artifact_dir: str, run_suffix: str) -> str:
     return os.path.join(artifact_dir, f"serving-smoke-proof-{_safe_slug(run_suffix)}.json")
+
+
+def default_receipt_log_path(artifact_dir: str, run_suffix: str) -> str:
+    return os.path.join(artifact_dir, f"serving-request-receipts-{_safe_slug(run_suffix)}.jsonl")
+
+
+def start_recording_proxies(
+    engines: list[dict[str, Any]],
+    receipt_log: str,
+    listen_host: str = "127.0.0.1",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    proxied_engines: list[dict[str, Any]] = []
+    proxies: list[dict[str, Any]] = []
+    for engine in engines:
+        server = recording_proxy_server(
+            engine=engine["engine"],
+            target_base_url=engine["baseUrl"],
+            receipt_log=receipt_log,
+            listen_host=listen_host,
+            listen_port=0,
+        )
+        host, port = server.server_address
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        proxy_url = f"http://{host}:{port}"
+        proxies.append({
+            "engine": engine["engine"],
+            "listenUrl": proxy_url,
+            "targetBaseUrl": engine["baseUrl"],
+            "receiptLogPath": receipt_log,
+            "server": server,
+            "thread": thread,
+        })
+        proxied_engines.append({
+            **engine,
+            "upstreamBaseUrl": engine["baseUrl"],
+            "baseUrl": proxy_url,
+            "receiptProxy": {
+                "listenUrl": proxy_url,
+                "targetBaseUrl": engine["baseUrl"],
+                "receiptLogPath": receipt_log,
+            },
+        })
+    return proxied_engines, proxies
+
+
+def stop_recording_proxies(proxies: list[dict[str, Any]]) -> None:
+    for proxy in proxies:
+        proxy["server"].shutdown()
+    for proxy in proxies:
+        proxy["server"].server_close()
+        proxy["thread"].join(timeout=2)
+
+
+def proxy_summary(proxies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "engine": proxy["engine"],
+            "listenUrl": proxy["listenUrl"],
+            "targetBaseUrl": proxy["targetBaseUrl"],
+            "receiptLogPath": proxy["receiptLogPath"],
+        }
+        for proxy in proxies
+    ]
 
 
 def write_proof_summary(summary: dict[str, Any], artifact_dir: str, summary_out: str | None = None) -> str:
@@ -596,9 +1383,10 @@ def write_proof_summary(summary: dict[str, Any], artifact_dir: str, summary_out:
     if parent:
         os.makedirs(parent, exist_ok=True)
     summary["proofSummaryPath"] = proof_path
+    summary.setdefault("evidenceIndex", build_evidence_index(summary))
     body = {
         **summary,
-        "schemaVersion": "performance-iq.serving-smoke-proof.v1",
+        "schemaVersion": PROOF_SCHEMA_VERSION,
         "smokeSummarySchemaVersion": summary.get("schemaVersion"),
         "writtenAtUtc": _utc_now_iso(),
     }
@@ -623,6 +1411,7 @@ def run_serving_smoke(
     run_suffix: str | None = None,
     submit: bool = True,
     http_post_json: HttpPostJson | None = None,
+    http_stream_json: HttpStreamJson | None = None,
 ) -> dict[str, Any]:
     suffix = run_suffix or _utc_slug()
     submissions: list[dict[str, Any]] = []
@@ -652,6 +1441,7 @@ def run_serving_smoke(
             },
             pricing=pricing,
             http_post_json=http_post_json,
+            http_stream_json=http_stream_json,
         )
         submissions.append({
             "engine": engine_id,
@@ -701,18 +1491,26 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-tag")
     parser.add_argument("--run-suffix", default=_env("PIQ_SERVING_RUN_SUFFIX"))
     parser.add_argument("--summary-out", default=_env("PIQ_SERVING_SUMMARY_OUT"), help="Write the overall smoke proof summary to this JSON path.")
+    parser.add_argument("--receipt-log", default=_env("PIQ_SERVING_RECEIPT_LOG"), help="JSONL receipt log produced by the serving request recorder.")
+    parser.add_argument("--record-receipts", action="store_true", help="Start in-process receipt proxies and route engine traffic through them.")
+    parser.add_argument("--receipt-proxy-host", default=_env("PIQ_SERVING_RECEIPT_PROXY_HOST", "127.0.0.1"))
     parser.add_argument("--no-submit", action="store_true", help="Capture artifacts and manifests without submitting to Performance IQ.")
     parser.add_argument("--query-dashboard", action="store_true", help="Query fixed dashboard surfaces after submission.")
     parser.add_argument("--allow-missing-engines", action="store_true", help="Run configured engines only instead of requiring all three URLs.")
     parser.add_argument("--preflight-only", action="store_true", help="Report local runtime and endpoint readiness without sending completion requests.")
     parser.add_argument("--diagnostics-only", action="store_true", help="Report read-only host, cache, port, and endpoint diagnostics for real engine setup.")
     parser.add_argument("--launch-plan-only", action="store_true", help="Print host-aware launch commands for the three serving engines.")
+    parser.add_argument("--verify-proof", help="Verify a saved serving smoke proof summary JSON. Requires all three engines unless --allow-missing-engines is set.")
     parser.add_argument("--skip-preflight", action="store_true", help="Skip the default /v1/models readiness check before sending completion requests.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.verify_proof:
+        report = verify_proof_summary(args.verify_proof, require_all_engines=not args.allow_missing_engines)
+        print(json.dumps(report, indent=2))
+        return 0 if report["ok"] else 1
     engines, missing = engine_configs_from_env(args)
     if args.launch_plan_only:
         print(json.dumps(runtime_launch_plan(args.model), indent=2))
@@ -721,7 +1519,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(runtime_diagnostics(engines, missing, model=args.model), indent=2))
         return 0
     if args.preflight_only:
-        preflight = runtime_preflight(engines, missing, model=args.model)
+        preflight = runtime_preflight(
+            engines,
+            [] if args.allow_missing_engines else missing,
+            model=args.model,
+        )
         print(json.dumps(preflight, indent=2))
         return 0 if preflight["ready"] else 1
     if missing and not args.allow_missing_engines:
@@ -738,21 +1540,32 @@ def main(argv: list[str] | None = None) -> int:
         print("PIQ_BASE_URL or --piq-base-url is required unless --no-submit is set.", file=sys.stderr)
         return 2
 
-    preflight = None
-    if not args.skip_preflight:
-        preflight = runtime_preflight(engines, [], model=args.model)
-        if not preflight["ready"]:
-            print(json.dumps(preflight, indent=2))
-            print("Serving engine preflight failed; pass --skip-preflight only for targeted debugging.", file=sys.stderr)
-            return 1
-
     client = None if args.no_submit else PerformanceIQ(args.piq_base_url, token=args.piq_token)
     pricing = {
         **({"usdPerGpuHour": args.usd_per_gpu_hour} if args.usd_per_gpu_hour is not None else {}),
         "gpuCount": args.gpu_count,
         **({"powerWattsPerGpu": args.power_watts_per_gpu} if args.power_watts_per_gpu is not None else {}),
     }
+    run_suffix = args.run_suffix or _utc_slug()
+    receipt_log = args.receipt_log
+    proxies: list[dict[str, Any]] = []
     try:
+        if args.record_receipts:
+            receipt_log = receipt_log or default_receipt_log_path(args.artifact_dir, run_suffix)
+            engines, proxies = start_recording_proxies(
+                engines,
+                receipt_log,
+                listen_host=args.receipt_proxy_host,
+            )
+
+        preflight = None
+        if not args.skip_preflight:
+            preflight = runtime_preflight(engines, [], model=args.model)
+            if not preflight["ready"]:
+                print(json.dumps(preflight, indent=2))
+                print("Serving engine preflight failed; pass --skip-preflight only for targeted debugging.", file=sys.stderr)
+                return 1
+
         summary = run_serving_smoke(
             engines=attach_endpoint_preflight(engines, preflight),
             performance_iq=client,
@@ -764,15 +1577,23 @@ def main(argv: list[str] | None = None) -> int:
             hardware=args.hardware,
             operating_point=args.operating_point,
             pricing=pricing,
-            run_suffix=args.run_suffix,
+            run_suffix=run_suffix,
             submit=not args.no_submit,
         )
         if preflight is not None:
             summary["preflight"] = preflight
+        if proxies:
+            summary["receiptProxies"] = proxy_summary(proxies)
         if args.query_dashboard:
             if not args.piq_base_url:
                 raise ValueError("dashboard query requires PIQ_BASE_URL or --piq-base-url")
-            summary["dashboard"] = query_dashboard(args.piq_base_url, token=args.piq_token)
+            summary["dashboard"] = query_dashboard(
+                args.piq_base_url,
+                token=args.piq_token,
+                campaign_ids=[item["campaignId"] for item in summary["submissions"]],
+            )
+        if receipt_log:
+            summary["receiptLogPath"] = receipt_log
         write_proof_summary(summary, args.artifact_dir, summary_out=args.summary_out)
         print(json.dumps(summary, indent=2))
         failures = [
@@ -799,6 +1620,8 @@ def main(argv: list[str] | None = None) -> int:
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    finally:
+        stop_recording_proxies(proxies)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,405 @@
+{
+  "schemaVersion": "performance-iq.serving-smoke-proof.v1",
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "runSuffix": "20260709T121416Z",
+  "artifactDir": "./performance-iq-output/live-vllm-submit",
+  "submissions": [
+    {
+      "engine": "vllm",
+      "runtimeFramework": "vLLM",
+      "requestCount": 1,
+      "successCount": 1,
+      "errorCount": 0,
+      "status": "accepted",
+      "liveProofReady": false,
+      "campaignId": "serving-vllm-20260709T121416Z",
+      "runId": "serving-vllm-20260709T121416Z-run",
+      "artifactPath": "./performance-iq-output/live-vllm-submit/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T12-14-18-072438Z.json",
+      "artifactSha256": "1a32b430b94ca706cd5f5a5259dd729c16de0eda3dd9f441bc5b39dcab013b2a",
+      "manifestPath": "./performance-iq-output/live-vllm-submit/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T12-14-18-072438Z-manifest.json",
+      "errors": []
+    }
+  ],
+  "preflight": {
+    "host": {
+      "system": "Darwin",
+      "machine": "arm64",
+      "platform": "macOS-26.5.2-arm64-arm-64bit",
+      "python": "/Users/admin/dev/cw/.runtime/vllm-macos/bin/python"
+    },
+    "localRuntime": {
+      "commandProbeTimeoutSeconds": 30,
+      "vllmCommand": {
+        "command": "vllm",
+        "available": false,
+        "status": "missing"
+      },
+      "vllmModule": {
+        "module": "vllm",
+        "available": true,
+        "origin": "/Users/admin/vllm/vllm/__init__.py"
+      },
+      "vllmExtension": {
+        "module": "vllm._C",
+        "available": true,
+        "origin": "/Users/admin/vllm/vllm/_C.abi3.so",
+        "torchCInitCpuMemoryEnv": false
+      },
+      "sglangModule": {
+        "module": "sglang",
+        "available": false,
+        "origin": null
+      },
+      "tensorrtLlmServeCommand": {
+        "command": "trtllm-serve",
+        "available": false,
+        "status": "missing"
+      },
+      "nvidiaSmiCommand": {
+        "command": "nvidia-smi",
+        "available": false,
+        "status": "missing"
+      }
+    },
+    "storage": {
+      "path": "/Users/admin/dev/cw/performance-iq-sdk",
+      "available": true,
+      "totalBytes": 1995218165760,
+      "freeBytes": 147827625984,
+      "freeGiB": 137.68,
+      "lowFreeSpace": false
+    },
+    "missingEngineUrls": [],
+    "endpoints": [
+      {
+        "engine": "vllm",
+        "url": "http://127.0.0.1:61066/v1/models",
+        "reachable": true,
+        "status": 200,
+        "ok": true,
+        "bodyPreview": "{\"object\":\"list\",\"data\":[{\"id\":\"Qwen/Qwen2.5-0.5B-Instruct\",\"object\":\"model\",\"created\":1783599256,\"owned_by\":\"vllm\",\"root\":\"Qwen/Qwen2.5-0.5B-Instruct\",\"parent\":null,\"max_model_len\":512,\"permission\":[{\"id\":\"modelperm-beb2a8e12159048a\",\"object\":\"model_permission\",\"created\":1783599256,\"allow_create_en",
+        "modelChecked": true,
+        "servedModels": [
+          "Qwen/Qwen2.5-0.5B-Instruct"
+        ],
+        "modelAvailable": true
+      }
+    ],
+    "launchPlan": {
+      "model": "Qwen/Qwen2.5-0.5B-Instruct",
+      "host": {
+        "system": "Darwin",
+        "machine": "arm64"
+      },
+      "storage": {
+        "path": "/Users/admin/dev/cw/performance-iq-sdk",
+        "available": true,
+        "totalBytes": 1995218165760,
+        "freeBytes": 147827625984,
+        "freeGiB": 137.68,
+        "lowFreeSpace": false
+      },
+      "warnings": [],
+      "endpointEnv": {
+        "PIQ_VLLM_URL": "http://127.0.0.1:8000",
+        "PIQ_SGLANG_URL": "http://127.0.0.1:30000",
+        "PIQ_TENSORRT_LLM_URL": "http://127.0.0.1:8001"
+      },
+      "engines": {
+        "vllm": {
+          "localSupport": "apple-silicon-source-build-required",
+          "install": [
+            "git clone https://github.com/vllm-project/vllm.git",
+            "cd vllm",
+            "uv venv --python 3.12 --seed --managed-python",
+            "source .venv/bin/activate",
+            "uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match",
+            "uv pip install -e ."
+          ],
+          "serve": "vllm serve Qwen/Qwen2.5-0.5B-Instruct --host 127.0.0.1 --port 8000 --served-model-name Qwen/Qwen2.5-0.5B-Instruct",
+          "verify": "curl -fsS http://127.0.0.1:8000/v1/models"
+        },
+        "sglang": {
+          "localSupport": "apple-metal-source-build-required",
+          "install": [
+            "git clone https://github.com/sgl-project/sglang.git",
+            "cd sglang",
+            "uv venv -p 3.12 sglang-metal",
+            "source sglang-metal/bin/activate",
+            "uv pip install --upgrade pip",
+            "uv run sgl-kernel/setup_metal.py install",
+            "rm -f python/pyproject.toml",
+            "mv python/pyproject_other.toml python/pyproject.toml",
+            "uv pip install -e \"python[all_mps]\""
+          ],
+          "serve": "SGLANG_USE_MLX=1 python -m sglang.launch_server --model Qwen/Qwen2.5-0.5B-Instruct --disable-cuda-graph --host 127.0.0.1 --port 30000 --served-model-name Qwen/Qwen2.5-0.5B-Instruct",
+          "verify": "curl -fsS http://127.0.0.1:30000/v1/models"
+        },
+        "tensorrt-llm": {
+          "localSupport": "requires-linux-nvidia-target-or-remote-endpoint",
+          "install": [
+            "Run TensorRT-LLM on a Linux x86_64/aarch64 host with a supported NVIDIA GPU.",
+            "Expose its OpenAI-compatible server to this smoke runner and set PIQ_TENSORRT_LLM_URL."
+          ],
+          "serve": "trtllm-serve Qwen/Qwen2.5-0.5B-Instruct --host 127.0.0.1 --port 8001",
+          "verify": "curl -fsS http://127.0.0.1:8001/v1/models"
+        }
+      }
+    },
+    "ready": true
+  },
+  "receiptProxies": [
+    {
+      "engine": "vllm",
+      "listenUrl": "http://127.0.0.1:61066",
+      "targetBaseUrl": "http://127.0.0.1:8010",
+      "receiptLogPath": "./performance-iq-output/live-vllm-submit/request-receipts.jsonl"
+    }
+  ],
+  "dashboard": {
+    "storeProvider": "sdk-ingestion",
+    "rowCounts": {
+      "price_performance": 1,
+      "capacity_best": 1,
+      "campaign_provenance": 1,
+      "run_details": 1
+    },
+    "rows": {
+      "price_performance": [
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "vLLM",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          null,
+          null,
+          null,
+          null,
+          1,
+          "2026-07-09T12:14:18.072438Z"
+        ]
+      ],
+      "capacity_best": [
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "vLLM",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          "per_engine",
+          1212.822312235481,
+          6367.317139236275,
+          1,
+          "2026-07-09T12:14:18.072438Z"
+        ]
+      ],
+      "campaign_provenance": [
+        [
+          "serving-vllm-20260709T121416Z",
+          "serving-vllm-20260709T121416Z",
+          "Qwen/Qwen2.5-0.5B-Instruct on local serving endpoint (serving-smoke)",
+          "2026-07-09T12:14:18.072438Z",
+          "2026-07-09T12:14:18.468672Z",
+          "vllm-serving-producer",
+          "serving-producer",
+          "vLLM",
+          "accepted",
+          "request-captured",
+          "smoke",
+          0,
+          false,
+          "performance-iq://serving-producer",
+          "measured,other-measured-producer,vLLM,serving-producer,vllm,vLLM,Qwen/Qwen2.5-0.5B-Instruct"
+        ]
+      ],
+      "run_details": [
+        [
+          "serving-vllm-20260709T121416Z",
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "vLLM",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          "per_engine",
+          1212.822312235481,
+          6367.317139236275,
+          null,
+          null,
+          null,
+          0.4,
+          "2026-07-09T12:14:18.072438Z"
+        ]
+      ]
+    },
+    "campaignIds": [
+      "serving-vllm-20260709T121416Z"
+    ],
+    "surfaceCampaignIds": {
+      "campaign_provenance": [
+        "serving-vllm-20260709T121416Z"
+      ],
+      "run_details": [
+        "serving-vllm-20260709T121416Z"
+      ]
+    },
+    "submittedCampaignRows": {
+      "campaign_provenance": [
+        [
+          "serving-vllm-20260709T121416Z",
+          "serving-vllm-20260709T121416Z",
+          "Qwen/Qwen2.5-0.5B-Instruct on local serving endpoint (serving-smoke)",
+          "2026-07-09T12:14:18.072438Z",
+          "2026-07-09T12:14:18.468672Z",
+          "vllm-serving-producer",
+          "serving-producer",
+          "vLLM",
+          "accepted",
+          "request-captured",
+          "smoke",
+          0,
+          false,
+          "performance-iq://serving-producer",
+          "measured,other-measured-producer,vLLM,serving-producer,vllm,vLLM,Qwen/Qwen2.5-0.5B-Instruct"
+        ]
+      ],
+      "run_details": [
+        [
+          "serving-vllm-20260709T121416Z",
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "vLLM",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          "per_engine",
+          1212.822312235481,
+          6367.317139236275,
+          null,
+          null,
+          null,
+          0.4,
+          "2026-07-09T12:14:18.072438Z"
+        ]
+      ]
+    },
+    "runtimeFrameworks": [
+      "vLLM"
+    ]
+  },
+  "receiptLogPath": "./performance-iq-output/live-vllm-submit/request-receipts.jsonl",
+  "proofSummaryPath": "./performance-iq-output/live-vllm-submit/serving-smoke-proof-20260709T121416Z.json",
+  "evidenceIndex": {
+    "schemaVersion": "performance-iq.serving-evidence-index.v1",
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "engines": {
+      "vllm": {
+        "runtimeFramework": "vLLM",
+        "campaignId": "serving-vllm-20260709T121416Z",
+        "runId": "serving-vllm-20260709T121416Z-run",
+        "requestCount": 1,
+        "successCount": 1,
+        "artifact": {
+          "path": "./performance-iq-output/live-vllm-submit/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T12-14-18-072438Z.json",
+          "sha256": "1a32b430b94ca706cd5f5a5259dd729c16de0eda3dd9f441bc5b39dcab013b2a",
+          "schemaVersion": "performance-iq.serving-producer-summary.v1"
+        },
+        "manifest": {
+          "path": "./performance-iq-output/live-vllm-submit/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T12-14-18-072438Z-manifest.json",
+          "schemaVersion": "performance-iq.producer-manifest.v1"
+        },
+        "requestTraceIds": [
+          "piq-vllm-serving-vllm-20260709T121416Z-run-request-1"
+        ],
+        "receiptIds": [
+          "piq-vllm-serving-vllm-20260709T121416Z-run-request-1"
+        ],
+        "measurement": {
+          "model": "Qwen/Qwen2.5-0.5B-Instruct",
+          "runtimeFramework": "vLLM",
+          "runtimeEngine": "vllm",
+          "requestCount": 1,
+          "successCount": 1,
+          "promptTokens": 34.0,
+          "completionTokens": 8.0,
+          "totalTokens": 42.0,
+          "outputTpm": 1212.822312235481,
+          "totalTpm": 6367.317139236275,
+          "avgLatencyMs": 395.77108299999963,
+          "p95LatencyMs": 395.77108299999963,
+          "metricCompleteness": 0.4,
+          "tags": "serving-producer,vllm,vLLM,Qwen/Qwen2.5-0.5B-Instruct"
+        },
+        "dashboard": {
+          "rowCounts": {
+            "price_performance": 1,
+            "capacity_best": 1,
+            "campaign_provenance": 1,
+            "run_details": 1
+          },
+          "surfaces": {
+            "campaign_provenance": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-vllm-20260709T121416Z",
+                  "serving-vllm-20260709T121416Z",
+                  "Qwen/Qwen2.5-0.5B-Instruct on local serving endpoint (serving-smoke)",
+                  "2026-07-09T12:14:18.072438Z",
+                  "2026-07-09T12:14:18.468672Z",
+                  "vllm-serving-producer",
+                  "serving-producer",
+                  "vLLM",
+                  "accepted",
+                  "request-captured",
+                  "smoke",
+                  0,
+                  false,
+                  "performance-iq://serving-producer",
+                  "measured,other-measured-producer,vLLM,serving-producer,vllm,vLLM,Qwen/Qwen2.5-0.5B-Instruct"
+                ]
+              ]
+            },
+            "run_details": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-vllm-20260709T121416Z",
+                  "Qwen/Qwen2.5-0.5B-Instruct",
+                  "local serving endpoint",
+                  "vLLM",
+                  "",
+                  "local serving endpoint",
+                  "",
+                  "",
+                  "serving-smoke",
+                  "per_engine",
+                  1212.822312235481,
+                  6367.317139236275,
+                  null,
+                  null,
+                  null,
+                  0.4,
+                  "2026-07-09T12:14:18.072438Z"
+                ]
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "smokeSummarySchemaVersion": "performance-iq.serving-smoke-summary.v1",
+  "writtenAtUtc": "2026-07-09T12:14:18.676564Z"
+}

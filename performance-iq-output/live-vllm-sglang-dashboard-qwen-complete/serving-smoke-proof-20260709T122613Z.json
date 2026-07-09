@@ -1,0 +1,788 @@
+{
+  "schemaVersion": "performance-iq.serving-smoke-proof.v1",
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "runSuffix": "20260709T122613Z",
+  "artifactDir": "./performance-iq-output/live-vllm-sglang-dashboard-qwen-complete",
+  "submissions": [
+    {
+      "engine": "vllm",
+      "runtimeFramework": "vLLM",
+      "requestCount": 1,
+      "successCount": 1,
+      "errorCount": 0,
+      "status": "accepted",
+      "liveProofReady": false,
+      "campaignId": "serving-vllm-20260709T122613Z",
+      "runId": "serving-vllm-20260709T122613Z-run",
+      "artifactPath": "./performance-iq-output/live-vllm-sglang-dashboard-qwen-complete/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T12-26-19-303588Z.json",
+      "artifactSha256": "3388646ff5c51ec27d2ca828c5b99966178d90106815dc884006ae97d8af7103",
+      "manifestPath": "./performance-iq-output/live-vllm-sglang-dashboard-qwen-complete/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T12-26-19-303588Z-manifest.json",
+      "errors": []
+    },
+    {
+      "engine": "sglang",
+      "runtimeFramework": "SGLang",
+      "requestCount": 1,
+      "successCount": 1,
+      "errorCount": 0,
+      "status": "accepted",
+      "liveProofReady": false,
+      "campaignId": "serving-sglang-20260709T122613Z",
+      "runId": "serving-sglang-20260709T122613Z-run",
+      "artifactPath": "./performance-iq-output/live-vllm-sglang-dashboard-qwen-complete/sglang-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T12-26-19-815391Z.json",
+      "artifactSha256": "51a4a9ec41b98a23f90b2362c828c3dca51a002b380f606877fa49b1d8b9886d",
+      "manifestPath": "./performance-iq-output/live-vllm-sglang-dashboard-qwen-complete/sglang-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T12-26-19-815391Z-manifest.json",
+      "errors": []
+    }
+  ],
+  "preflight": {
+    "host": {
+      "system": "Darwin",
+      "machine": "arm64",
+      "platform": "macOS-26.5.2-arm64-arm-64bit",
+      "python": "/Users/admin/dev/cw/.runtime/sglang/sglang-metal/bin/python"
+    },
+    "localRuntime": {
+      "commandProbeTimeoutSeconds": 35.0,
+      "vllmCommand": {
+        "command": "vllm",
+        "path": "/Users/admin/vllm/.venv-piq/bin/vllm",
+        "available": true,
+        "status": "ok",
+        "returncode": 0,
+        "output": [
+          "INFO 07-09 08:26:16 [importing.py:69] Triton not installed or not compatible; certain GPU-related functions will not be available.",
+          "0.22.1.dev2+g4dc34c8ca.cpu"
+        ]
+      },
+      "vllmModule": {
+        "module": "vllm",
+        "available": true,
+        "origin": "/Users/admin/vllm/vllm/__init__.py"
+      },
+      "vllmExtension": {
+        "module": "vllm._C",
+        "available": true,
+        "origin": "/Users/admin/vllm/vllm/_C.abi3.so",
+        "imported": true,
+        "torchCInitCpuMemoryEnv": true
+      },
+      "sglangModule": {
+        "module": "sglang",
+        "available": true,
+        "origin": "/Users/admin/dev/cw/.runtime/sglang/python/sglang/__init__.py"
+      },
+      "tensorrtLlmServeCommand": {
+        "command": "trtllm-serve",
+        "available": false,
+        "status": "missing"
+      },
+      "nvidiaSmiCommand": {
+        "command": "nvidia-smi",
+        "available": false,
+        "status": "missing"
+      }
+    },
+    "storage": {
+      "path": "/Users/admin/dev/cw/performance-iq-sdk",
+      "available": true,
+      "totalBytes": 1995218165760,
+      "freeBytes": 144068751360,
+      "freeGiB": 134.17,
+      "lowFreeSpace": false
+    },
+    "missingEngineUrls": [],
+    "endpoints": [
+      {
+        "engine": "vllm",
+        "url": "http://127.0.0.1:54338/v1/models",
+        "reachable": true,
+        "status": 200,
+        "ok": true,
+        "bodyPreview": "{\"object\":\"list\",\"data\":[{\"id\":\"Qwen/Qwen2.5-0.5B-Instruct\",\"object\":\"model\",\"created\":1783599973,\"owned_by\":\"vllm\",\"root\":\"Qwen/Qwen2.5-0.5B-Instruct\",\"parent\":null,\"max_model_len\":512,\"permission\":[{\"id\":\"modelperm-b63e7de39a370bec\",\"object\":\"model_permission\",\"created\":1783599973,\"allow_create_en",
+        "modelChecked": true,
+        "servedModels": [
+          "Qwen/Qwen2.5-0.5B-Instruct"
+        ],
+        "modelAvailable": true
+      },
+      {
+        "engine": "sglang",
+        "url": "http://127.0.0.1:54339/v1/models",
+        "reachable": true,
+        "status": 200,
+        "ok": true,
+        "bodyPreview": "{\"object\":\"list\",\"data\":[{\"id\":\"Qwen/Qwen2.5-0.5B-Instruct\",\"object\":\"model\",\"created\":1783599973,\"owned_by\":\"sglang\",\"root\":\"Qwen/Qwen2.5-0.5B-Instruct\",\"parent\":null,\"max_model_len\":512}]}",
+        "modelChecked": true,
+        "servedModels": [
+          "Qwen/Qwen2.5-0.5B-Instruct"
+        ],
+        "modelAvailable": true
+      }
+    ],
+    "configuredEngineCount": 2,
+    "launchPlan": {
+      "model": "Qwen/Qwen2.5-0.5B-Instruct",
+      "host": {
+        "system": "Darwin",
+        "machine": "arm64"
+      },
+      "storage": {
+        "path": "/Users/admin/dev/cw/performance-iq-sdk",
+        "available": true,
+        "totalBytes": 1995218165760,
+        "freeBytes": 144068751360,
+        "freeGiB": 134.17,
+        "lowFreeSpace": false
+      },
+      "warnings": [],
+      "endpointEnv": {
+        "PIQ_VLLM_URL": "http://127.0.0.1:8000",
+        "PIQ_SGLANG_URL": "http://127.0.0.1:30000",
+        "PIQ_TENSORRT_LLM_URL": "http://127.0.0.1:8001"
+      },
+      "engines": {
+        "vllm": {
+          "localSupport": "apple-silicon-source-build-required",
+          "install": [
+            "git clone https://github.com/vllm-project/vllm.git",
+            "cd vllm",
+            "uv venv --python 3.12 --seed --managed-python",
+            "source .venv/bin/activate",
+            "uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match",
+            "uv pip install -e ."
+          ],
+          "serve": "vllm serve Qwen/Qwen2.5-0.5B-Instruct --host 127.0.0.1 --port 8000 --served-model-name Qwen/Qwen2.5-0.5B-Instruct",
+          "verify": "curl -fsS http://127.0.0.1:8000/v1/models"
+        },
+        "sglang": {
+          "localSupport": "apple-metal-source-build-required",
+          "install": [
+            "git clone https://github.com/sgl-project/sglang.git",
+            "cd sglang",
+            "uv venv -p 3.12 sglang-metal",
+            "source sglang-metal/bin/activate",
+            "uv pip install --upgrade pip",
+            "uv run sgl-kernel/setup_metal.py install",
+            "rm -f python/pyproject.toml",
+            "mv python/pyproject_other.toml python/pyproject.toml",
+            "uv pip install -e \"python[all_mps]\""
+          ],
+          "serve": "SGLANG_USE_MLX=1 python -m sglang.launch_server --model Qwen/Qwen2.5-0.5B-Instruct --disable-cuda-graph --host 127.0.0.1 --port 30000 --served-model-name Qwen/Qwen2.5-0.5B-Instruct",
+          "verify": "curl -fsS http://127.0.0.1:30000/v1/models"
+        },
+        "tensorrt-llm": {
+          "localSupport": "requires-linux-nvidia-target-or-remote-endpoint",
+          "install": [
+            "Run TensorRT-LLM on a Linux x86_64/aarch64 host with a supported NVIDIA GPU.",
+            "Expose its OpenAI-compatible server to this smoke runner and set PIQ_TENSORRT_LLM_URL."
+          ],
+          "serve": "trtllm-serve Qwen/Qwen2.5-0.5B-Instruct --host 127.0.0.1 --port 8001",
+          "verify": "curl -fsS http://127.0.0.1:8001/v1/models"
+        }
+      }
+    },
+    "ready": true
+  },
+  "receiptProxies": [
+    {
+      "engine": "vllm",
+      "listenUrl": "http://127.0.0.1:54338",
+      "targetBaseUrl": "http://127.0.0.1:8010",
+      "receiptLogPath": "./performance-iq-output/live-vllm-sglang-dashboard-qwen-complete/request-receipts.jsonl"
+    },
+    {
+      "engine": "sglang",
+      "listenUrl": "http://127.0.0.1:54339",
+      "targetBaseUrl": "http://127.0.0.1:30000",
+      "receiptLogPath": "./performance-iq-output/live-vllm-sglang-dashboard-qwen-complete/request-receipts.jsonl"
+    }
+  ],
+  "dashboard": {
+    "storeProvider": "sdk-ingestion",
+    "rowCounts": {
+      "price_performance": 4,
+      "capacity_best": 4,
+      "campaign_provenance": 4,
+      "run_details": 4
+    },
+    "rows": {
+      "price_performance": [
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "SGLang",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          0.25018872916701995,
+          0.08006039333344638,
+          17.348014805576288,
+          20,
+          1,
+          "2026-07-09T12:26:19.815391Z"
+        ],
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "vLLM",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          0.8647539062501943,
+          0.27672125000006215,
+          5.019090109229331,
+          20,
+          1,
+          "2026-07-09T12:26:19.303588Z"
+        ],
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "vLLM",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          null,
+          null,
+          null,
+          null,
+          1,
+          "2026-07-09T12:25:19.674346Z"
+        ],
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "SGLang",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          null,
+          null,
+          null,
+          null,
+          1,
+          "2026-07-09T12:25:20.288023Z"
+        ]
+      ],
+      "capacity_best": [
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "SGLang",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          "per_engine",
+          6748.855873845137,
+          21090.174605766053,
+          1,
+          "2026-07-09T12:25:20.288023Z"
+        ],
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "SGLang",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          "per_engine",
+          6661.637685341294,
+          20817.617766691543,
+          1,
+          "2026-07-09T12:26:19.815391Z"
+        ],
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "vLLM",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          "per_engine",
+          2000.950797626167,
+          6252.9712425817725,
+          1,
+          "2026-07-09T12:25:19.674346Z"
+        ],
+        [
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "vLLM",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          "per_engine",
+          1927.330601944063,
+          6022.908131075196,
+          1,
+          "2026-07-09T12:26:19.303588Z"
+        ]
+      ],
+      "campaign_provenance": [
+        [
+          "serving-sglang-20260709T122613Z",
+          "serving-sglang-20260709T122613Z",
+          "Qwen/Qwen2.5-0.5B-Instruct on local serving endpoint (serving-smoke)",
+          "2026-07-09T12:26:19.815391Z",
+          "2026-07-09T12:26:19.959819Z",
+          "sglang-serving-producer",
+          "serving-producer",
+          "SGLang",
+          "accepted",
+          "request-captured",
+          "smoke",
+          0,
+          false,
+          "performance-iq://serving-producer",
+          "measured,other-measured-producer,SGLang,serving-producer,sglang,SGLang,Qwen/Qwen2.5-0.5B-Instruct"
+        ],
+        [
+          "serving-vllm-20260709T122613Z",
+          "serving-vllm-20260709T122613Z",
+          "Qwen/Qwen2.5-0.5B-Instruct on local serving endpoint (serving-smoke)",
+          "2026-07-09T12:26:19.303588Z",
+          "2026-07-09T12:26:19.802307Z",
+          "vllm-serving-producer",
+          "serving-producer",
+          "vLLM",
+          "accepted",
+          "request-captured",
+          "smoke",
+          0,
+          false,
+          "performance-iq://serving-producer",
+          "measured,other-measured-producer,vLLM,serving-producer,vllm,vLLM,Qwen/Qwen2.5-0.5B-Instruct"
+        ],
+        [
+          "serving-sglang-20260709T122512Z",
+          "serving-sglang-20260709T122512Z",
+          "Qwen/Qwen2.5-0.5B-Instruct on local serving endpoint (serving-smoke)",
+          "2026-07-09T12:25:20.288023Z",
+          "2026-07-09T12:25:20.430652Z",
+          "sglang-serving-producer",
+          "serving-producer",
+          "SGLang",
+          "accepted",
+          "request-captured",
+          "smoke",
+          0,
+          false,
+          "performance-iq://serving-producer",
+          "measured,other-measured-producer,SGLang,serving-producer,sglang,SGLang,Qwen/Qwen2.5-0.5B-Instruct"
+        ],
+        [
+          "serving-vllm-20260709T122512Z",
+          "serving-vllm-20260709T122512Z",
+          "Qwen/Qwen2.5-0.5B-Instruct on local serving endpoint (serving-smoke)",
+          "2026-07-09T12:25:19.674346Z",
+          "2026-07-09T12:25:20.154541Z",
+          "vllm-serving-producer",
+          "serving-producer",
+          "vLLM",
+          "accepted",
+          "request-captured",
+          "smoke",
+          0,
+          false,
+          "performance-iq://serving-producer",
+          "measured,other-measured-producer,vLLM,serving-producer,vllm,vLLM,Qwen/Qwen2.5-0.5B-Instruct"
+        ]
+      ],
+      "run_details": [
+        [
+          "serving-sglang-20260709T122613Z",
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "SGLang",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          "per_engine",
+          6661.637685341294,
+          20817.617766691543,
+          0.25018872916701995,
+          0.08006039333344638,
+          17.348014805576288,
+          1,
+          "2026-07-09T12:26:19.815391Z"
+        ],
+        [
+          "serving-vllm-20260709T122613Z",
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "vLLM",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          "per_engine",
+          1927.330601944063,
+          6022.908131075196,
+          0.8647539062501943,
+          0.27672125000006215,
+          5.019090109229331,
+          1,
+          "2026-07-09T12:26:19.303588Z"
+        ],
+        [
+          "serving-sglang-20260709T122512Z",
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "SGLang",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          "per_engine",
+          6748.855873845137,
+          21090.174605766053,
+          null,
+          null,
+          null,
+          0.4,
+          "2026-07-09T12:25:20.288023Z"
+        ],
+        [
+          "serving-vllm-20260709T122512Z",
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "vLLM",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          "per_engine",
+          2000.950797626167,
+          6252.9712425817725,
+          null,
+          null,
+          null,
+          0.4,
+          "2026-07-09T12:25:19.674346Z"
+        ]
+      ]
+    },
+    "campaignIds": [
+      "serving-sglang-20260709T122512Z",
+      "serving-sglang-20260709T122613Z",
+      "serving-vllm-20260709T122512Z",
+      "serving-vllm-20260709T122613Z"
+    ],
+    "surfaceCampaignIds": {
+      "campaign_provenance": [
+        "serving-sglang-20260709T122512Z",
+        "serving-sglang-20260709T122613Z",
+        "serving-vllm-20260709T122512Z",
+        "serving-vllm-20260709T122613Z"
+      ],
+      "run_details": [
+        "serving-sglang-20260709T122512Z",
+        "serving-sglang-20260709T122613Z",
+        "serving-vllm-20260709T122512Z",
+        "serving-vllm-20260709T122613Z"
+      ]
+    },
+    "submittedCampaignRows": {
+      "campaign_provenance": [
+        [
+          "serving-sglang-20260709T122613Z",
+          "serving-sglang-20260709T122613Z",
+          "Qwen/Qwen2.5-0.5B-Instruct on local serving endpoint (serving-smoke)",
+          "2026-07-09T12:26:19.815391Z",
+          "2026-07-09T12:26:19.959819Z",
+          "sglang-serving-producer",
+          "serving-producer",
+          "SGLang",
+          "accepted",
+          "request-captured",
+          "smoke",
+          0,
+          false,
+          "performance-iq://serving-producer",
+          "measured,other-measured-producer,SGLang,serving-producer,sglang,SGLang,Qwen/Qwen2.5-0.5B-Instruct"
+        ],
+        [
+          "serving-vllm-20260709T122613Z",
+          "serving-vllm-20260709T122613Z",
+          "Qwen/Qwen2.5-0.5B-Instruct on local serving endpoint (serving-smoke)",
+          "2026-07-09T12:26:19.303588Z",
+          "2026-07-09T12:26:19.802307Z",
+          "vllm-serving-producer",
+          "serving-producer",
+          "vLLM",
+          "accepted",
+          "request-captured",
+          "smoke",
+          0,
+          false,
+          "performance-iq://serving-producer",
+          "measured,other-measured-producer,vLLM,serving-producer,vllm,vLLM,Qwen/Qwen2.5-0.5B-Instruct"
+        ]
+      ],
+      "run_details": [
+        [
+          "serving-sglang-20260709T122613Z",
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "SGLang",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          "per_engine",
+          6661.637685341294,
+          20817.617766691543,
+          0.25018872916701995,
+          0.08006039333344638,
+          17.348014805576288,
+          1,
+          "2026-07-09T12:26:19.815391Z"
+        ],
+        [
+          "serving-vllm-20260709T122613Z",
+          "Qwen/Qwen2.5-0.5B-Instruct",
+          "local serving endpoint",
+          "vLLM",
+          "",
+          "local serving endpoint",
+          "",
+          "",
+          "serving-smoke",
+          "per_engine",
+          1927.330601944063,
+          6022.908131075196,
+          0.8647539062501943,
+          0.27672125000006215,
+          5.019090109229331,
+          1,
+          "2026-07-09T12:26:19.303588Z"
+        ]
+      ]
+    },
+    "runtimeFrameworks": [
+      "SGLang",
+      "vLLM"
+    ]
+  },
+  "receiptLogPath": "./performance-iq-output/live-vllm-sglang-dashboard-qwen-complete/request-receipts.jsonl",
+  "proofSummaryPath": "./performance-iq-output/live-vllm-sglang-dashboard-qwen-complete/serving-smoke-proof-20260709T122613Z.json",
+  "evidenceIndex": {
+    "schemaVersion": "performance-iq.serving-evidence-index.v1",
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "engines": {
+      "vllm": {
+        "runtimeFramework": "vLLM",
+        "campaignId": "serving-vllm-20260709T122613Z",
+        "runId": "serving-vllm-20260709T122613Z-run",
+        "requestCount": 1,
+        "successCount": 1,
+        "artifact": {
+          "path": "./performance-iq-output/live-vllm-sglang-dashboard-qwen-complete/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T12-26-19-303588Z.json",
+          "sha256": "3388646ff5c51ec27d2ca828c5b99966178d90106815dc884006ae97d8af7103",
+          "schemaVersion": "performance-iq.serving-producer-summary.v1"
+        },
+        "manifest": {
+          "path": "./performance-iq-output/live-vllm-sglang-dashboard-qwen-complete/vllm-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T12-26-19-303588Z-manifest.json",
+          "schemaVersion": "performance-iq.producer-manifest.v1"
+        },
+        "requestTraceIds": [
+          "piq-vllm-serving-vllm-20260709T122613Z-run-request-1"
+        ],
+        "receiptIds": [
+          "piq-vllm-serving-vllm-20260709T122613Z-run-request-1"
+        ],
+        "measurement": {
+          "model": "Qwen/Qwen2.5-0.5B-Instruct",
+          "runtimeFramework": "vLLM",
+          "runtimeEngine": "vllm",
+          "requestCount": 1,
+          "successCount": 1,
+          "promptTokens": 34.0,
+          "completionTokens": 16.0,
+          "totalTokens": 50.0,
+          "outputTpm": 1927.330601944063,
+          "totalTpm": 6022.908131075196,
+          "avgLatencyMs": 498.0982500001119,
+          "p95LatencyMs": 498.0982500001119,
+          "metricCompleteness": 1.0,
+          "tags": "serving-producer,vllm,vLLM,Qwen/Qwen2.5-0.5B-Instruct"
+        },
+        "dashboard": {
+          "rowCounts": {
+            "price_performance": 4,
+            "capacity_best": 4,
+            "campaign_provenance": 4,
+            "run_details": 4
+          },
+          "surfaces": {
+            "campaign_provenance": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-vllm-20260709T122613Z",
+                  "serving-vllm-20260709T122613Z",
+                  "Qwen/Qwen2.5-0.5B-Instruct on local serving endpoint (serving-smoke)",
+                  "2026-07-09T12:26:19.303588Z",
+                  "2026-07-09T12:26:19.802307Z",
+                  "vllm-serving-producer",
+                  "serving-producer",
+                  "vLLM",
+                  "accepted",
+                  "request-captured",
+                  "smoke",
+                  0,
+                  false,
+                  "performance-iq://serving-producer",
+                  "measured,other-measured-producer,vLLM,serving-producer,vllm,vLLM,Qwen/Qwen2.5-0.5B-Instruct"
+                ]
+              ]
+            },
+            "run_details": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-vllm-20260709T122613Z",
+                  "Qwen/Qwen2.5-0.5B-Instruct",
+                  "local serving endpoint",
+                  "vLLM",
+                  "",
+                  "local serving endpoint",
+                  "",
+                  "",
+                  "serving-smoke",
+                  "per_engine",
+                  1927.330601944063,
+                  6022.908131075196,
+                  0.8647539062501943,
+                  0.27672125000006215,
+                  5.019090109229331,
+                  1,
+                  "2026-07-09T12:26:19.303588Z"
+                ]
+              ]
+            }
+          }
+        }
+      },
+      "sglang": {
+        "runtimeFramework": "SGLang",
+        "campaignId": "serving-sglang-20260709T122613Z",
+        "runId": "serving-sglang-20260709T122613Z-run",
+        "requestCount": 1,
+        "successCount": 1,
+        "artifact": {
+          "path": "./performance-iq-output/live-vllm-sglang-dashboard-qwen-complete/sglang-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T12-26-19-815391Z.json",
+          "sha256": "51a4a9ec41b98a23f90b2362c828c3dca51a002b380f606877fa49b1d8b9886d",
+          "schemaVersion": "performance-iq.serving-producer-summary.v1"
+        },
+        "manifest": {
+          "path": "./performance-iq-output/live-vllm-sglang-dashboard-qwen-complete/sglang-Qwen-Qwen2.5-0.5B-Instruct-2026-07-09T12-26-19-815391Z-manifest.json",
+          "schemaVersion": "performance-iq.producer-manifest.v1"
+        },
+        "requestTraceIds": [
+          "piq-sglang-serving-sglang-20260709T122613Z-run-request-1"
+        ],
+        "receiptIds": [
+          "piq-sglang-serving-sglang-20260709T122613Z-run-request-1"
+        ],
+        "measurement": {
+          "model": "Qwen/Qwen2.5-0.5B-Instruct",
+          "runtimeFramework": "SGLang",
+          "runtimeEngine": "sglang",
+          "requestCount": 1,
+          "successCount": 1,
+          "promptTokens": 34.0,
+          "completionTokens": 16.0,
+          "totalTokens": 50.0,
+          "outputTpm": 6661.637685341294,
+          "totalTpm": 20817.617766691543,
+          "avgLatencyMs": 144.10870800020348,
+          "p95LatencyMs": 144.10870800020348,
+          "metricCompleteness": 1.0,
+          "tags": "serving-producer,sglang,SGLang,Qwen/Qwen2.5-0.5B-Instruct"
+        },
+        "dashboard": {
+          "rowCounts": {
+            "price_performance": 4,
+            "capacity_best": 4,
+            "campaign_provenance": 4,
+            "run_details": 4
+          },
+          "surfaces": {
+            "campaign_provenance": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-sglang-20260709T122613Z",
+                  "serving-sglang-20260709T122613Z",
+                  "Qwen/Qwen2.5-0.5B-Instruct on local serving endpoint (serving-smoke)",
+                  "2026-07-09T12:26:19.815391Z",
+                  "2026-07-09T12:26:19.959819Z",
+                  "sglang-serving-producer",
+                  "serving-producer",
+                  "SGLang",
+                  "accepted",
+                  "request-captured",
+                  "smoke",
+                  0,
+                  false,
+                  "performance-iq://serving-producer",
+                  "measured,other-measured-producer,SGLang,serving-producer,sglang,SGLang,Qwen/Qwen2.5-0.5B-Instruct"
+                ]
+              ]
+            },
+            "run_details": {
+              "rowCount": 1,
+              "submittedRows": [
+                [
+                  "serving-sglang-20260709T122613Z",
+                  "Qwen/Qwen2.5-0.5B-Instruct",
+                  "local serving endpoint",
+                  "SGLang",
+                  "",
+                  "local serving endpoint",
+                  "",
+                  "",
+                  "serving-smoke",
+                  "per_engine",
+                  6661.637685341294,
+                  20817.617766691543,
+                  0.25018872916701995,
+                  0.08006039333344638,
+                  17.348014805576288,
+                  1,
+                  "2026-07-09T12:26:19.815391Z"
+                ]
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "smokeSummarySchemaVersion": "performance-iq.serving-smoke-summary.v1",
+  "writtenAtUtc": "2026-07-09T12:26:19.982534Z"
+}

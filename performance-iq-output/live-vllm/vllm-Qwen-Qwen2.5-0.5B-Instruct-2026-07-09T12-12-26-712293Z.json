@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "performance-iq.serving-producer-summary.v1",
+  "capturedAtUtc": "2026-07-09T12:12:26.712293Z",
+  "engine": "vllm",
+  "engineLabel": "vLLM",
+  "baseUrl": "http://127.0.0.1:60463",
+  "requestPath": "/v1/chat/completions",
+  "endpointPreflight": {
+    "engine": "vllm",
+    "url": "http://127.0.0.1:60463/v1/models",
+    "reachable": true,
+    "status": 200,
+    "ok": true,
+    "bodyPreview": "{\"object\":\"list\",\"data\":[{\"id\":\"Qwen/Qwen2.5-0.5B-Instruct\",\"object\":\"model\",\"created\":1783599145,\"owned_by\":\"vllm\",\"root\":\"Qwen/Qwen2.5-0.5B-Instruct\",\"parent\":null,\"max_model_len\":512,\"permission\":[{\"id\":\"modelperm-94cbc27046a7c17c\",\"object\":\"model_permission\",\"created\":1783599145,\"allow_create_en",
+    "modelChecked": true,
+    "servedModels": [
+      "Qwen/Qwen2.5-0.5B-Instruct"
+    ],
+    "modelAvailable": true
+  },
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "request": {
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Return a short acknowledgement."
+      }
+    ],
+    "max_tokens": 8,
+    "temperature": 0
+  },
+  "requestTrace": [
+    {
+      "requestId": "piq-vllm-serving-vllm-20260709T121225Z-run-request-1",
+      "requestIndex": 0,
+      "endpoint": "http://127.0.0.1:60463/v1/chat/completions",
+      "requestStartedAtUtc": "2026-07-09T12:12:26.712322Z",
+      "requestCompletedAtUtc": "2026-07-09T12:12:27.033419Z",
+      "responseId": "chatcmpl-af2331a3e8f425a6",
+      "responseModel": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  ],
+  "samples": [
+    {
+      "requestId": "piq-vllm-serving-vllm-20260709T121225Z-run-request-1",
+      "requestIndex": 0,
+      "endpoint": "http://127.0.0.1:60463/v1/chat/completions",
+      "requestStartedAtUtc": "2026-07-09T12:12:26.712322Z",
+      "requestCompletedAtUtc": "2026-07-09T12:12:27.033419Z",
+      "status": 200,
+      "ok": true,
+      "latencyMs": 321.095792000051,
+      "promptTokens": 34,
+      "completionTokens": 8,
+      "totalTokens": 42,
+      "responseId": "chatcmpl-af2331a3e8f425a6",
+      "responseModel": "Qwen/Qwen2.5-0.5B-Instruct",
+      "finishReason": "length",
+      "error": null
+    }
+  ],
+  "measurements": [
+    {
+      "surface": "result",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct",
+      "runtimeFramework": "vLLM",
+      "runtimeEngine": "vllm",
+      "operatingPoint": "serving-smoke",
+      "basis": "per_engine",
+      "requestCount": 1,
+      "successCount": 1,
+      "errorCount": 0,
+      "promptTokens": 34.0,
+      "completionTokens": 8.0,
+      "totalTokens": 42.0,
+      "outputTpm": 1494.8810042329167,
+      "totalTpm": 7848.125272222813,
+      "avgLatencyMs": 321.095792000051,
+      "p95LatencyMs": 321.095792000051,
+      "usdPer1mOutputTokens": null,
+      "usdPer1mTotalTokens": null,
+      "avgPowerWattsPerGpu": null,
+      "tokensPerWatt": null,
+      "campaignCount": 1,
+      "latestCapturedAtUtc": "2026-07-09T12:12:26.712293Z",
+      "experimentFamily": "serving-producer",
+      "experimentStatus": "accepted",
+      "verdictTier": "request-captured",
+      "solRigor": "smoke",
+      "plotReadyPoints": 0,
+      "dcgmGrounded": false,
+      "tags": "serving-producer,vllm,vLLM,Qwen/Qwen2.5-0.5B-Instruct",
+      "metricCompleteness": 0.4
+    }
+  ]
+}

@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "performance-iq.serving-producer-summary.v1",
+  "capturedAtUtc": "2026-07-09T12:11:37.282478Z",
+  "engine": "vllm",
+  "engineLabel": "vLLM",
+  "baseUrl": "http://127.0.0.1:8010",
+  "requestPath": "/v1/chat/completions",
+  "endpointPreflight": {
+    "engine": "vllm",
+    "url": "http://127.0.0.1:8010/v1/models",
+    "reachable": true,
+    "status": 200,
+    "ok": true,
+    "bodyPreview": "{\"object\":\"list\",\"data\":[{\"id\":\"meta-llama/Llama-3.2-1B-Instruct\",\"object\":\"model\",\"created\":1783599090,\"owned_by\":\"vllm\",\"root\":\"meta-llama/Llama-3.2-1B-Instruct\",\"parent\":null,\"max_model_len\":512,\"permission\":[{\"id\":\"modelperm-906c3c54a0049f51\",\"object\":\"model_permission\",\"created\":1783599090,\"all",
+    "modelChecked": true,
+    "servedModels": [
+      "meta-llama/Llama-3.2-1B-Instruct"
+    ],
+    "modelAvailable": true
+  },
+  "model": "meta-llama/Llama-3.2-1B-Instruct",
+  "request": {
+    "model": "meta-llama/Llama-3.2-1B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Return a short acknowledgement."
+      }
+    ],
+    "max_tokens": 16,
+    "temperature": 0
+  },
+  "requestTrace": [
+    {
+      "requestId": "piq-vllm-serving-vllm-20260709T121130Z-run-request-1",
+      "requestIndex": 0,
+      "endpoint": "http://127.0.0.1:8010/v1/chat/completions",
+      "requestStartedAtUtc": "2026-07-09T12:11:37.282507Z",
+      "requestCompletedAtUtc": "2026-07-09T12:11:38.056580Z",
+      "responseId": "chatcmpl-8f0a0208e3f4c12e",
+      "responseModel": "meta-llama/Llama-3.2-1B-Instruct"
+    }
+  ],
+  "samples": [
+    {
+      "requestId": "piq-vllm-serving-vllm-20260709T121130Z-run-request-1",
+      "requestIndex": 0,
+      "endpoint": "http://127.0.0.1:8010/v1/chat/completions",
+      "requestStartedAtUtc": "2026-07-09T12:11:37.282507Z",
+      "requestCompletedAtUtc": "2026-07-09T12:11:38.056580Z",
+      "status": 200,
+      "ok": true,
+      "latencyMs": 774.0711669994198,
+      "promptTokens": 40,
+      "completionTokens": 16,
+      "totalTokens": 56,
+      "responseId": "chatcmpl-8f0a0208e3f4c12e",
+      "responseModel": "meta-llama/Llama-3.2-1B-Instruct",
+      "finishReason": "length",
+      "error": null
+    }
+  ],
+  "measurements": [
+    {
+      "surface": "result",
+      "model": "meta-llama/Llama-3.2-1B-Instruct",
+      "runtimeFramework": "vLLM",
+      "runtimeEngine": "vllm",
+      "operatingPoint": "serving-smoke",
+      "basis": "per_engine",
+      "requestCount": 1,
+      "successCount": 1,
+      "errorCount": 0,
+      "promptTokens": 40.0,
+      "completionTokens": 16.0,
+      "totalTokens": 56.0,
+      "outputTpm": 1240.1960451792922,
+      "totalTpm": 4340.686158127523,
+      "avgLatencyMs": 774.0711669994198,
+      "p95LatencyMs": 774.0711669994198,
+      "usdPer1mOutputTokens": null,
+      "usdPer1mTotalTokens": null,
+      "avgPowerWattsPerGpu": null,
+      "tokensPerWatt": null,
+      "campaignCount": 1,
+      "latestCapturedAtUtc": "2026-07-09T12:11:37.282478Z",
+      "experimentFamily": "serving-producer",
+      "experimentStatus": "accepted",
+      "verdictTier": "request-captured",
+      "solRigor": "smoke",
+      "plotReadyPoints": 0,
+      "dcgmGrounded": false,
+      "tags": "serving-producer,vllm,vLLM,meta-llama/Llama-3.2-1B-Instruct",
+      "metricCompleteness": 0.4
+    }
+  ]
+}

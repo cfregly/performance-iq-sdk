@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "performance-iq.serving-producer-summary.v1",
+  "capturedAtUtc": "2026-07-09T12:16:43.981867Z",
+  "engine": "sglang",
+  "engineLabel": "SGLang",
+  "baseUrl": "http://127.0.0.1:64138",
+  "requestPath": "/v1/chat/completions",
+  "endpointPreflight": {
+    "engine": "sglang",
+    "url": "http://127.0.0.1:64138/v1/models",
+    "reachable": true,
+    "status": 200,
+    "ok": true,
+    "bodyPreview": "{\"object\":\"list\",\"data\":[{\"id\":\"Qwen/Qwen2.5-0.5B-Instruct\",\"object\":\"model\",\"created\":1783599402,\"owned_by\":\"sglang\",\"root\":\"Qwen/Qwen2.5-0.5B-Instruct\",\"parent\":null,\"max_model_len\":32768}]}",
+    "modelChecked": true,
+    "servedModels": [
+      "Qwen/Qwen2.5-0.5B-Instruct"
+    ],
+    "modelAvailable": true
+  },
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "request": {
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Return a short acknowledgement."
+      }
+    ],
+    "max_tokens": 16,
+    "temperature": 0
+  },
+  "requestTrace": [
+    {
+      "requestId": "piq-sglang-serving-sglang-20260709T121642Z-run-request-1",
+      "requestIndex": 0,
+      "endpoint": "http://127.0.0.1:64138/v1/chat/completions",
+      "requestStartedAtUtc": "2026-07-09T12:16:43.981881Z",
+      "requestCompletedAtUtc": "2026-07-09T12:16:44.175955Z",
+      "responseId": "ec43525d305f4449a87a70b80e928579",
+      "responseModel": "Qwen/Qwen2.5-0.5B-Instruct"
+    }
+  ],
+  "samples": [
+    {
+      "requestId": "piq-sglang-serving-sglang-20260709T121642Z-run-request-1",
+      "requestIndex": 0,
+      "endpoint": "http://127.0.0.1:64138/v1/chat/completions",
+      "requestStartedAtUtc": "2026-07-09T12:16:43.981881Z",
+      "requestCompletedAtUtc": "2026-07-09T12:16:44.175955Z",
+      "status": 200,
+      "ok": true,
+      "latencyMs": 194.0727919991332,
+      "promptTokens": 34,
+      "completionTokens": 16,
+      "totalTokens": 50,
+      "responseId": "ec43525d305f4449a87a70b80e928579",
+      "responseModel": "Qwen/Qwen2.5-0.5B-Instruct",
+      "finishReason": "length",
+      "error": null
+    }
+  ],
+  "measurements": [
+    {
+      "surface": "result",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct",
+      "runtimeFramework": "SGLang",
+      "runtimeEngine": "sglang",
+      "operatingPoint": "serving-smoke",
+      "basis": "per_engine",
+      "requestCount": 1,
+      "successCount": 1,
+      "errorCount": 0,
+      "promptTokens": 34.0,
+      "completionTokens": 16.0,
+      "totalTokens": 50.0,
+      "outputTpm": 4946.597563270424,
+      "totalTpm": 15458.117385220074,
+      "avgLatencyMs": 194.0727919991332,
+      "p95LatencyMs": 194.0727919991332,
+      "usdPer1mOutputTokens": null,
+      "usdPer1mTotalTokens": null,
+      "avgPowerWattsPerGpu": null,
+      "tokensPerWatt": null,
+      "campaignCount": 1,
+      "latestCapturedAtUtc": "2026-07-09T12:16:43.981867Z",
+      "experimentFamily": "serving-producer",
+      "experimentStatus": "accepted",
+      "verdictTier": "request-captured",
+      "solRigor": "smoke",
+      "plotReadyPoints": 0,
+      "dcgmGrounded": false,
+      "tags": "serving-producer,sglang,SGLang,Qwen/Qwen2.5-0.5B-Instruct",
+      "metricCompleteness": 0.4
+    }
+  ]
+}

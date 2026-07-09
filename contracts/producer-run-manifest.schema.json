@@ -145,7 +145,11 @@
         "dashboardUrl": { "type": "string" },
         "decisionBriefPath": { "type": "string", "minLength": 1 },
         "exportGeneratedAtUtc": { "type": "string", "format": "date-time" },
-        "preflightPath": { "type": "string" }
+        "preflightPath": { "type": "string" },
+        "requestTraceIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
       }
     },
     "methodology": {

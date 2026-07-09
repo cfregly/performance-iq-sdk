@@ -154,6 +154,7 @@ python -m performance_iq_sdk.serving_smoke \
   --model Qwen/Qwen2.5-0.5B-Instruct \
   --repetitions 3 \
   --artifact-dir ./performance-iq-output/serving-producers \
+  --record-receipts \
   --query-dashboard
 ```
 
@@ -164,6 +165,7 @@ PYTHONPATH=python/src python -m performance_iq_sdk.serving_smoke \
   --model Qwen/Qwen2.5-0.5B-Instruct \
   --repetitions 3 \
   --artifact-dir ./performance-iq-output/serving-producers \
+  --record-receipts \
   --query-dashboard
 ```
 
@@ -172,16 +174,37 @@ TensorRT-LLM, writes one normalized summary artifact and one producer manifest
 per engine plus one overall smoke proof summary, submits three producer runs,
 and checks the fixed dashboard surfaces `price_performance`, `capacity_best`,
 `campaign_provenance`, and `run_details`.
-Each summary artifact includes the request samples, derived measurements, and
-the endpoint preflight evidence used for that engine. Each manifest preserves
-the hashed artifact pointer submitted to Performance IQ.
+Each engine request carries `x-performance-iq-*` trace headers, including
+`x-performance-iq-request-id`. Each summary artifact includes those request
+IDs, request samples, derived measurements, and the endpoint preflight evidence
+used for that engine. Each manifest preserves the hashed artifact pointer and
+request trace IDs submitted to Performance IQ.
+Route traffic through `run-smoke.sh receipt-proxy` and set
+`PIQ_SERVING_RECEIPT_LOG` when you need operator-visible proof that those exact
+request IDs reached each backend serving endpoint.
 The overall `serving-smoke-proof-<suffix>.json` file preserves the submitted
 campaign IDs, per-engine artifact/manifest paths, preflight evidence, and
-dashboard row proof in one place.
+dashboard row proof in one place, including the fixed surface row snapshots
+used to inspect the data behind the dashboard insights.
+Verify that saved proof bundle offline before treating it as full E2E evidence:
+
+```bash
+bash ops/serving-producers/run-smoke.sh verify-proof \
+  ./performance-iq-output/serving-producers/serving-smoke-proof-<suffix>.json
+```
+
+The verifier requires all three producers, accepted submissions, matching
+artifact hashes, producer manifests, model-aware endpoint preflight, dashboard
+campaign rows, and runtime framework provenance.
 It fails fast unless all three URLs are configured and the configured endpoints
 pass the model-aware `/v1/models` preflight. Use `--allow-missing-engines` only
 for partial local debugging and `--skip-preflight` only when debugging a
 nonstandard endpoint by hand.
+When using `run-smoke.sh` for partial debugging, set
+`PIQ_SERVING_ALLOW_PARTIAL=true` so the wrapper only injects endpoint flags for
+explicitly configured engines, then pass `--allow-missing-engines`.
+You can also set unused endpoint env vars to empty strings, for example
+`PIQ_SGLANG_URL=` and `PIQ_TENSORRT_LLM_URL=`.
 
 Run a non-mutating readiness check first when setting up real engines:
 
@@ -192,6 +215,23 @@ PYTHONPATH=python/src python -m performance_iq_sdk.serving_smoke \
   --sglang-url http://127.0.0.1:30000 \
   --tensorrt-llm-url http://127.0.0.1:8001
 ```
+
+The local wrapper resolves the smoke Python and runtime source paths for you.
+Set these when framework packages live outside the default shell environment:
+
+```bash
+export PIQ_PYTHON_BIN=/opt/miniconda3/bin/python
+export PIQ_SERVING_BIN_DIR=/opt/miniconda3/bin
+export PIQ_VLLM_SOURCE_PATH=/Users/admin/vllm
+export PIQ_SGLANG_SOURCE_PATH=/Users/admin/sglang
+
+bash ops/serving-producers/run-smoke.sh preflight
+```
+
+`PIQ_PYTHON_BIN` selects the Python that runs the smoke CLI.
+`PIQ_SERVING_BIN_DIR` is prepended to `PATH` for runtime commands.
+`PIQ_VLLM_SOURCE_PATH` and `PIQ_SGLANG_SOURCE_PATH` are prepended to
+`PYTHONPATH` so source-build checkouts are visible to preflight.
 
 The preflight prints local binary/module status (`vllm`, `sglang`,
 `trtllm-serve`, `nvidia-smi`), local free disk for source builds/model

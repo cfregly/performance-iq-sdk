@@ -83,6 +83,7 @@ class PlatformReference(TypedDict):
     dashboardUrl: NotRequired[str]
     exportGeneratedAtUtc: NotRequired[str]
     preflightPath: NotRequired[str]
+    requestTraceIds: NotRequired[list[str]]
 
 
 class PerformanceIQRunInput(TypedDict):

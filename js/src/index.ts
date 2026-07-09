@@ -85,6 +85,7 @@ export interface PlatformReference {
   decisionBriefPath: string
   exportGeneratedAtUtc?: string
   preflightPath?: string
+  requestTraceIds?: string[]
 }
 
 export interface PerformanceIQRunInput {
@@ -270,6 +271,7 @@ export async function buildManifest(input: PerformanceIQRunInput): Promise<Produ
       dashboardUrl: input.platform?.dashboardUrl,
       exportGeneratedAtUtc: input.platform?.exportGeneratedAtUtc,
       preflightPath: input.platform?.preflightPath,
+      requestTraceIds: input.platform?.requestTraceIds,
     },
     methodology: input.methodology ?? "Submitted through the Performance IQ SDK.",
     limitations: input.limitations?.length ? input.limitations : ["No limitations were supplied by the producer."],
@@ -530,4 +532,5 @@ export {
   type ServingProducerResult,
   type ServingRequestConfig,
   type ServingRequestSample,
+  type ServingTokenTimelineChunk,
 } from "./serving"

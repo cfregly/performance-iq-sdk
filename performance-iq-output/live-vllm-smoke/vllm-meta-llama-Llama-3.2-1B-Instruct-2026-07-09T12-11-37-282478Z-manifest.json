@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "performance-iq.producer-manifest.v1",
+  "runClass": "measured",
+  "sourceType": "other-measured-producer",
+  "generatedAtUtc": "2026-07-09T12:11:38.056994Z",
+  "producer": {
+    "repo": "performance-iq-sdk",
+    "tool": "vllm-serving-producer",
+    "commitSha": "localservingproducer"
+  },
+  "campaign": {
+    "campaignId": "serving-vllm-20260709T121130Z",
+    "runId": "serving-vllm-20260709T121130Z-run",
+    "capturedAtUtc": "2026-07-09T12:11:37.282478Z",
+    "completedAtUtc": "2026-07-09T12:11:38.056985Z"
+  },
+  "workload": {
+    "model": "meta-llama/Llama-3.2-1B-Instruct",
+    "hardware": "local serving endpoint",
+    "operatingPoint": "serving-smoke",
+    "scenario": "Real endpoint smoke for vLLM"
+  },
+  "runtime": {
+    "imageDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "framework": "vLLM"
+  },
+  "artifacts": [
+    {
+      "kind": "normalized-summary",
+      "path": "./performance-iq-output/live-vllm-smoke/vllm-meta-llama-Llama-3.2-1B-Instruct-2026-07-09T12-11-37-282478Z.json",
+      "sha256": "7a76a3ac5c2fcfc8ef8e96b86b3ca2c6e9fd62d0b820ac6878cbdd7e4c2d8bb9",
+      "sizeBytes": 3333
+    }
+  ],
+  "store": {
+    "sourceTables": [
+      "platform_store.object_store.producer_runner_result_bundles",
+      "platform_store.iceberg.intake_store.producer_runner_results"
+    ],
+    "modelTables": [
+      "model_store.sdk_pending_ingest"
+    ],
+    "rowProof": [
+      {
+        "table": "model_store.sdk_pending_ingest",
+        "campaignId": "serving-vllm-20260709T121130Z",
+        "rowCount": 1,
+        "latestCapturedAtUtc": "2026-07-09T12:11:37.282478Z"
+      }
+    ]
+  },
+  "platform": {
+    "decisionBriefPath": "performance-iq://serving-producer",
+    "requestTraceIds": [
+      "piq-vllm-serving-vllm-20260709T121130Z-run-request-1"
+    ]
+  },
+  "methodology": "vLLM producer sent 1 OpenAI-compatible chat completion request(s) with x-performance-iq-* trace headers; metrics come from response usage fields and wall-clock request latency.",
+  "limitations": [
+    "Serving producer captures request-path, usage, latency, and provenance; hardware-level power/kernel counters require engine-side or cluster instrumentation."
+  ],
+  "confidentiality": "operator-full"
+}

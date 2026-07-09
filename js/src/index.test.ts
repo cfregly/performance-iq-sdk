@@ -150,17 +150,21 @@ describe("performance-iq-sdk js", () => {
   it("captures OpenAI-compatible serving engine data as a producer run", async () => {
     const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "piq-serving-test-"))
     tmpDirs.push(artifactDir)
-    const requests: unknown[] = []
+    const requests: Array<{ body: unknown; headers: HeadersInit | undefined }> = []
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      requests.push(JSON.parse(String(init?.body)))
-      return new Response(JSON.stringify({
-        id: "chatcmpl-test",
-        model: laptopSmokeModel(),
-        choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }],
-        usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 },
-      }), {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        headers: init?.headers,
+      })
+      const body = [
+        { id: "chatcmpl-test", model: laptopSmokeModel(), choices: [{ delta: { role: "assistant" } }] },
+        { id: "chatcmpl-test", model: laptopSmokeModel(), choices: [{ delta: { content: "o" } }] },
+        { id: "chatcmpl-test", model: laptopSmokeModel(), choices: [{ delta: { content: "k" }, finish_reason: "stop" }] },
+        { id: "chatcmpl-test", model: laptopSmokeModel(), choices: [], usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 } },
+      ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n"
+      return new Response(body, {
         status: 200,
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "text/event-stream" },
       })
     })
 
@@ -193,16 +197,32 @@ describe("performance-iq-sdk js", () => {
     })
 
     expect(fetchImpl).toHaveBeenCalledTimes(2)
-    expect(requests).toEqual([
-      expect.objectContaining({ model: laptopSmokeModel(), max_tokens: 64 }),
-      expect.objectContaining({ model: laptopSmokeModel(), max_tokens: 64 }),
+    expect(requests.map((request) => request.body)).toEqual([
+      expect.objectContaining({ model: laptopSmokeModel(), max_tokens: 64, stream: true }),
+      expect.objectContaining({ model: laptopSmokeModel(), max_tokens: 64, stream: true }),
     ])
+    expect(requests[0].headers).toMatchObject({
+      "x-performance-iq-engine": "vllm",
+      "x-performance-iq-request-id": expect.stringContaining("piq-vllm-"),
+    })
     expect(result.engine).toBe("vllm")
     expect(result.manifest.producer.tool).toBe("vllm-serving-producer")
     expect(result.manifest.runtime.framework).toBe(servingEngineLabel("vllm"))
     expect(result.manifest.sourceType).toBe("other-measured-producer")
     expect(result.manifest.artifacts[0].path).toBe(result.artifactPath)
     expect(result.samples.every((sample) => sample.ok)).toBe(true)
+    expect(result.samples.every((sample) => sample.streaming)).toBe(true)
+    expect(result.samples[0]).toMatchObject({
+      ttftSource: "client-stream-content",
+      promptTokens: 12,
+      completionTokens: 8,
+      totalTokens: 20,
+      outputTokenCount: 8,
+      streamChunkCount: 5,
+    })
+    expect(result.samples[0].ttftMs).not.toBeNull()
+    expect(result.samples[0].tpotMs).not.toBeNull()
+    expect(result.samples[0].ttfotMs).not.toBeNull()
     expect(result.measurements[0]).toMatchObject({
       model: laptopSmokeModel(),
       runtimeFramework: "vLLM",
@@ -212,6 +232,8 @@ describe("performance-iq-sdk js", () => {
       completionTokens: 16,
       totalTokens: 40,
     })
+    expect(result.measurements.filter((row) => row.surface === "serving_request_sample")).toHaveLength(2)
+    expect(result.measurements.filter((row) => row.surface === "serving_token_timeline")).toHaveLength(4)
     expect(fs.existsSync(result.artifactPath)).toBe(true)
     expect(fs.existsSync(result.manifestPath)).toBe(true)
     const artifact = JSON.parse(fs.readFileSync(result.artifactPath, "utf-8"))
@@ -220,9 +242,16 @@ describe("performance-iq-sdk js", () => {
       url: "http://127.0.0.1:8000/v1/models",
       modelAvailable: true,
     })
+    expect(artifact.samples[0].requestId).toBe((requests[0].headers as Record<string, string>)["x-performance-iq-request-id"])
+    expect(artifact.samples[0].endpoint).toBe("http://127.0.0.1:8000/v1/chat/completions")
+    expect(artifact.requestTrace[0].requestId).toBe(artifact.samples[0].requestId)
+    expect(artifact.request.messages).toBeUndefined()
+    expect(artifact.capturePolicy.mode).toBe("operator-full")
     expect(manifestArtifact.campaign.campaignId).toBe(result.manifest.campaign.campaignId)
     expect(manifestArtifact.artifacts[0].path).toBe(result.artifactPath)
     expect(manifestArtifact.artifacts[0].sha256).toBe(result.manifest.artifacts[0].sha256)
+    expect(manifestArtifact.artifacts.some((entry: { kind: string }) => entry.kind === "operator-full-serving-raw")).toBe(true)
+    expect(manifestArtifact.platform.requestTraceIds).toEqual(result.samples.map((sample) => sample.requestId))
     expect((await validateRun(result.runInput)).ok).toBe(true)
   })
 })

@@ -38,11 +38,18 @@ spec:
               value: http://tensorrt-llm:8001
             - name: PIQ_ARTIFACT_DIR
               value: /tmp/performance-iq-serving-producers
+            - name: PIQ_SERVING_RECEIPT_LOG
+              value: /tmp/performance-iq-serving-producers/request-receipts.jsonl
+            - name: PIQ_SERVING_SUMMARY_OUT
+              value: /tmp/performance-iq-serving-producers/serving-smoke-proof.json
           command:
             - python
             - -m
             - performance_iq_sdk.serving_smoke
           args:
             - --query-dashboard
+            - --record-receipts
+            - --receipt-log
+            - $(PIQ_SERVING_RECEIPT_LOG)
             - --repetitions
             - "3"
