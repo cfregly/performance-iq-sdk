@@ -758,22 +758,47 @@ function tokenIdFrom(item: Record<string, any>): number | null {
   return null
 }
 
-function sanitizeTopLogprobs(value: unknown): Array<Record<string, unknown>> {
+function tokenIdWithSource(
+  item: Record<string, any>,
+  token: string,
+  config: ServingProducerConfig,
+): { tokenId: number | null; tokenIdSource: string | null } {
+  const responseTokenId = tokenIdFrom(item)
+  if (responseTokenId != null) return { tokenId: responseTokenId, tokenIdSource: "response-logprobs" }
+
+  const mapped = config.engine.tokenIdMap?.[token]
+  if (Number.isInteger(mapped)) return { tokenId: Number(mapped), tokenIdSource: "configured-token-id-map" }
+  if (typeof mapped === "string" && /^\d+$/.test(mapped)) {
+    return { tokenId: Number(mapped), tokenIdSource: "configured-token-id-map" }
+  }
+
+  const resolved = config.engine.tokenIdResolver?.(token, item, config.engine, config.request)
+  if (Number.isInteger(resolved)) return { tokenId: Number(resolved), tokenIdSource: "configured-token-id-resolver" }
+  if (typeof resolved === "string" && /^\d+$/.test(resolved)) {
+    return { tokenId: Number(resolved), tokenIdSource: "configured-token-id-resolver" }
+  }
+
+  return { tokenId: null, tokenIdSource: null }
+}
+
+function sanitizeTopLogprobs(value: unknown, config: ServingProducerConfig): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) return []
   return value.flatMap((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return []
     const raw = item as Record<string, any>
     const token = typeof raw.token === "string" ? raw.token : ""
+    const { tokenId, tokenIdSource } = tokenIdWithSource(raw, token, config)
     return [{
       tokenSha256: token ? sha256Text(token) : null,
       tokenBytes: token ? Buffer.byteLength(token) : null,
-      tokenId: tokenIdFrom(raw),
+      tokenId,
+      tokenIdSource,
       logprob: numberFrom(raw.logprob),
     }]
   })
 }
 
-function choiceTokenDetails(body: Record<string, any>): Array<Record<string, any>> {
+function choiceTokenDetails(body: Record<string, any>, config: ServingProducerConfig): Array<Record<string, any>> {
   const content = choice(body).logprobs?.content
   if (!Array.isArray(content)) return []
   return content.flatMap((item) => {
@@ -781,13 +806,15 @@ function choiceTokenDetails(body: Record<string, any>): Array<Record<string, any
     const raw = item as Record<string, any>
     const token = typeof raw.token === "string" ? raw.token : ""
     const bytes = Array.isArray(raw.bytes) ? raw.bytes : null
+    const { tokenId, tokenIdSource } = tokenIdWithSource(raw, token, config)
     return [{
       tokenText: token,
       tokenSha256: token ? sha256Text(token) : null,
       tokenBytes: token ? Buffer.byteLength(token) : bytes?.length ?? null,
-      tokenId: tokenIdFrom(raw),
+      tokenId,
+      tokenIdSource,
       logprob: numberFrom(raw.logprob),
-      topLogprobs: sanitizeTopLogprobs(raw.top_logprobs ?? raw.topLogprobs),
+      topLogprobs: sanitizeTopLogprobs(raw.top_logprobs ?? raw.topLogprobs, config),
     }]
   })
 }
@@ -800,14 +827,21 @@ function tokenDetailSummary(details: Array<Record<string, any>>, requested: bool
       logprobsAvailable: false,
       tokenDetailCount: 0,
       tokenDetailSource: requested ? "requested-not-exposed" : "not-requested",
+      tokenIdSource: null,
     }
   }
+  const tokenIdSources = Array.from(new Set(
+    details
+      .filter((detail) => detail.tokenId != null && typeof detail.tokenIdSource === "string")
+      .map((detail) => String(detail.tokenIdSource)),
+  ))
   return {
     tokenDetailsAvailable: true,
     tokenIdsAvailable: details.some((detail) => detail.tokenId != null),
     logprobsAvailable: details.some((detail) => detail.logprob != null),
     tokenDetailCount: details.length,
     tokenDetailSource: "response-logprobs",
+    tokenIdSource: tokenIdSources.length ? tokenIdSources.join("+") : null,
   }
 }
 
@@ -919,7 +953,7 @@ async function sendChatCompletion(
         }
         const content = choiceContent(body)
         if (content) {
-          const tokenDetails = choiceTokenDetails(body)
+          const tokenDetails = choiceTokenDetails(body, config)
           rawTokenDetails.push(...tokenDetails.map((detail) => ({ ...detail, chunkIndex: outputChunks.length })))
           outputChunks.push({
             chunkIndex: outputChunks.length,
@@ -967,6 +1001,7 @@ async function sendChatCompletion(
               contentSha256: detail.tokenSha256 ?? sha256Text(chunk.content),
               isFirstOutput: tokenIndex === 0,
               tokenId: numberFrom(detail.tokenId),
+              tokenIdSource: typeof detail.tokenIdSource === "string" ? detail.tokenIdSource : null,
               tokenLogprob: numberFrom(detail.logprob),
               tokenTextSha256: typeof detail.tokenSha256 === "string" ? detail.tokenSha256 : null,
               topLogprobsJson: topLogprobs.length ? JSON.stringify(topLogprobs) : null,
@@ -985,6 +1020,7 @@ async function sendChatCompletion(
             contentSha256: sha256Text(chunk.content),
             isFirstOutput: chunk.chunkIndex === 0,
             tokenId: null,
+            tokenIdSource: null,
             tokenLogprob: null,
             tokenTextSha256: null,
             topLogprobsJson: null,
@@ -1063,6 +1099,7 @@ async function sendChatCompletion(
           logprobsAvailable: boolean
           tokenDetailCount: number
           tokenDetailSource: string
+          tokenIdSource: string | null
         }),
         queueWaitMs: numberFrom(telemetry.queueWaitMs),
         prefillMs: numberFrom(telemetry.prefillMs),
@@ -1096,7 +1133,7 @@ async function sendChatCompletion(
       nativeMetricsDelta(config, nativeBefore, nativeAfter),
     )
     const hwTelemetry = hardwareMetricsDelta(config, hardwareBefore, hardwareAfter)
-    const rawTokenDetails = choiceTokenDetails(body)
+    const rawTokenDetails = choiceTokenDetails(body, config)
     const tokenSummary = tokenDetailSummary(rawTokenDetails, tokenDetailsRequested)
     const tokenTimeline = rawTokenDetails.map((detail, index): ServingTokenTimelineChunk => ({
       requestId,
@@ -1108,6 +1145,7 @@ async function sendChatCompletion(
       contentSha256: typeof detail.tokenSha256 === "string" ? detail.tokenSha256 : "",
       isFirstOutput: index === 0,
       tokenId: numberFrom(detail.tokenId),
+      tokenIdSource: typeof detail.tokenIdSource === "string" ? detail.tokenIdSource : null,
       tokenLogprob: numberFrom(detail.logprob),
       tokenTextSha256: typeof detail.tokenSha256 === "string" ? detail.tokenSha256 : null,
       topLogprobsJson: Array.isArray(detail.topLogprobs) && detail.topLogprobs.length ? JSON.stringify(detail.topLogprobs) : null,
@@ -1181,6 +1219,7 @@ async function sendChatCompletion(
         logprobsAvailable: boolean
         tokenDetailCount: number
         tokenDetailSource: string
+        tokenIdSource: string | null
       }),
       queueWaitMs: numberFrom(telemetry.queueWaitMs),
       prefillMs: numberFrom(telemetry.prefillMs),
@@ -1239,6 +1278,7 @@ async function sendChatCompletion(
       logprobsAvailable: false,
       tokenDetailCount: 0,
       tokenDetailSource: "error",
+      tokenIdSource: null,
       error: error instanceof Error ? error.message : String(error),
     }
   }
