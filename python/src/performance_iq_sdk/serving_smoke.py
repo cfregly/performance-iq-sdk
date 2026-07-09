@@ -155,9 +155,11 @@ def _with_model_check(result: dict[str, Any], body: dict[str, Any] | None, model
     if not served_models:
         return {
             **result,
+            "ok": False,
             "modelChecked": False,
             "servedModels": [],
             "modelAvailable": None,
+            "error": "GET /v1/models did not return standard data[].id model entries.",
         }
     model_available = model in served_models
     return {
@@ -201,7 +203,8 @@ def endpoint_probe(engine: dict[str, Any], model: str | None = None) -> dict[str
             "url": url,
             "reachable": True,
             "status": exc.code,
-            "ok": exc.code in {401, 403},
+            "ok": False,
+            "authFailed": exc.code in {401, 403},
             "bodyPreview": body[:300],
         }
     except Exception as exc:

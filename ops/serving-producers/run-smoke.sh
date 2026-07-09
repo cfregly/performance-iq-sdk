@@ -11,7 +11,7 @@ Usage:
 
 Modes:
   launch-plan  Print host-aware launch commands.
-  preflight    Probe all configured /v1/models endpoints for the smoke model.
+  preflight    Check all configured /v1/models endpoints for the smoke model.
   smoke        Submit producer runs and verify dashboard query surfaces.
   no-submit    Send requests and write artifacts without submitting runs.
 USAGE

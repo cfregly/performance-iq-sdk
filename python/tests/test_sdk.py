@@ -327,6 +327,65 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertFalse(result["modelAvailable"])
         self.assertFalse(result["ok"])
 
+    def test_serving_smoke_endpoint_preflight_rejects_nonstandard_model_list(self):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                return
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"object":"list","models":["not-standard"]}')
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = endpoint_probe({
+                "engine": "tensorrt-llm",
+                "baseUrl": f"http://127.0.0.1:{server.server_address[1]}",
+            }, model=laptop_smoke_model())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertTrue(result["reachable"])
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["modelChecked"])
+        self.assertIsNone(result["modelAvailable"])
+        self.assertIn("data[].id", result["error"])
+
+    def test_serving_smoke_endpoint_preflight_rejects_auth_error(self):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                return
+
+            def do_GET(self):
+                self.send_response(401)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"unauthorized"}')
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = endpoint_probe({
+                "engine": "vllm",
+                "baseUrl": f"http://127.0.0.1:{server.server_address[1]}",
+            }, model=laptop_smoke_model())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertTrue(result["reachable"])
+        self.assertEqual(result["status"], 401)
+        self.assertTrue(result["authFailed"])
+        self.assertFalse(result["ok"])
+
     def test_serving_smoke_main_preflight_blocks_wrong_model_before_request(self):
         calls = {"post": 0}
 

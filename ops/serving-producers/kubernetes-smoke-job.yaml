@@ -14,7 +14,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: smoke
-          image: performance-iq-sdk:latest
+          image: performance-iq-sdk:serving-smoke
           imagePullPolicy: IfNotPresent
           env:
             - name: PIQ_BASE_URL

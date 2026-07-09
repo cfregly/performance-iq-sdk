@@ -190,12 +190,13 @@ PYTHONPATH=python/src python -m performance_iq_sdk.serving_smoke \
 
 The preflight prints local binary/module status (`vllm`, `sglang`,
 `trtllm-serve`, `nvidia-smi`), local free disk for source builds/model
-downloads, and probes each configured endpoint at
-`/v1/models`. When the endpoint returns a standard model list, the preflight
-also verifies that the configured smoke model is actually served. It does not
-send inference requests or write Performance IQ runs.
+downloads, and checks each configured endpoint at
+`/v1/models`. The endpoint must return a standard OpenAI-compatible model list
+with the configured smoke model in `data[].id`; otherwise the proof run fails
+before any inference requests are sent. It does not send inference requests or
+write Performance IQ runs.
 
-To print the host-aware launch plan without probing endpoints:
+To print the host-aware launch plan without checking endpoints:
 
 ```bash
 PYTHONPATH=python/src python -m performance_iq_sdk.serving_smoke \

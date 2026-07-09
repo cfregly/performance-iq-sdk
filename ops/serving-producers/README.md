@@ -10,7 +10,8 @@ OpenAI-compatible API with:
 - `POST /v1/chat/completions`
 
 The smoke runner uses the same model and prompt across all three engines,
-preflights `/v1/models`, sends completion requests, writes per-engine
+preflights `/v1/models` until the exact model appears in `data[].id`, sends
+completion requests, writes per-engine
 normalized summary artifacts, submits producer runs, and verifies the fixed
 Performance IQ dashboard query surfaces.
 
@@ -20,9 +21,10 @@ Performance IQ dashboard query surfaces.
   Performance IQ.
 - `docker-compose.nvidia.yaml` - NVIDIA/Linux local stack template for the
   three serving engines.
+- `Dockerfile.smoke` - smoke-runner image for Kubernetes or remote operator
+  hosts.
 - `kubernetes-smoke-job.yaml` - cluster job template for running the smoke
-  from inside the same network as deployed engines. Replace
-  `performance-iq-sdk:latest` with your built SDK image before applying it.
+  from inside the same network as deployed engines.
 - `run-smoke.sh` - local wrapper around `performance_iq_sdk.serving_smoke`.
 
 ## Local NVIDIA Host
@@ -98,3 +100,17 @@ bash ops/serving-producers/run-smoke.sh smoke
 
 Do not use `--skip-preflight` for proof runs. It exists only for targeted
 debugging of nonstandard endpoints.
+
+## Kubernetes Smoke Image
+
+Build and push the smoke-runner image from the repository root:
+
+```bash
+docker build \
+  -f ops/serving-producers/Dockerfile.smoke \
+  -t performance-iq-sdk:serving-smoke .
+```
+
+For a remote cluster, retag and push that image to the cluster registry, update
+`kubernetes-smoke-job.yaml`, and apply the job in the namespace that can reach
+the three engine services.
