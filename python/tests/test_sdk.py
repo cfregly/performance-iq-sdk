@@ -194,10 +194,16 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(result["manifest"]["runtime"]["framework"], "SGLang")
         self.assertEqual(result["manifest"]["sourceType"], "other-measured-producer")
         self.assertTrue(os.path.exists(result["artifactPath"]))
+        self.assertTrue(os.path.exists(result["manifestPath"]))
         with open(result["artifactPath"], encoding="utf-8") as handle:
             artifact = json.load(handle)
+        with open(result["manifestPath"], encoding="utf-8") as handle:
+            manifest_artifact = json.load(handle)
         self.assertEqual(artifact["endpointPreflight"]["url"], "http://127.0.0.1:30000/v1/models")
         self.assertTrue(artifact["endpointPreflight"]["modelAvailable"])
+        self.assertEqual(manifest_artifact["campaign"]["campaignId"], result["manifest"]["campaign"]["campaignId"])
+        self.assertEqual(manifest_artifact["artifacts"][0]["path"], result["artifactPath"])
+        self.assertEqual(manifest_artifact["artifacts"][0]["sha256"], result["manifest"]["artifacts"][0]["sha256"])
         self.assertEqual(result["measurements"][0]["runtimeEngine"], "sglang")
         self.assertEqual(result["measurements"][0]["completionTokens"], 14)
         self.assertTrue(validate_run(result["runInput"])["ok"])
@@ -260,6 +266,8 @@ class PerformanceIQSdkTest(unittest.TestCase):
         )
         self.assertTrue(all(item["status"] == "accepted" for item in summary["submissions"]))
         self.assertTrue(all(item["successCount"] == 2 for item in summary["submissions"]))
+        self.assertTrue(all(os.path.exists(item["manifestPath"]) for item in summary["submissions"]))
+        self.assertTrue(all(item["artifactSha256"] for item in summary["submissions"]))
 
     def test_serving_smoke_reports_missing_engine_urls(self):
         class Args:
@@ -513,8 +521,10 @@ class PerformanceIQSdkTest(unittest.TestCase):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
+        stdout = StringIO()
+        stderr = StringIO()
         try:
-            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            with redirect_stdout(stdout), redirect_stderr(stderr):
                 code = serving_smoke_main([
                     "--vllm-url", f"http://127.0.0.1:{server.server_address[1]}",
                     "--allow-missing-engines",
@@ -529,7 +539,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 0, stderr.getvalue() + stdout.getvalue())
         self.assertEqual(calls["post"], 1)
         proof_path = os.path.join(self.tmp_dir, "serving-smoke-proof-unit-summary.json")
         self.assertTrue(os.path.exists(proof_path))
@@ -539,6 +549,8 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(proof["runSuffix"], "unit-summary")
         self.assertEqual(proof["proofSummaryPath"], proof_path)
         self.assertEqual(proof["submissions"][0]["campaignId"], "serving-vllm-unit-summary")
+        self.assertTrue(os.path.exists(proof["submissions"][0]["manifestPath"]))
+        self.assertTrue(proof["submissions"][0]["artifactSha256"])
         self.assertTrue(proof["preflight"]["ready"])
 
     def test_serving_smoke_dashboard_query_reports_campaign_surfaces(self):

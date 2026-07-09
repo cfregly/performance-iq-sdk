@@ -213,11 +213,16 @@ describe("performance-iq-sdk js", () => {
       totalTokens: 40,
     })
     expect(fs.existsSync(result.artifactPath)).toBe(true)
+    expect(fs.existsSync(result.manifestPath)).toBe(true)
     const artifact = JSON.parse(fs.readFileSync(result.artifactPath, "utf-8"))
+    const manifestArtifact = JSON.parse(fs.readFileSync(result.manifestPath, "utf-8"))
     expect(artifact.endpointPreflight).toMatchObject({
       url: "http://127.0.0.1:8000/v1/models",
       modelAvailable: true,
     })
+    expect(manifestArtifact.campaign.campaignId).toBe(result.manifest.campaign.campaignId)
+    expect(manifestArtifact.artifacts[0].path).toBe(result.artifactPath)
+    expect(manifestArtifact.artifacts[0].sha256).toBe(result.manifest.artifacts[0].sha256)
     expect((await validateRun(result.runInput)).ok).toBe(true)
   })
 })

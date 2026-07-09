@@ -48,6 +48,10 @@ def _normalize_base_url(value: str) -> str:
     return value.rstrip("/")
 
 
+def _safe_slug(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in value).strip("-") or "value"
+
+
 def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> ServingPostResult:
     request = urllib.request.Request(
         url,
@@ -209,7 +213,7 @@ def _write_summary_artifact(
     measurements: list[dict[str, Any]],
 ) -> str:
     os.makedirs(artifact_dir, exist_ok=True)
-    safe_model = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in request["model"]).strip("-")
+    safe_model = _safe_slug(request["model"])
     artifact_path = os.path.join(
         artifact_dir,
         f"{engine['engine']}-{safe_model}-{captured_at_utc.replace(':', '-').replace('.', '-')}.json",
@@ -234,6 +238,25 @@ def _write_summary_artifact(
         )
         handle.write("\n")
     return artifact_path
+
+
+def _write_manifest_artifact(
+    engine: dict[str, Any],
+    request: dict[str, Any],
+    artifact_dir: str,
+    captured_at_utc: str,
+    manifest: dict[str, Any],
+) -> str:
+    os.makedirs(artifact_dir, exist_ok=True)
+    safe_model = _safe_slug(request["model"])
+    manifest_path = os.path.join(
+        artifact_dir,
+        f"{engine['engine']}-{safe_model}-{captured_at_utc.replace(':', '-').replace('.', '-')}-manifest.json",
+    )
+    with open(manifest_path, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+        handle.write("\n")
+    return manifest_path
 
 
 def run_serving_producer(
@@ -269,10 +292,11 @@ def run_serving_producer(
         **(workload or {}),
     }
     measurements = _build_measurements(engine, request, workload, pricing, samples, captured_at_utc)
+    artifact_root = artifact_dir or os.path.join(os.getcwd(), ".performance-iq", "serving-producers")
     artifact_path = _write_summary_artifact(
         engine,
         request,
-        artifact_dir or os.path.join(os.getcwd(), ".performance-iq", "serving-producers"),
+        artifact_root,
         captured_at_utc,
         samples,
         measurements,
@@ -320,10 +344,12 @@ def run_serving_producer(
         del run_input["runtime"]["imageTag"]
 
     manifest = build_manifest(run_input)
+    manifest_path = _write_manifest_artifact(engine, request, artifact_root, captured_at_utc, manifest)
     submission = performance_iq.submit_run(run_input, idempotency_key=manifest["campaign"]["runId"]) if performance_iq and submit else None
     return {
         "engine": engine["engine"],
         "manifest": manifest,
+        "manifestPath": manifest_path,
         "runInput": run_input,
         "artifactPath": artifact_path,
         "samples": samples,

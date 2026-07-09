@@ -664,6 +664,8 @@ def run_serving_smoke(
             "campaignId": result["manifest"]["campaign"]["campaignId"],
             "runId": result["manifest"]["campaign"]["runId"],
             "artifactPath": result["artifactPath"],
+            "artifactSha256": result["manifest"]["artifacts"][0]["sha256"],
+            "manifestPath": result["manifestPath"],
             "errors": [sample.get("error") for sample in result["samples"] if sample.get("error")],
         })
     return {

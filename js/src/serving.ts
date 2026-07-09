@@ -75,6 +75,7 @@ export interface ServingProducerResult {
   manifest: ProducerRunManifest
   runInput: PerformanceIQRunInput
   artifactPath: string
+  manifestPath: string
   samples: ServingRequestSample[]
   measurements: Record<string, unknown>[]
   submission?: unknown
@@ -90,6 +91,10 @@ const DEFAULT_IMAGE_DIGEST = `sha256:${"0".repeat(64)}`
 
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "")
+}
+
+function safeSlug(value: string): string {
+  return value.replace(/[^a-z0-9._-]+/gi, "-").replace(/^-|-$/g, "") || "value"
 }
 
 function nowIso(now: () => Date): string {
@@ -252,7 +257,7 @@ async function writeSummaryArtifact(
 ): Promise<string> {
   const artifactDir = config.artifactDir ?? path.join(process.cwd(), ".performance-iq", "serving-producers")
   await mkdir(artifactDir, { recursive: true })
-  const safeModel = config.request.model.replace(/[^a-z0-9._-]+/gi, "-").replace(/^-|-$/g, "")
+  const safeModel = safeSlug(config.request.model)
   const artifactPath = path.join(
     artifactDir,
     `${config.engine.engine}-${safeModel}-${capturedAtUtc.replace(/[:.]/g, "-")}.json`,
@@ -271,6 +276,22 @@ async function writeSummaryArtifact(
     measurements,
   }, null, 2) + "\n")
   return artifactPath
+}
+
+async function writeManifestArtifact(
+  config: ServingProducerConfig,
+  manifest: ProducerRunManifest,
+  capturedAtUtc: string,
+): Promise<string> {
+  const artifactDir = config.artifactDir ?? path.join(process.cwd(), ".performance-iq", "serving-producers")
+  await mkdir(artifactDir, { recursive: true })
+  const safeModel = safeSlug(config.request.model)
+  const manifestPath = path.join(
+    artifactDir,
+    `${config.engine.engine}-${safeModel}-${capturedAtUtc.replace(/[:.]/g, "-")}-manifest.json`,
+  )
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n")
+  return manifestPath
 }
 
 export async function runServingProducer(config: ServingProducerConfig): Promise<ServingProducerResult> {
@@ -336,6 +357,7 @@ export async function runServingProducer(config: ServingProducerConfig): Promise
     runInput.runtime.imageTag = runInput.runtime.imageTag ?? `${config.engine.engine}:${config.engine.frameworkVersion}`
   }
   const manifest = await buildManifest(runInput)
+  const manifestPath = await writeManifestArtifact(config, manifest, capturedAtUtc)
   const submission = config.performanceIq && config.submit !== false
     ? await config.performanceIq.submitRun(runInput, { idempotencyKey: manifest.campaign.runId })
     : undefined
@@ -345,6 +367,7 @@ export async function runServingProducer(config: ServingProducerConfig): Promise
     manifest,
     runInput,
     artifactPath,
+    manifestPath,
     samples,
     measurements,
     submission,
