@@ -40,6 +40,7 @@ ENGINE_DEFAULT_PORT = {
     "sglang": 30000,
     "tensorrt-llm": 8001,
 }
+LOW_FREE_SPACE_BYTES = 30 * 1024 * 1024 * 1024
 
 
 def _utc_slug() -> str:
@@ -113,6 +114,22 @@ def module_probe(module: str) -> dict[str, Any]:
         "module": module,
         "available": spec is not None,
         "origin": spec.origin if spec else None,
+    }
+
+
+def storage_probe(path: str | None = None) -> dict[str, Any]:
+    target = path or os.getcwd()
+    try:
+        usage = shutil.disk_usage(target)
+    except OSError as exc:
+        return {"path": target, "available": False, "error": str(exc)}
+    return {
+        "path": target,
+        "available": True,
+        "totalBytes": usage.total,
+        "freeBytes": usage.free,
+        "freeGiB": round(usage.free / (1024 ** 3), 2),
+        "lowFreeSpace": usage.free < LOW_FREE_SPACE_BYTES,
     }
 
 
@@ -199,12 +216,20 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
     apple_silicon = system == "Darwin" and machine == "arm64"
     linux_nvidia = system == "Linux" and shutil.which("nvidia-smi") is not None
     quoted_model = shlex.quote(model)
+    storage = storage_probe()
+    warnings = []
+    if storage.get("lowFreeSpace"):
+        warnings.append(
+            f"{storage.get('freeGiB')} GiB free under {storage.get('path')}; source builds and model downloads may fail."
+        )
     return {
         "model": model,
         "host": {
             "system": system,
             "machine": machine,
         },
+        "storage": storage,
+        "warnings": warnings,
         "endpointEnv": {
             "PIQ_VLLM_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['vllm']}",
             "PIQ_SGLANG_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['sglang']}",
@@ -288,6 +313,7 @@ def runtime_preflight(engines: list[dict[str, Any]], missing_urls: list[str], mo
             "tensorrtLlmServeCommand": command_probe("trtllm-serve", "--help"),
             "nvidiaSmiCommand": command_probe("nvidia-smi"),
         },
+        "storage": storage_probe(),
         "missingEngineUrls": missing_urls,
         "endpoints": endpoint_results,
         "launchPlan": runtime_launch_plan(model or laptop_smoke_model()),

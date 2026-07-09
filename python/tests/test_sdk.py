@@ -240,6 +240,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(preflight["endpoints"], [])
         self.assertIn("vllmCommand", preflight["localRuntime"])
         self.assertIn("python", preflight["host"])
+        self.assertIn("freeGiB", preflight["storage"])
         self.assertEqual(preflight["launchPlan"]["model"], laptop_smoke_model())
         self.assertEqual(preflight["launchPlan"]["endpointEnv"]["PIQ_VLLM_URL"], "http://127.0.0.1:8000")
 
@@ -250,6 +251,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertIn("vllm serve", plan["engines"]["vllm"]["serve"])
         self.assertIn("sglang.launch_server", plan["engines"]["sglang"]["serve"])
         self.assertIn("trtllm-serve", plan["engines"]["tensorrt-llm"]["serve"])
+        self.assertIn("freeGiB", plan["storage"])
         self.assertEqual(plan["endpointEnv"]["PIQ_SGLANG_URL"], "http://127.0.0.1:30000")
 
     def test_serving_smoke_endpoint_preflight_rejects_not_found_models_route(self):
