@@ -260,6 +260,74 @@ describe("performance-iq-sdk js", () => {
     expect((await validateRun(result.runInput)).ok).toBe(true)
   })
 
+  it("fails closed when a streaming serving response is interrupted", async () => {
+    const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "piq-serving-interrupted-test-"))
+    tmpDirs.push(artifactDir)
+    const encoder = new TextEncoder()
+    const fetchImpl = vi.fn(async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+          id: "chatcmpl-interrupted",
+          model: laptopSmokeModel(),
+          choices: [{ delta: { role: "assistant" } }],
+        })}\n\n`))
+        controller.error(new Error("stream interrupted after role chunk"))
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }))
+
+    const result = await runServingProducer({
+      engine: {
+        engine: "vllm",
+        baseUrl: "http://127.0.0.1:8000",
+        frameworkVersion: "test",
+      },
+      request: {
+        model: laptopSmokeModel(),
+        messages: [{ role: "user", content: "Say ok." }],
+        repetitions: 1,
+      },
+      artifactDir,
+      sourceType: "other-measured-producer",
+      runClass: "measured",
+      workload: {
+        hardware: "local stream engine",
+        operatingPoint: "laptop-smoke",
+      },
+      pricing: { usdPerGpuHour: 1, gpuCount: 1, powerWattsPerGpu: 100 },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+
+    const sample = result.samples[0]
+    expect(sample.ok).toBe(false)
+    expect(sample.status).toBe(0)
+    expect(sample.streaming).toBe(true)
+    expect(sample.e2eLatencyMs).toEqual(expect.any(Number))
+    expect(sample.timeToFirstByteMs).toBeNull()
+    expect(sample.ttftMs).toBeNull()
+    expect(sample.ttfotMs).toBeNull()
+    expect(sample.tpotMs).toBeNull()
+    expect(sample.streamChunkCount).toBe(0)
+    expect(sample.outputTokenCount).toBe(0)
+    expect(sample.error).toContain("stream interrupted")
+
+    expect(result.measurements[0]).toMatchObject({
+      successCount: 0,
+      errorCount: 1,
+    })
+    expect(result.measurements[0].metricCompleteness as number).toBeLessThan(1)
+    const sampleRows = result.measurements.filter((row) => row.surface === "serving_request_sample")
+    const timelineRows = result.measurements.filter((row) => row.surface === "serving_token_timeline")
+    const coverageRows = result.measurements.filter((row) => row.surface === "serving_telemetry_coverage")
+    expect(sampleRows[0]).toMatchObject({ ok: false, ttftMs: null, tpotMs: null, ttfotMs: null })
+    expect(timelineRows).toHaveLength(0)
+    expect(coverageRows.find((row) => row.coverageCategory === "clientStreamTiming")).toMatchObject({
+      coverageStatus: "missing",
+    })
+  })
+
   it("captures native Prometheus telemetry deltas when a serving metrics URL is configured", async () => {
     const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "piq-serving-native-test-"))
     tmpDirs.push(artifactDir)
