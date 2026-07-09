@@ -392,6 +392,15 @@ class PerformanceIQSdkTest(unittest.TestCase):
             json.dump(artifact, handle, indent=2)
             handle.write("\n")
 
+    def rewrite_engine_artifact(self, summary, engine, mutate):
+        artifact_path = next(item["artifactPath"] for item in summary["submissions"] if item["engine"] == engine)
+        with open(artifact_path, encoding="utf-8") as handle:
+            artifact = json.load(handle)
+        mutate(artifact)
+        with open(artifact_path, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2)
+            handle.write("\n")
+
     def rewrite_proof_dashboard(self, proof_path, mutate):
         with open(proof_path, encoding="utf-8") as handle:
             proof = json.load(handle)
@@ -1771,6 +1780,34 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         joined = " ".join(verification["errors"])
         self.assertIn("tokenIdsAvailableCount must equal successCount", joined)
         self.assertIn("tokenTimeline[0].tokenId must be an integer", joined)
+
+    def test_serving_smoke_coverage_respects_engine_token_detail_not_required(self):
+        proof_path, summary = self.write_full_serving_proof()
+
+        def disable_sglang_output_token_details(artifact):
+            artifact["measurements"][0]["tokenDetailsRequired"] = False
+            artifact["measurements"][0]["tokenDetailsAvailableCount"] = 0
+            artifact["measurements"][0]["tokenIdsAvailableCount"] = 0
+            artifact["measurements"][0]["logprobsAvailableCount"] = 0
+            for sample in artifact["samples"]:
+                sample["tokenDetailsAvailable"] = False
+                sample["tokenIdsAvailable"] = False
+                sample["logprobsAvailable"] = False
+                sample["tokenDetailSource"] = "not-requested"
+                sample["tokenIdSource"] = None
+            for row in artifact["tokenTimeline"]:
+                if row.get("tokenPhase") != "prompt":
+                    row["tokenId"] = None
+                    row["tokenIdSource"] = None
+                    row["tokenLogprob"] = None
+
+        self.rewrite_engine_artifact(summary, "sglang", disable_sglang_output_token_details)
+
+        verification = verify_proof_summary(proof_path)
+        sglang_coverage = verification["telemetryCoverage"]["engines"]["sglang"]["outputTokenIdsLogprobs"]
+
+        self.assertEqual(sglang_coverage["expectedCount"], 0)
+        self.assertNotIn("sglang measurement tokenIdsAvailableCount must equal successCount", " ".join(verification["errors"]))
 
     def test_serving_smoke_verify_proof_rejects_missing_dashboard_rows(self):
         proof_path, _summary = self.write_full_serving_proof()
