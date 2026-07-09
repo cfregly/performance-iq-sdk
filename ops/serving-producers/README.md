@@ -285,6 +285,9 @@ Read two fields in the verifier output separately:
   IDs/logprobs, operator-full raw artifacts, request receipts, runtime
   provenance, dashboard fine-grain rows, raw native/DCGM metric snapshots, and
   Kafka-ready event rows.
+  Dashboard and event-log coverage is evaluated per required engine campaign,
+  so global row totals cannot prove vLLM, SGLang, or TensorRT-LLM coverage by
+  themselves.
 
 For a fail-closed product gate on an existing proof file, require full telemetry
 coverage explicitly:

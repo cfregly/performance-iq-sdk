@@ -304,6 +304,8 @@ rows, native runtime telemetry, DCGM hardware telemetry, prompt token IDs,
 output token IDs/logprobs, operator-full artifacts, raw native/DCGM metric
 snapshots, runtime provenance, and Kafka-ready event rows. `--dump-proof-rows` also emits
 `telemetryCoverageRows`, one row per engine/category from the verifier.
+Dashboard and Kafka-ready event-log coverage is evaluated per required engine
+campaign, not from global row totals alone.
 Add `--require-telemetry-coverage` to make `verify-proof` exit nonzero unless
 `telemetryCoverage.allProven` is true.
 It fails fast unless all three URLs are configured and the configured endpoints

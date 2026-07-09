@@ -2126,19 +2126,32 @@ def _build_producer_coverage_rows(
     prompt_required = bool(aggregate_row.get("promptTokenDetailsRequired"))
     native_expected = expected_samples if aggregate_row.get("nativeTelemetryRequired") else 0
     hardware_expected = expected_samples if aggregate_row.get("hardwareTelemetryRequired") else 0
+    sample_request_ids = [
+        sample.get("requestId")
+        for sample in successful
+        if isinstance(sample.get("requestId"), str)
+    ]
 
     coverage_specs: list[tuple[str, int, int, list[str]]] = []
+    output_request_ids = {
+        row.get("requestId")
+        for sample in successful
+        for row in (sample.get("tokenTimeline") or [])
+        if isinstance(row, dict)
+        and row.get("tokenPhase", "output") == "output"
+        and isinstance(row.get("requestId"), str)
+    }
     stream_proven = sum(
         1 for sample in successful
         if sample.get("streaming") is True
+        and sample.get("requestId") in output_request_ids
         and all(isinstance(sample.get(key), (int, float)) for key in ["e2eLatencyMs", "timeToFirstByteMs", "ttftMs", "ttfotMs", "tpotMs"])
-        and any(isinstance(row, dict) and row.get("tokenPhase", "output") == "output" for row in (sample.get("tokenTimeline") or []))
     )
     coverage_specs.append((
         "clientStreamTiming",
         stream_proven,
         expected_samples,
-        [] if stream_proven == expected_samples else ["stream timing or output token timeline rows missing"],
+        [] if stream_proven == expected_samples else ["stream timing or request-level output token timeline rows missing"],
     ))
 
     native_proven = sum(
@@ -2171,6 +2184,17 @@ def _build_producer_coverage_rows(
         and isinstance(sample.get("promptTokenIdsSha256"), str)
         and isinstance(sample.get("promptTokenIdSource"), str)
     )
+    prompt_row_request_ids = {
+        row.get("requestId")
+        for sample in successful
+        for row in (sample.get("tokenTimeline") or [])
+        if isinstance(row, dict)
+        and row.get("tokenPhase") == "prompt"
+        and isinstance(row.get("requestId"), str)
+        and isinstance(row.get("tokenId"), int)
+    }
+    prompt_rows_proven = sum(1 for request_id in sample_request_ids if request_id in prompt_row_request_ids)
+    prompt_proven = min(prompt_proven, prompt_rows_proven)
     coverage_specs.append((
         "promptTokenIds",
         prompt_proven,
@@ -2185,6 +2209,24 @@ def _build_producer_coverage_rows(
         and sample.get("logprobsAvailable") is True
         and isinstance(sample.get("tokenIdSource"), str)
     )
+    valid_output_request_ids = set()
+    for sample in successful:
+        request_id = sample.get("requestId")
+        if not isinstance(request_id, str):
+            continue
+        output_rows = [
+            row for row in (sample.get("tokenTimeline") or [])
+            if isinstance(row, dict) and row.get("tokenPhase", "output") == "output"
+        ]
+        if output_rows and all(
+            isinstance(row.get("tokenId"), int)
+            and isinstance(row.get("tokenIdSource"), str)
+            and isinstance(row.get("tokenLogprob"), (int, float))
+            for row in output_rows
+        ):
+            valid_output_request_ids.add(request_id)
+    output_rows_proven = sum(1 for request_id in sample_request_ids if request_id in valid_output_request_ids)
+    output_proven = min(output_proven, output_rows_proven)
     coverage_specs.append((
         "outputTokenIdsLogprobs",
         output_proven,

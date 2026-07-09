@@ -30,6 +30,7 @@ from performance_iq_sdk.serving_smoke import (
     runtime_diagnostics,
     runtime_launch_plan,
     runtime_preflight,
+    sha256_file,
     vllm_extension_probe,
     verify_proof_summary,
     write_serving_event_log,
@@ -179,7 +180,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
         payload.update(overrides)
         return payload
 
-    def write_full_serving_proof(self):
+    def write_full_serving_proof(self, *, repetitions=1):
         calls = []
 
         def http_stream_json(url, headers, payload):
@@ -287,7 +288,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
             model=laptop_smoke_model(),
             prompt="Say ok.",
             artifact_dir=self.tmp_dir,
-            repetitions=1,
+            repetitions=repetitions,
             max_tokens=16,
             hardware="local endpoints",
             operating_point="laptop-smoke",
@@ -311,8 +312,8 @@ class PerformanceIQSdkTest(unittest.TestCase):
                 "capacity_best": 3,
                 "campaign_provenance": 3,
                 "run_details": 3,
-                "serving_request_samples": 3,
-                "serving_token_timeline": 6,
+                "serving_request_samples": 3 * repetitions,
+                "serving_token_timeline": 6 * repetitions,
                 "serving_telemetry_coverage": 3,
             },
             "rows": {
@@ -1542,6 +1543,145 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         tampered_verification = verify_proof_summary(proof_path)
         self.assertFalse(tampered_verification["ok"])
         self.assertTrue(any("eventId digest" in error for error in tampered_verification["errors"]))
+
+    def test_serving_smoke_coverage_requires_engine_specific_dashboard_rows(self):
+        proof_path, summary = self.write_full_serving_proof()
+        sglang_campaign = next(item["campaignId"] for item in summary["submissions"] if item["engine"] == "sglang")
+
+        def remove_sglang_timeline_row(dashboard):
+            dashboard["submittedCampaignRows"]["serving_token_timeline"] = [
+                row for row in dashboard["submittedCampaignRows"]["serving_token_timeline"]
+                if row[0] != sglang_campaign
+            ]
+
+        self.rewrite_proof_dashboard(proof_path, remove_sglang_timeline_row)
+
+        verification = verify_proof_summary(proof_path)
+
+        self.assertFalse(verification["ok"], json.dumps(verification, indent=2))
+        coverage = verification["telemetryCoverage"]
+        self.assertEqual(coverage["engines"]["vllm"]["dashboardFineGrainRows"]["status"], "proven")
+        self.assertEqual(coverage["engines"]["sglang"]["dashboardFineGrainRows"]["status"], "partial")
+        self.assertIn(
+            "dashboard serving_token_timeline rows are missing for this engine campaign",
+            coverage["engines"]["sglang"]["dashboardFineGrainRows"]["missing"],
+        )
+        self.assertEqual(coverage["categorySummary"]["dashboardFineGrainRows"]["status"], "partial")
+
+    def test_serving_smoke_coverage_requires_engine_specific_event_rows(self):
+        proof_path = os.path.join(self.tmp_dir, "fake-full-engine-specific-proof.json")
+        event_log_path = os.path.join(self.tmp_dir, "fake-engine-specific-events.jsonl")
+        receipt_log_path = os.path.join(self.tmp_dir, "fake-engine-specific-receipts.jsonl")
+        stdout = StringIO()
+        stderr = StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = serving_smoke_main([
+                "--fake-full-telemetry",
+                "--model", laptop_smoke_model(),
+                "--repetitions", "1",
+                "--max-tokens", "8",
+                "--artifact-dir", self.tmp_dir,
+                "--run-suffix", "fake-engine-specific",
+                "--summary-out", proof_path,
+                "--event-log", event_log_path,
+                "--receipt-log", receipt_log_path,
+            ])
+
+        self.assertEqual(code, 0, stderr.getvalue() + stdout.getvalue())
+        with open(event_log_path, encoding="utf-8") as handle:
+            events = [json.loads(line) for line in handle if line.strip()]
+        kept_events = [
+            event for event in events
+            if not (
+                event.get("engine") == "tensorrt-llm"
+                and event.get("eventType") == "serving.measurement.serving_token_timeline"
+            )
+        ]
+        self.assertLess(len(kept_events), len(events))
+        with open(event_log_path, "w", encoding="utf-8") as handle:
+            for event in kept_events:
+                json.dump(event, handle, sort_keys=True)
+                handle.write("\n")
+
+        verification = verify_proof_summary(proof_path)
+
+        self.assertFalse(verification["ok"], json.dumps(verification, indent=2))
+        self.assertTrue(any(
+            "tensorrt-llm event log" in error
+            and "serving.measurement.serving_token_timeline" in error
+            for error in verification["errors"]
+        ))
+        self.assertGreaterEqual(verification["eventCounts"].get("serving.measurement.serving_token_timeline", 0), 3)
+        self.assertEqual(
+            verification["eventCountsByEngine"]["tensorrt-llm"].get("serving.measurement.serving_token_timeline", 0),
+            0,
+        )
+        coverage = verification["telemetryCoverage"]
+        self.assertEqual(coverage["engines"]["vllm"]["kafkaEventLog"]["status"], "proven")
+        self.assertEqual(coverage["engines"]["sglang"]["kafkaEventLog"]["status"], "proven")
+        self.assertEqual(coverage["engines"]["tensorrt-llm"]["kafkaEventLog"]["status"], "partial")
+        self.assertIn(
+            "Kafka-ready event log is missing token-timeline events for this engine",
+            coverage["engines"]["tensorrt-llm"]["kafkaEventLog"]["missing"],
+        )
+        self.assertEqual(coverage["categorySummary"]["kafkaEventLog"]["status"], "partial")
+        self.assertFalse(coverage["allProven"])
+
+    def test_serving_smoke_coverage_requires_request_level_token_timeline_rows(self):
+        proof_path, summary = self.write_full_serving_proof(repetitions=2)
+        submission = next(item for item in summary["submissions"] if item["engine"] == "vllm")
+        artifact_path = submission["artifactPath"]
+        manifest_path = submission["manifestPath"]
+
+        with open(artifact_path, encoding="utf-8") as handle:
+            artifact = json.load(handle)
+        missing_request_id = artifact["samples"][1]["requestId"]
+        artifact["tokenTimeline"] = [
+            row for row in artifact["tokenTimeline"]
+            if row.get("requestId") != missing_request_id
+        ]
+        artifact["measurements"] = [
+            row for row in artifact["measurements"]
+            if not (
+                row.get("surface") == "serving_token_timeline"
+                and row.get("requestId") == missing_request_id
+            )
+        ]
+        with open(artifact_path, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2)
+            handle.write("\n")
+
+        artifact_sha = sha256_file(artifact_path)
+        submission["artifactSha256"] = artifact_sha
+        with open(manifest_path, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        for manifest_artifact in manifest["artifacts"]:
+            if isinstance(manifest_artifact, dict) and manifest_artifact.get("path") == artifact_path:
+                manifest_artifact["sha256"] = artifact_sha
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2)
+            handle.write("\n")
+        summary.pop("evidenceIndex", None)
+        write_proof_summary(summary, self.tmp_dir, summary_out=proof_path)
+
+        verification = verify_proof_summary(proof_path)
+
+        self.assertFalse(verification["ok"], json.dumps(verification, indent=2))
+        self.assertTrue(any(
+            "vllm tokenTimeline is missing output rows for requestIds" in error
+            and missing_request_id in error
+            for error in verification["errors"]
+        ))
+        coverage = verification["telemetryCoverage"]
+        self.assertEqual(coverage["engines"]["vllm"]["clientStreamTiming"]["status"], "partial")
+        self.assertEqual(coverage["engines"]["vllm"]["clientStreamTiming"]["provenCount"], 1)
+        self.assertEqual(coverage["engines"]["vllm"]["clientStreamTiming"]["expectedCount"], 2)
+        self.assertIn(
+            "one or more request samples are missing stream timing fields or request-level output token timeline rows",
+            coverage["engines"]["vllm"]["clientStreamTiming"]["missing"],
+        )
+        self.assertEqual(coverage["categorySummary"]["clientStreamTiming"]["status"], "partial")
 
     def test_serving_smoke_verify_proof_requires_all_telemetry_when_requested(self):
         proof_path, _summary = self.write_full_serving_proof()

@@ -1368,7 +1368,7 @@ def _telemetry_coverage_from_proof(
     proof_dir: str,
     expected_engines: list[str],
     receipt_counts: dict[str, int],
-    event_counts: dict[str, int],
+    event_counts_by_engine: dict[str, dict[str, int]],
 ) -> dict[str, Any]:
     categories = {
         "clientStreamTiming": {
@@ -1415,16 +1415,25 @@ def _telemetry_coverage_from_proof(
         "allProven": False,
     }
     dashboard = proof.get("dashboard") if isinstance(proof.get("dashboard"), dict) else {}
-    dashboard_counts = dashboard.get("rowCounts") if isinstance(dashboard.get("rowCounts"), dict) else {}
-    event_log_present = bool(proof.get("eventLogPath")) and (
-        event_counts.get("serving.measurement.serving_request_sample", 0) > 0
-        and event_counts.get("serving.measurement.serving_token_timeline", 0) > 0
-    )
+    submitted_dashboard_rows = dashboard.get("submittedCampaignRows") if isinstance(dashboard.get("submittedCampaignRows"), dict) else {}
     submissions = {
         item.get("engine"): item
         for item in proof.get("submissions", [])
         if isinstance(item, dict) and item.get("engine") in ENGINE_IDS
     }
+
+    def submitted_dashboard_row_count(surface: str, campaign_id: str | None) -> int:
+        if not campaign_id:
+            return 0
+        index = CAMPAIGN_ID_QUERY_COLUMN.get(surface)
+        rows = submitted_dashboard_rows.get(surface)
+        if index is None or not isinstance(rows, list):
+            return 0
+        return sum(
+            1 for row in rows
+            if isinstance(row, list) and len(row) > index and row[index] == campaign_id
+        )
+
     for engine in expected_engines:
         submission = submissions.get(engine)
         engine_coverage: dict[str, Any] = {}
@@ -1443,24 +1452,32 @@ def _telemetry_coverage_from_proof(
         hardware_telemetry = artifact.get("hardwareTelemetry") if isinstance(artifact.get("hardwareTelemetry"), list) else []
         capture_policy = artifact.get("capturePolicy") if isinstance(artifact.get("capturePolicy"), dict) else {}
         expected_samples = len(samples) or int(submission.get("requestCount") or 0) or 1
+        sample_request_ids = [
+            sample.get("requestId")
+            for sample in samples
+            if isinstance(sample, dict) and isinstance(sample.get("requestId"), str)
+        ]
 
-        stream_proven = sum(
-            1 for sample in samples
-            if isinstance(sample, dict)
-            and sample.get("streaming") is True
-            and all(_is_number(sample.get(key)) for key in ["e2eLatencyMs", "timeToFirstByteMs", "ttftMs", "ttfotMs", "tpotMs"])
-        )
         output_rows = [
             row for row in token_timeline
             if isinstance(row, dict) and row.get("tokenPhase", "output") == "output"
         ]
+        output_row_request_ids = {
+            row.get("requestId") for row in output_rows
+            if isinstance(row.get("requestId"), str)
+        }
+        stream_proven = sum(
+            1 for sample in samples
+            if isinstance(sample, dict)
+            and sample.get("streaming") is True
+            and sample.get("requestId") in output_row_request_ids
+            and all(_is_number(sample.get(key)) for key in ["e2eLatencyMs", "timeToFirstByteMs", "ttftMs", "ttfotMs", "tpotMs"])
+        )
         stream_missing = []
         if stream_proven != expected_samples:
-            stream_missing.append("one or more request samples are missing stream timing fields")
-        if not output_rows:
-            stream_missing.append("token timeline has no output rows")
+            stream_missing.append("one or more request samples are missing stream timing fields or request-level output token timeline rows")
         engine_coverage["clientStreamTiming"] = _coverage_item(
-            "proven" if stream_proven == expected_samples and output_rows else _coverage_status(stream_proven, expected_samples),
+            _coverage_status(stream_proven, expected_samples),
             stream_proven,
             expected_samples,
             stream_missing,
@@ -1474,15 +1491,20 @@ def _telemetry_coverage_from_proof(
             [] if receipts >= expected_samples else ["request receipt count is below request sample count"],
         )
 
-        fine_grain_ok = (
-            _number(dashboard_counts.get("serving_request_samples")) >= len(expected_engines)
-            and _number(dashboard_counts.get("serving_token_timeline")) >= len(expected_engines)
-        )
+        campaign_id = submission.get("campaignId") if isinstance(submission.get("campaignId"), str) else None
+        request_dashboard_rows = submitted_dashboard_row_count("serving_request_samples", campaign_id)
+        timeline_dashboard_rows = submitted_dashboard_row_count("serving_token_timeline", campaign_id)
+        fine_grain_proven = int(request_dashboard_rows > 0) + int(timeline_dashboard_rows > 0)
+        fine_grain_missing = []
+        if request_dashboard_rows <= 0:
+            fine_grain_missing.append("dashboard serving_request_samples rows are missing for this engine campaign")
+        if timeline_dashboard_rows <= 0:
+            fine_grain_missing.append("dashboard serving_token_timeline rows are missing for this engine campaign")
         engine_coverage["dashboardFineGrainRows"] = _coverage_item(
-            "proven" if fine_grain_ok else "missing",
-            1 if fine_grain_ok else 0,
-            1,
-            [] if fine_grain_ok else ["dashboard row counts missing serving_request_samples or serving_token_timeline"],
+            _coverage_status(fine_grain_proven, 2),
+            fine_grain_proven,
+            2,
+            fine_grain_missing,
         )
 
         native_proven = sum(
@@ -1537,12 +1559,18 @@ def _telemetry_coverage_from_proof(
             row for row in token_timeline
             if isinstance(row, dict) and row.get("tokenPhase") == "prompt" and isinstance(row.get("tokenId"), int)
         ]
+        prompt_row_request_ids = {
+            row.get("requestId") for row in prompt_rows
+            if isinstance(row.get("requestId"), str)
+        }
+        prompt_rows_proven = sum(1 for request_id in sample_request_ids if request_id in prompt_row_request_ids)
         prompt_required = first_measurement.get("promptTokenDetailsRequired") is True
-        prompt_ok = prompt_sample_proven == expected_samples and bool(prompt_rows)
+        prompt_ok = prompt_sample_proven == expected_samples and prompt_rows_proven == expected_samples
         prompt_expected = expected_samples if prompt_required else 0
+        prompt_proven = min(prompt_sample_proven, prompt_rows_proven)
         engine_coverage["promptTokenIds"] = _coverage_item(
-            "proven" if prompt_ok else _coverage_status(prompt_sample_proven, prompt_expected),
-            prompt_sample_proven,
+            "proven" if prompt_ok else _coverage_status(prompt_proven, prompt_expected),
+            prompt_proven,
             prompt_expected,
             [] if prompt_ok else [
                 "prompt token IDs or prompt token timeline rows are missing"
@@ -1558,18 +1586,27 @@ def _telemetry_coverage_from_proof(
             and sample.get("logprobsAvailable") is True
             and isinstance(sample.get("tokenIdSource"), str)
         )
-        output_rows_proven = all(
-            isinstance(row.get("tokenId"), int)
-            and isinstance(row.get("tokenIdSource"), str)
-            and _is_number(row.get("tokenLogprob"))
-            for row in output_rows
-        ) if output_rows else False
+        valid_output_row_request_ids = set()
+        for request_id in sample_request_ids:
+            rows_for_request = [
+                row for row in output_rows
+                if isinstance(row, dict) and row.get("requestId") == request_id
+            ]
+            if rows_for_request and all(
+                isinstance(row.get("tokenId"), int)
+                and isinstance(row.get("tokenIdSource"), str)
+                and _is_number(row.get("tokenLogprob"))
+                for row in rows_for_request
+            ):
+                valid_output_row_request_ids.add(request_id)
+        output_rows_proven = len(valid_output_row_request_ids)
         token_required = first_measurement.get("tokenDetailsRequired") is True
-        output_ok = output_sample_proven == expected_samples and output_rows_proven
+        output_ok = output_sample_proven == expected_samples and output_rows_proven == expected_samples
         output_expected = expected_samples if token_required else 0
+        output_proven = min(output_sample_proven, output_rows_proven)
         engine_coverage["outputTokenIdsLogprobs"] = _coverage_item(
-            "proven" if output_ok else _coverage_status(output_sample_proven, output_expected),
-            output_sample_proven,
+            "proven" if output_ok else _coverage_status(output_proven, output_expected),
+            output_proven,
             output_expected,
             [] if output_ok else [
                 "output token IDs/logprobs or token timeline details are missing"
@@ -1629,11 +1666,20 @@ def _telemetry_coverage_from_proof(
             [] if runtime_proven == expected_samples else ["runtime version/image/process/container/node provenance is absent or partial"],
         )
 
+        engine_event_counts = event_counts_by_engine.get(engine, {})
+        request_sample_events = engine_event_counts.get("serving.measurement.serving_request_sample", 0)
+        token_timeline_events = engine_event_counts.get("serving.measurement.serving_token_timeline", 0)
+        event_log_proven = int(request_sample_events >= expected_samples) + int(token_timeline_events >= expected_samples)
+        event_log_missing = []
+        if request_sample_events < expected_samples:
+            event_log_missing.append("Kafka-ready event log is missing request-sample events for this engine")
+        if token_timeline_events < expected_samples:
+            event_log_missing.append("Kafka-ready event log is missing token-timeline events for this engine")
         engine_coverage["kafkaEventLog"] = _coverage_item(
-            "proven" if event_log_present else "missing",
-            1 if event_log_present else 0,
-            1,
-            [] if event_log_present else ["Kafka-ready post-capture event log is missing request-sample or token-timeline events"],
+            _coverage_status(event_log_proven, 2),
+            event_log_proven,
+            2,
+            event_log_missing,
         )
         coverage["engines"][engine] = engine_coverage
 
@@ -1782,6 +1828,7 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
     campaign_ids: list[str] = []
     receipt_counts: dict[str, int] = {}
     event_counts: dict[str, int] = {}
+    event_counts_by_engine: dict[str, dict[str, int]] = {engine: {} for engine in ENGINE_IDS}
 
     proof = _load_json_file(proof_abs, errors, "proof summary")
     if not proof:
@@ -1870,6 +1917,10 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                     event_type = event.get("eventType")
                     if isinstance(event_type, str):
                         event_counts[event_type] = event_counts.get(event_type, 0) + 1
+                        event_engine = event.get("engine")
+                        if event_engine in ENGINE_IDS:
+                            engine_counts = event_counts_by_engine.setdefault(str(event_engine), {})
+                            engine_counts[event_type] = engine_counts.get(event_type, 0) + 1
             except ValueError as exc:
                 errors.append(str(exc))
             except OSError as exc:
@@ -2007,6 +2058,7 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                     errors.append(f"{engine} summary artifact endpointPreflight.modelAvailable must be true.")
             samples = artifact.get("samples")
             request_path = artifact.get("requestPath") or "/v1/chat/completions"
+            sample_trace_ids: list[str] = []
             if not isinstance(samples, list):
                 errors.append(f"{engine} summary artifact samples must be a list.")
             else:
@@ -2014,7 +2066,6 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                     errors.append(f"{engine} sample count does not match requestCount.")
                 if sum(1 for sample in samples if isinstance(sample, dict) and sample.get("ok")) != success_count:
                     errors.append(f"{engine} successful sample count does not match successCount.")
-                sample_trace_ids = []
                 for index, sample in enumerate(samples):
                     if not isinstance(sample, dict):
                         errors.append(f"{engine} samples[{index}] must be an object.")
@@ -2095,6 +2146,16 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                         errors.append(f"{engine} tokenTimeline[{token_index}].tokenId must be an integer when present.")
                     if token_row.get("tokenId") is not None and not isinstance(token_row.get("tokenIdSource"), str):
                         errors.append(f"{engine} tokenTimeline[{token_index}].tokenIdSource is required when tokenId is present.")
+                output_timeline_request_ids = {
+                    token_row.get("requestId")
+                    for token_row in token_timeline
+                    if isinstance(token_row, dict)
+                    and token_row.get("tokenPhase", "output") == "output"
+                    and isinstance(token_row.get("requestId"), str)
+                }
+                missing_output_timeline = sorted(set(sample_trace_ids) - output_timeline_request_ids)
+                if missing_output_timeline:
+                    errors.append(f"{engine} tokenTimeline is missing output rows for requestIds: {', '.join(missing_output_timeline)}.")
             hardware_telemetry = artifact.get("hardwareTelemetry")
             if not isinstance(hardware_telemetry, list) or len(hardware_telemetry) != request_count:
                 errors.append(f"{engine} summary artifact hardwareTelemetry must match requestCount.")
@@ -2195,6 +2256,14 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                         ]
                         if not prompt_rows:
                             errors.append(f"{engine} tokenTimeline must include prompt token rows when prompt token details are required.")
+                        prompt_timeline_request_ids = {
+                            token_row.get("requestId")
+                            for token_row in prompt_rows
+                            if isinstance(token_row.get("requestId"), str)
+                        }
+                        missing_prompt_timeline = sorted(set(sample_trace_ids) - prompt_timeline_request_ids)
+                        if missing_prompt_timeline:
+                            errors.append(f"{engine} tokenTimeline is missing prompt rows for requestIds: {', '.join(missing_prompt_timeline)}.")
                         for token_index, token_row in enumerate(prompt_rows):
                             if not isinstance(token_row.get("tokenIndex"), int):
                                 errors.append(f"{engine} prompt tokenTimeline[{token_index}].tokenIndex must be an integer.")
@@ -2272,9 +2341,23 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
             errors.append("dashboard runtimeFrameworks is missing submitted serving frameworks.")
 
     if event_log_path and os.path.exists(event_log_path):
-        for required_event_type in ["serving.measurement.serving_request_sample", "serving.measurement.serving_token_timeline"]:
-            if event_counts.get(required_event_type, 0) < len(expected_engines):
-                errors.append(f"event log must include at least {len(expected_engines)} {required_event_type} events.")
+        for engine in expected_engines:
+            submission = submissions_by_engine.get(engine, {})
+            expected_request_events = int(submission.get("requestCount") or 1)
+            expected_timeline_events = int(submission.get("successCount") or expected_request_events)
+            engine_event_counts = event_counts_by_engine.get(engine, {})
+            request_sample_events = engine_event_counts.get("serving.measurement.serving_request_sample", 0)
+            token_timeline_events = engine_event_counts.get("serving.measurement.serving_token_timeline", 0)
+            if request_sample_events < expected_request_events:
+                errors.append(
+                    f"{engine} event log must include at least {expected_request_events} "
+                    "serving.measurement.serving_request_sample events."
+                )
+            if token_timeline_events < expected_timeline_events:
+                errors.append(
+                    f"{engine} event log must include at least {expected_timeline_events} "
+                    "serving.measurement.serving_token_timeline events."
+                )
 
     kafka_publication = proof.get("kafkaPublication")
     if isinstance(kafka_publication, dict):
@@ -2291,7 +2374,7 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
         proof_dir=proof_dir,
         expected_engines=expected_engines,
         receipt_counts=receipt_counts,
-        event_counts=event_counts,
+        event_counts_by_engine=event_counts_by_engine,
     )
 
     return {
@@ -2308,6 +2391,7 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
         "receiptCounts": receipt_counts,
         "eventLogPath": event_log_path or None,
         "eventCounts": event_counts,
+        "eventCountsByEngine": event_counts_by_engine,
         "dashboard": proof.get("dashboard") if isinstance(proof.get("dashboard"), dict) else None,
         "telemetryCoverage": telemetry_coverage,
     }
