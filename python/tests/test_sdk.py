@@ -1355,12 +1355,16 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         os.environ["PIQ_SERVING_USD_PER_GPU_HOUR"] = "2.5"
         os.environ["PIQ_SERVING_GPU_COUNT"] = "4"
         os.environ["PIQ_SERVING_POWER_WATTS_PER_GPU"] = "700"
+        os.environ["PIQ_SERVING_RESOLVE_TOKEN_IDS_WITH_TOKENIZER"] = "true"
+        os.environ["PIQ_SERVING_TOKENIZER_MODEL"] = "Qwen/Qwen2.5-0.5B-Instruct"
 
         args = serving_smoke_parser().parse_args([])
 
         self.assertEqual(args.usd_per_gpu_hour, 2.5)
         self.assertEqual(args.gpu_count, 4)
         self.assertEqual(args.power_watts_per_gpu, 700)
+        self.assertTrue(args.resolve_token_ids_with_tokenizer)
+        self.assertEqual(args.tokenizer_model, "Qwen/Qwen2.5-0.5B-Instruct")
 
     def test_serving_smoke_diagnostics_reports_cache_ports_and_blockers(self):
         old_home = os.environ.get("HOME")
