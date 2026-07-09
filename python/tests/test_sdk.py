@@ -39,6 +39,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
         "PIQ_SERVING_REPETITIONS",
         "PIQ_SERVING_MAX_TOKENS",
         "PIQ_ARTIFACT_DIR",
+        "PIQ_SERVING_SUMMARY_OUT",
         "PIQ_TENSORRT_LLM_IMAGE",
     ]
 
@@ -521,6 +522,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
                     "--model", laptop_smoke_model(),
                     "--repetitions", "1",
                     "--artifact-dir", self.tmp_dir,
+                    "--run-suffix", "unit-summary",
                 ])
         finally:
             server.shutdown()
@@ -529,6 +531,15 @@ class PerformanceIQSdkTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(calls["post"], 1)
+        proof_path = os.path.join(self.tmp_dir, "serving-smoke-proof-unit-summary.json")
+        self.assertTrue(os.path.exists(proof_path))
+        with open(proof_path, encoding="utf-8") as handle:
+            proof = json.load(handle)
+        self.assertEqual(proof["schemaVersion"], "performance-iq.serving-smoke-proof.v1")
+        self.assertEqual(proof["runSuffix"], "unit-summary")
+        self.assertEqual(proof["proofSummaryPath"], proof_path)
+        self.assertEqual(proof["submissions"][0]["campaignId"], "serving-vllm-unit-summary")
+        self.assertTrue(proof["preflight"]["ready"])
 
     def test_serving_smoke_dashboard_query_reports_campaign_surfaces(self):
         class Handler(BaseHTTPRequestHandler):

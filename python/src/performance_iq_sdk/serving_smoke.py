@@ -53,6 +53,14 @@ def _utc_slug() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _utc_now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _safe_slug(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in value).strip("-") or "run"
+
+
 def _env(name: str, fallback: str | None = None) -> str | None:
     value = os.environ.get(name)
     if value is None or not value.strip():
@@ -578,6 +586,28 @@ def query_dashboard(base_url: str, token: str | None = None) -> dict[str, Any]:
         }
 
 
+def default_proof_summary_path(artifact_dir: str, run_suffix: str) -> str:
+    return os.path.join(artifact_dir, f"serving-smoke-proof-{_safe_slug(run_suffix)}.json")
+
+
+def write_proof_summary(summary: dict[str, Any], artifact_dir: str, summary_out: str | None = None) -> str:
+    proof_path = summary_out or default_proof_summary_path(artifact_dir, str(summary.get("runSuffix") or _utc_slug()))
+    parent = os.path.dirname(proof_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    summary["proofSummaryPath"] = proof_path
+    body = {
+        **summary,
+        "schemaVersion": "performance-iq.serving-smoke-proof.v1",
+        "smokeSummarySchemaVersion": summary.get("schemaVersion"),
+        "writtenAtUtc": _utc_now_iso(),
+    }
+    with open(proof_path, "w", encoding="utf-8") as handle:
+        json.dump(body, handle, indent=2)
+        handle.write("\n")
+    return proof_path
+
+
 def run_serving_smoke(
     *,
     engines: list[dict[str, Any]],
@@ -637,7 +667,9 @@ def run_serving_smoke(
             "errors": [sample.get("error") for sample in result["samples"] if sample.get("error")],
         })
     return {
+        "schemaVersion": "performance-iq.serving-smoke-summary.v1",
         "model": model,
+        "runSuffix": suffix,
         "artifactDir": artifact_dir,
         "submissions": submissions,
     }
@@ -666,6 +698,7 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-digest")
     parser.add_argument("--image-tag")
     parser.add_argument("--run-suffix", default=_env("PIQ_SERVING_RUN_SUFFIX"))
+    parser.add_argument("--summary-out", default=_env("PIQ_SERVING_SUMMARY_OUT"), help="Write the overall smoke proof summary to this JSON path.")
     parser.add_argument("--no-submit", action="store_true", help="Capture artifacts and manifests without submitting to Performance IQ.")
     parser.add_argument("--query-dashboard", action="store_true", help="Query fixed dashboard surfaces after submission.")
     parser.add_argument("--allow-missing-engines", action="store_true", help="Run configured engines only instead of requiring all three URLs.")
@@ -738,6 +771,7 @@ def main(argv: list[str] | None = None) -> int:
             if not args.piq_base_url:
                 raise ValueError("dashboard query requires PIQ_BASE_URL or --piq-base-url")
             summary["dashboard"] = query_dashboard(args.piq_base_url, token=args.piq_token)
+        write_proof_summary(summary, args.artifact_dir, summary_out=args.summary_out)
         print(json.dumps(summary, indent=2))
         failures = [
             item for item in summary["submissions"]

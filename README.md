@@ -168,11 +168,15 @@ PYTHONPATH=python/src python -m performance_iq_sdk.serving_smoke \
 ```
 
 The command sends the same chat-completion prompt to vLLM, SGLang, and
-TensorRT-LLM, writes one normalized summary artifact per engine, submits three
-producer runs, and checks the fixed dashboard surfaces
-`price_performance`, `capacity_best`, `campaign_provenance`, and `run_details`.
+TensorRT-LLM, writes one normalized summary artifact per engine plus one
+overall smoke proof summary, submits three producer runs, and checks the fixed
+dashboard surfaces `price_performance`, `capacity_best`, `campaign_provenance`,
+and `run_details`.
 Each artifact includes the request samples, derived measurements, and the
 endpoint preflight evidence used for that engine.
+The overall `serving-smoke-proof-<suffix>.json` file preserves the submitted
+campaign IDs, per-engine artifact paths, preflight evidence, and dashboard row
+proof in one place.
 It fails fast unless all three URLs are configured and the configured endpoints
 pass the model-aware `/v1/models` preflight. Use `--allow-missing-engines` only
 for partial local debugging and `--skip-preflight` only when debugging a

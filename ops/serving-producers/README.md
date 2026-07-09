@@ -12,8 +12,8 @@ OpenAI-compatible API with:
 The smoke runner uses the same model and prompt across all three engines,
 preflights `/v1/models` until the exact model appears in `data[].id`, sends
 completion requests, writes per-engine
-normalized summary artifacts, submits producer runs, and verifies the fixed
-Performance IQ dashboard query surfaces.
+normalized summary artifacts, writes one overall smoke proof summary, submits
+producer runs, and verifies the fixed Performance IQ dashboard query surfaces.
 
 ## Files
 
@@ -70,6 +70,9 @@ Success requires:
   `run_details` row counts increase;
 - submitted campaign IDs appear in both `campaign_provenance` and
   `run_details`.
+- `serving-smoke-proof-<suffix>.json` exists under `PIQ_ARTIFACT_DIR` and
+  preserves preflight, per-engine artifact paths, submissions, and dashboard
+  row proof.
 
 ## Mac / Apple Silicon
 
