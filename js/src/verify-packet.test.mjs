@@ -5,6 +5,7 @@ import path from "node:path"
 
 import { afterEach, describe, expect, it } from "vitest"
 
+import { DEAL_PACKET_VERSION } from "./countersign.mjs"
 import { verifyPacket, extractManifest, PRODUCER_MANIFEST_VERSION } from "./verify-packet.mjs"
 
 const tmpDirs = []
@@ -16,6 +17,10 @@ function tmpArtifact(contents = "{\"tokens_per_second\":842.5}\n") {
   fs.writeFileSync(file, contents)
   const sha256 = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")
   return { dir, file, sha256, sizeBytes: fs.statSync(file).size, contents }
+}
+
+function fixtureSha256(label) {
+  return crypto.createHash("sha256").update(label).digest("hex")
 }
 
 // A fresh, well-formed, measured, operator-full packet with a real local
@@ -49,7 +54,7 @@ function validMeasuredPacket(nowIso = new Date(NOW).toISOString()) {
         operatingPoint: "c=32, 1k in / 1k out",
       },
       runtime: {
-        imageDigest: "sha256:" + "b".repeat(64),
+        imageDigest: "sha256:" + fixtureSha256("runner-h200-1.4.0"),
         imageTag: "runner-h200-1.4.0",
         framework: "vLLM",
       },
@@ -148,7 +153,7 @@ describe("verifyPacket", () => {
     const { packet } = validMeasuredPacket()
     packet.confidentiality = "customer-safe"
     // customer-safe ships the hash but not the raw file or its local path
-    packet.artifacts = [{ kind: "raw-log", path: "artifacts/raw.log", sha256: "c".repeat(64), sizeBytes: 4096 }]
+    packet.artifacts = [{ kind: "raw-log", path: "artifacts/raw.log", sha256: fixtureSha256("redacted-raw-log"), sizeBytes: 4096 }]
     packet.platform = { decisionBriefPath: "brief.md" }
     const result = verifyPacket(packet, { now: NOW })
     expect(result.ok).toBe(true)
@@ -167,5 +172,53 @@ describe("verifyPacket", () => {
     const { packet } = validMeasuredPacket()
     expect(extractManifest({ manifest: packet })).toBe(packet)
     expect(extractManifest({ nope: true })).toBeNull()
+  })
+
+  it("verifies a deal-packet envelope with scope and operator-attested census", () => {
+    const { packet } = validMeasuredPacket()
+    const envelope = {
+      schemaVersion: DEAL_PACKET_VERSION,
+      manifest: packet,
+      packetScope: {
+        testedConfigurationOnly: true,
+        buyerQuestion: "Which H200 operating point should ACME quote?",
+        workloadWindow: "2026-07-09T00:00:00Z/2026-07-09T12:00:00Z",
+        notAServiceCommitment: true,
+        limitationsEcho: packet.limitations,
+      },
+      campaignCensus: {
+        campaignsRunForDeal: 1,
+        exportedFromCampaign: packet.campaign.campaignId,
+        attestedBy: "operator",
+      },
+    }
+    const result = verifyPacket(envelope, { now: NOW })
+    expect(result.ok).toBe(true)
+    expect(result.checks.find((c) => c.name === "packet-scope").ok).toBe(true)
+    expect(result.checks.find((c) => c.name === "campaign-census").detail).toMatch(/provider-attested, not system-enforced/)
+  })
+
+  it("requires a deal-packet receipt when --require-countersignature is set", () => {
+    const { packet } = validMeasuredPacket()
+    const result = verifyPacket(packet, { now: NOW, requireCountersignature: true })
+    expect(result.ok).toBe(false)
+    expect(result.errors.join(" ")).toMatch(/requires a performance-iq\.deal-packet\.v1 envelope/)
+  })
+
+  it("hard-fails placeholder runtime digests in quote-grade paths", () => {
+    const { packet } = validMeasuredPacket()
+    packet.runtime.imageDigest = "sha256:" + "f".repeat(64)
+    const result = verifyPacket(packet, { now: NOW })
+    expect(result.ok).toBe(false)
+    expect(result.errors.join(" ")).toMatch(/placeholder evidence/)
+  })
+
+  it("only warns on placeholder evidence during legacy non-quote inspection", () => {
+    const { packet } = validMeasuredPacket()
+    packet.runClass = "rehearsal"
+    packet.runtime.imageDigest = "sha256:" + "f".repeat(64)
+    const result = verifyPacket(packet, { now: NOW, requireMeasured: false })
+    expect(result.ok).toBe(true)
+    expect(result.warnings.join(" ")).toMatch(/legacy inspection warning/)
   })
 })

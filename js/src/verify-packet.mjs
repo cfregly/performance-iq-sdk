@@ -18,12 +18,20 @@ import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 
+import {
+  DEAL_PACKET_VERSION,
+  DEMO_SIGNATURE_MODE,
+  verifyCountersignature,
+} from "./countersign.mjs"
+
 export const PRODUCER_MANIFEST_VERSION = "performance-iq.producer-manifest.v1"
+export { DEAL_PACKET_VERSION }
 export const DEFAULT_FRESHNESS_MAX_DAYS = 30
 
 const PLACEHOLDER_PATTERN = /\b(replace-with|example-only|do-not-quote|template only)\b/i
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i
 const IMAGE_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/i
+const FAKE_ENGINE_PATTERN = /\bfake-(?:serving|engine)(?::|$|\b)/i
 const CONFIDENTIALITY = ["operator-full", "customer-safe", "public-safe", "redacted"]
 const CUSTOMER_FACING = new Set(["customer-safe", "public-safe", "redacted"])
 const ABSOLUTE_PATH_PATTERN = /(?:^|["'\s(])(?:\/[^"'\s)]+|[A-Za-z]:\\[^"'\s)]+)/
@@ -73,6 +81,10 @@ export function extractManifest(packet) {
   return null
 }
 
+export function isDealPacket(packet) {
+  return packet?.schemaVersion === DEAL_PACKET_VERSION
+}
+
 /**
  * Verify a deal-proof packet offline.
  *
@@ -82,6 +94,10 @@ export function extractManifest(packet) {
  * @param {number} [options.freshnessMaxDays] - stale threshold, default 30.
  * @param {boolean} [options.requireMeasured] - reject non-measured runClass, default true.
  * @param {string|null} [options.artifactRoot] - dir to resolve relative artifact paths.
+ * @param {boolean} [options.requireCountersignature] - reject missing/invalid countersignature.
+ * @param {boolean} [options.allowDemoSignature] - accept demo-self-signed receipt for tests.
+ * @param {string|object|null} [options.countersignaturePublicKey] - Ed25519 public key.
+ * @param {string|null} [options.transparencyLogMirror] - JSONL log mirror text or path.
  * @returns {{ok: boolean, runClass: string|undefined, confidentiality: string|undefined,
  *   ageDays: number|null, freshnessMaxDays: number, checks: object[],
  *   errors: string[], warnings: string[], summary: string}}
@@ -92,6 +108,10 @@ export function verifyPacket(packet, options = {}) {
     freshnessMaxDays = DEFAULT_FRESHNESS_MAX_DAYS,
     requireMeasured = true,
     artifactRoot = null,
+    requireCountersignature = false,
+    allowDemoSignature = false,
+    countersignaturePublicKey = null,
+    transparencyLogMirror = null,
   } = options
 
   const checks = []
@@ -107,6 +127,18 @@ export function verifyPacket(packet, options = {}) {
       `packet is not a ${PRODUCER_MANIFEST_VERSION} manifest and carries no manifest envelope`,
     )
     return finalize(checks, { runClass: undefined, confidentiality: undefined, ageDays: null, freshnessMaxDays })
+  }
+
+  const envelope = isDealPacket(packet) ? packet : null
+  if (envelope) {
+    verifyDealPacketEnvelope(envelope, {
+      requireCountersignature,
+      allowDemoSignature,
+      countersignaturePublicKey,
+      transparencyLogMirror,
+    }, record)
+  } else if (requireCountersignature) {
+    record("deal-packet", false, `--require-countersignature requires a ${DEAL_PACKET_VERSION} envelope`)
   }
 
   // 1. schema version
@@ -149,6 +181,18 @@ export function verifyPacket(packet, options = {}) {
   } else {
     record("evidence-class", true, `runClass is ${JSON.stringify(runClass)} (measured requirement waived)`, "info")
   }
+  record(
+    "source-type",
+    true,
+    `sourceType is ${JSON.stringify(manifest.sourceType)}${manifest.sourceType === "fresh-run" ? " (GPU-node fresh-run evidence)" : " (not fresh-run GPU-node evidence)"}`,
+    manifest.sourceType === "fresh-run" ? "info" : "warning",
+  )
+
+  // 4b. Quote-grade/customer-safe packets reject synthetic placeholders. Legacy
+  // inspection can warn so old samples remain inspectable without becoming quotable.
+  const strictPlaceholderEvidence =
+    requireMeasured || requireCountersignature || CUSTOMER_FACING.has(manifest.confidentiality)
+  verifyPlaceholderEvidence(manifest, record, strictPlaceholderEvidence)
 
   // 5. freshness — anchored on when the run completed
   const completedAt = manifest.campaign?.completedAtUtc ?? manifest.generatedAtUtc
@@ -192,6 +236,7 @@ export function verifyPacket(packet, options = {}) {
 
   return finalize(checks, {
     runClass,
+    sourceType: manifest.sourceType,
     confidentiality: manifest.confidentiality,
     ageDays,
     freshnessMaxDays,
@@ -204,6 +249,7 @@ function requiredFieldsMissing(manifest) {
     if (!present) missing.push(label)
   }
   need(isNonEmptyString(manifest.runClass), "runClass")
+  need(isNonEmptyString(manifest.sourceType), "sourceType")
   need(isDateTime(manifest.generatedAtUtc), "generatedAtUtc")
   need(isNonEmptyString(manifest.producer?.repo), "producer.repo")
   need(isNonEmptyString(manifest.producer?.commitSha), "producer.commitSha")
@@ -217,6 +263,142 @@ function requiredFieldsMissing(manifest) {
   need(Array.isArray(manifest.limitations) && manifest.limitations.length > 0, "limitations[]")
   need(CONFIDENTIALITY.includes(manifest.confidentiality), "confidentiality")
   return missing
+}
+
+function packetScopeGaps(scope) {
+  const gaps = []
+  if (scope?.testedConfigurationOnly !== true) gaps.push("packetScope.testedConfigurationOnly must be true")
+  if (!isNonEmptyString(scope?.buyerQuestion)) gaps.push("packetScope.buyerQuestion")
+  if (!isNonEmptyString(scope?.workloadWindow)) gaps.push("packetScope.workloadWindow")
+  if (scope?.notAServiceCommitment !== true) gaps.push("packetScope.notAServiceCommitment must be true")
+  if (!Array.isArray(scope?.limitationsEcho) || scope.limitationsEcho.length === 0) gaps.push("packetScope.limitationsEcho[]")
+  return gaps
+}
+
+function campaignCensusGaps(census) {
+  const gaps = []
+  if (!Number.isInteger(census?.campaignsRunForDeal) || census.campaignsRunForDeal < 1) {
+    gaps.push("campaignCensus.campaignsRunForDeal must be >= 1")
+  }
+  if (!isNonEmptyString(census?.exportedFromCampaign)) gaps.push("campaignCensus.exportedFromCampaign")
+  if (census?.attestedBy !== "operator") gaps.push("campaignCensus.attestedBy must be operator")
+  return gaps
+}
+
+function workloadAttestationGaps(attestation) {
+  if (attestation == null) return []
+  const gaps = []
+  if (!isNonEmptyString(attestation.specFileName)) gaps.push("buyerWorkloadAttestation.specFileName")
+  if (!SHA256_PATTERN.test(String(attestation.specSha256 ?? ""))) gaps.push("buyerWorkloadAttestation.specSha256")
+  return gaps
+}
+
+function verifyDealPacketEnvelope(envelope, options, record) {
+  record(
+    "deal-packet-version",
+    envelope.schemaVersion === DEAL_PACKET_VERSION,
+    envelope.schemaVersion === DEAL_PACKET_VERSION
+      ? `schemaVersion is ${DEAL_PACKET_VERSION}`
+      : `schemaVersion must be ${DEAL_PACKET_VERSION}, got ${JSON.stringify(envelope.schemaVersion)}`,
+  )
+
+  const scopeGaps = packetScopeGaps(envelope.packetScope)
+  record(
+    "packet-scope",
+    scopeGaps.length === 0,
+    scopeGaps.length === 0
+      ? `scope: ${envelope.packetScope.buyerQuestion}; evidence of tested configuration only, not a service commitment`
+      : `packet scope incomplete: ${scopeGaps.join(", ")}`,
+  )
+
+  const censusGaps = campaignCensusGaps(envelope.campaignCensus)
+  record(
+    "campaign-census",
+    censusGaps.length === 0,
+    censusGaps.length === 0
+      ? `campaign census is provider-attested, not system-enforced: ${envelope.campaignCensus.campaignsRunForDeal} campaign(s), exported from ${envelope.campaignCensus.exportedFromCampaign}`
+      : `campaign census incomplete: ${censusGaps.join(", ")}`,
+    censusGaps.length === 0 ? "warning" : "error",
+  )
+
+  const attestationGaps = workloadAttestationGaps(envelope.buyerWorkloadAttestation)
+  record(
+    "buyer-workload-attestation",
+    attestationGaps.length === 0,
+    envelope.buyerWorkloadAttestation == null
+      ? "no buyer workload attestation supplied"
+      : attestationGaps.length === 0
+        ? `buyer workload spec hash present: ${envelope.buyerWorkloadAttestation.specFileName}`
+        : `buyer workload attestation incomplete: ${attestationGaps.join(", ")}`,
+    envelope.buyerWorkloadAttestation == null ? "info" : "error",
+  )
+
+  if (!envelope.countersignature && !options.requireCountersignature) {
+    record("countersignature", true, "no countersignature supplied; run with --require-countersignature for quote-grade receipt enforcement", "info")
+    return
+  }
+
+  const result = verifyCountersignature(envelope, {
+    publicKey: options.countersignaturePublicKey,
+    logMirror: options.transparencyLogMirror,
+    allowDemo: options.allowDemoSignature,
+  })
+  record(
+    "packet-digest",
+    true,
+    `canonical packet digest ${result.digest}`,
+    "info",
+  )
+  record(
+    "countersignature",
+    result.ok,
+    result.ok
+      ? `valid ${envelope.countersignature.mode} receipt from key ${envelope.countersignature.keyId}`
+      : result.errors.join("; "),
+  )
+  for (const warning of result.warnings) {
+    record("transparency-log", true, warning, "warning")
+  }
+}
+
+function isRepeatedByteDigest(hex) {
+  if (!SHA256_PATTERN.test(hex)) return false
+  const bytes = hex.toLowerCase().match(/../g) ?? []
+  return bytes.length === 32 && bytes.every((byte) => byte === bytes[0])
+}
+
+function placeholderEvidenceFindings(manifest) {
+  const findings = []
+  const imageDigest = String(manifest.runtime?.imageDigest ?? "").replace(/^sha256:/i, "")
+  if (imageDigest === "0".repeat(64)) findings.push("runtime.imageDigest is all zeros")
+  if (imageDigest.toLowerCase() === "f".repeat(64)) findings.push("runtime.imageDigest is all f's")
+  if (isRepeatedByteDigest(imageDigest)) findings.push("runtime.imageDigest is a repeated-byte placeholder")
+  if (FAKE_ENGINE_PATTERN.test(String(manifest.runtime?.imageTag ?? ""))) {
+    findings.push(`runtime.imageTag is fake-engine evidence (${manifest.runtime.imageTag})`)
+  }
+  for (const [index, artifact] of (Array.isArray(manifest.artifacts) ? manifest.artifacts : []).entries()) {
+    const sha = String(artifact?.sha256 ?? "")
+    if (sha === "0".repeat(64)) findings.push(`artifacts[${index}].sha256 is all zeros`)
+    if (sha.toLowerCase() === "f".repeat(64)) findings.push(`artifacts[${index}].sha256 is all f's`)
+    if (isRepeatedByteDigest(sha)) findings.push(`artifacts[${index}].sha256 is a repeated-byte placeholder`)
+  }
+  return findings
+}
+
+function verifyPlaceholderEvidence(manifest, record, strict) {
+  const findings = placeholderEvidenceFindings(manifest)
+  if (findings.length === 0) {
+    record("placeholder-evidence", true, "no placeholder digests or fake-engine tags", "info")
+    return
+  }
+  record(
+    "placeholder-evidence",
+    !strict,
+    strict
+      ? `placeholder evidence is not quote-grade/customer-safe: ${findings.join(", ")}`
+      : `legacy inspection warning: ${findings.join(", ")}`,
+    strict ? "error" : "warning",
+  )
 }
 
 function replayRecipeGaps(manifest) {
@@ -334,7 +516,7 @@ function finalize(checks, meta) {
   const warnings = checks.filter((c) => c.severity === "warning").map((c) => c.detail)
   const ok = errors.length === 0
   const summary = ok
-    ? `PASS — packet is well-formed, ${meta.runClass ?? "unknown-class"}, within the ${meta.freshnessMaxDays}d freshness window${warnings.length ? ` (${warnings.length} warning${warnings.length === 1 ? "" : "s"})` : ""}`
+    ? `PASS — packet is well-formed, ${meta.runClass ?? "unknown-class"}, sourceType=${meta.sourceType ?? "unknown"}, within the ${meta.freshnessMaxDays}d freshness window${warnings.length ? ` (${warnings.length} warning${warnings.length === 1 ? "" : "s"})` : ""}`
     : `FAIL — ${errors.length} blocking issue${errors.length === 1 ? "" : "s"}: ${errors.join("; ")}`
   return { ok, ...meta, checks, errors, warnings, summary }
 }

@@ -3,6 +3,7 @@
 import crypto from "node:crypto"
 import fs from "node:fs/promises"
 
+import { attachCountersignature, buildCountersignRequest } from "../src/countersign.mjs"
 import { verifyPacket, DEFAULT_FRESHNESS_MAX_DAYS } from "../src/verify-packet.mjs"
 
 const [, , command, ...args] = process.argv
@@ -13,16 +14,28 @@ function usage() {
   piq submit-manifest <manifest.json>   (needs PIQ_BASE_URL + PIQ_TOKEN)
   piq status <run-id>                   (needs PIQ_BASE_URL)
   piq verify-packet <packet.json>       (OFFLINE buyer verification; no server, no token)
+  piq countersign request <packet.json> (emit countersign-request.json to stdout)
+  piq countersign attach <packet.json> <receipt.json> (emit packet with receipt attached)
 
 verify-packet options:
-  --max-age-days <n>   freshness window (default ${DEFAULT_FRESHNESS_MAX_DAYS})
-  --allow-rehearsal    inspect non-measured packets instead of rejecting them
-  --artifacts <dir>    directory holding raw artifacts, to recompute hashes
-  --json               print the full machine-readable result
+  --max-age-days <n>          freshness window (default ${DEFAULT_FRESHNESS_MAX_DAYS})
+  --allow-rehearsal           inspect non-measured packets instead of rejecting them
+  --require-countersignature  require a valid vendor countersignature
+  --allow-demo                accept demo-self-signed receipts for tests only
+  --public-key <key>          Ed25519 public key as PEM or base64 DER (default PIQ_COUNTERSIGN_PUBLIC_KEY_B64)
+  --log-mirror <path>         local JSONL transparency-log mirror
+  --artifacts <dir>           directory holding raw artifacts, to recompute hashes
+  --json                      print the full machine-readable result
+
+countersign request options:
+  --key-id <id>               requested signing key id
+  --tenant-id-hash <sha256>   precomputed salted tenant hash
 
 Environment:
   PIQ_BASE_URL   Performance IQ base URL (server commands only)
-  PIQ_TOKEN      Service token for write APIs`)
+  PIQ_TOKEN      Service token for write APIs
+  PIQ_COUNTERSIGN_PUBLIC_KEY_B64   verifier public key, never a private key
+  PIQ_COUNTERSIGN_KEY_ID           default countersign key id`)
   process.exit(2)
 }
 
@@ -45,6 +58,10 @@ async function runVerifyPacket(argv) {
   const rest = [...argv]
   const maxAge = takeFlagValue(rest, "--max-age-days")
   const allowRehearsal = takeFlag(rest, "--allow-rehearsal")
+  const requireCountersignature = takeFlag(rest, "--require-countersignature")
+  const allowDemoSignature = takeFlag(rest, "--allow-demo")
+  const countersignaturePublicKey = takeFlagValue(rest, "--public-key") ?? process.env.PIQ_COUNTERSIGN_PUBLIC_KEY_B64 ?? null
+  const transparencyLogMirror = takeFlagValue(rest, "--log-mirror") ?? process.env.PIQ_TRANSPARENCY_LOG_PATH ?? null
   const artifactRoot = takeFlagValue(rest, "--artifacts")
   const asJson = takeFlag(rest, "--json")
   const [packetPath] = rest
@@ -55,6 +72,10 @@ async function runVerifyPacket(argv) {
     freshnessMaxDays: maxAge !== undefined ? Number(maxAge) : DEFAULT_FRESHNESS_MAX_DAYS,
     requireMeasured: !allowRehearsal,
     artifactRoot: artifactRoot ?? null,
+    requireCountersignature,
+    allowDemoSignature,
+    countersignaturePublicKey,
+    transparencyLogMirror,
   })
 
   if (asJson) {
@@ -68,6 +89,29 @@ async function runVerifyPacket(argv) {
     console.log(result.summary)
   }
   process.exit(result.ok ? 0 : 1)
+}
+
+async function runCountersign(argv) {
+  const [subcommand, ...subArgs] = argv
+  if (subcommand === "request") {
+    const rest = [...subArgs]
+    const keyId = takeFlagValue(rest, "--key-id") ?? process.env.PIQ_COUNTERSIGN_KEY_ID
+    const tenantIdHash = takeFlagValue(rest, "--tenant-id-hash") ?? process.env.PIQ_TENANT_ID_HASH
+    const [packetPath] = rest
+    if (!packetPath) usage()
+    const packet = JSON.parse(await fs.readFile(packetPath, "utf8"))
+    console.log(JSON.stringify(buildCountersignRequest(packet, { keyId, tenantIdHash }), null, 2))
+    return
+  }
+  if (subcommand === "attach") {
+    const [packetPath, receiptPath] = subArgs
+    if (!packetPath || !receiptPath) usage()
+    const packet = JSON.parse(await fs.readFile(packetPath, "utf8"))
+    const receipt = JSON.parse(await fs.readFile(receiptPath, "utf8"))
+    console.log(JSON.stringify(attachCountersignature(packet, receipt), null, 2))
+    return
+  }
+  usage()
 }
 
 function baseUrl() {
@@ -114,6 +158,10 @@ async function main() {
   if (!command) usage()
   if (command === "verify-packet") {
     await runVerifyPacket(args)
+    return
+  }
+  if (command === "countersign") {
+    await runCountersign(args)
     return
   }
   if (command === "validate") {
