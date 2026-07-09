@@ -1448,6 +1448,7 @@ function buildMeasurements(
     logprobsAvailable: sample.logprobsAvailable,
     tokenDetailCount: sample.tokenDetailCount,
     tokenDetailSource: sample.tokenDetailSource,
+    tokenIdSource: sample.tokenIdSource,
     queueWaitMs: sample.queueWaitMs,
     prefillMs: sample.prefillMs,
     decodeMs: sample.decodeMs,
@@ -1477,6 +1478,7 @@ function buildMeasurements(
     isFirstOutput: chunk.isFirstOutput,
     tokenIndex: chunk.tokenIndex,
     tokenId: chunk.tokenId,
+    tokenIdSource: chunk.tokenIdSource,
     tokenLogprob: chunk.tokenLogprob,
     tokenTextSha256: chunk.tokenTextSha256,
     topLogprobsJson: chunk.topLogprobsJson,
@@ -1544,6 +1546,7 @@ async function writeSummaryArtifact(
       logprobsAvailable: sample.logprobsAvailable,
       tokenDetailCount: sample.tokenDetailCount,
       tokenDetailSource: sample.tokenDetailSource,
+      tokenIdSource: sample.tokenIdSource,
     })),
     measurements,
   }, null, 2) + "\n")
