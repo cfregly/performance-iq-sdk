@@ -243,7 +243,9 @@ queries the dashboard surfaces, writes `PIQ_SERVING_EVENT_LOG`, and writes the
 proof summary.
 Use `strict-smoke` or `strict-recorded-smoke` for product proof: these require
 token IDs/logprobs, token ID provenance, native engine telemetry, DCGM hardware
-counters, dashboard rows, request receipts, and configured GPU cost.
+counters, dashboard rows, request receipts, and configured GPU cost. These
+strict wrapper modes also run the saved-proof verifier after capture and fail
+unless `telemetryCoverage.allProven` is true.
 
 For CI and local contract checks without real runtimes, use deterministic fake
 engines:
@@ -281,6 +283,15 @@ Read two fields in the verifier output separately:
   IDs/logprobs, operator-full raw artifacts, request receipts, runtime
   provenance, dashboard fine-grain rows, raw native/DCGM metric snapshots, and
   Kafka-ready event rows.
+
+For a fail-closed product gate on an existing proof file, require full telemetry
+coverage explicitly:
+
+```bash
+bash ops/serving-producers/run-smoke.sh verify-proof \
+  "$PIQ_ARTIFACT_DIR/serving-smoke-proof-<suffix>.json" \
+  --require-telemetry-coverage
+```
 
 To inspect every generated row, add a proof-row dump. The output includes
 submitted runs, dashboard row snapshots, request samples, token timeline rows,

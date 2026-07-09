@@ -98,6 +98,10 @@ strict_common=(
   --require-native-telemetry
   --require-hardware-telemetry
 )
+strict_proof_gate=(
+  --verify-after-capture
+  --require-telemetry-coverage
+)
 
 allow_partial_defaults=false
 case "${PIQ_SERVING_ALLOW_PARTIAL:-false}" in
@@ -157,14 +161,14 @@ case "$mode" in
     ;;
   strict-smoke)
     require_strict_pricing "$@"
-    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --event-log "$event_log" "${strict_common[@]}" "$@"
+    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --event-log "$event_log" "${strict_common[@]}" "${strict_proof_gate[@]}" "$@"
     ;;
   recorded-smoke)
     exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --record-receipts --receipt-log "$receipt_log" --event-log "$event_log" "$@"
     ;;
   strict-recorded-smoke)
     require_strict_pricing "$@"
-    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --record-receipts --receipt-log "$receipt_log" --event-log "$event_log" "${strict_common[@]}" "$@"
+    exec "$python_bin" -m performance_iq_sdk.serving_smoke "${common[@]}" --query-dashboard --record-receipts --receipt-log "$receipt_log" --event-log "$event_log" "${strict_common[@]}" "${strict_proof_gate[@]}" "$@"
     ;;
   fake-strict-smoke)
     exec "$python_bin" -m performance_iq_sdk.serving_smoke \

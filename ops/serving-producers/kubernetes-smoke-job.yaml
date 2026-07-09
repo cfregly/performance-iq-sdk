@@ -49,6 +49,10 @@ spec:
               value: "true"
             - name: PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY
               value: "true"
+            - name: PIQ_SERVING_VERIFY_AFTER_CAPTURE
+              value: "true"
+            - name: PIQ_SERVING_REQUIRE_TELEMETRY_COVERAGE
+              value: "true"
             - name: PIQ_VLLM_URL
               value: http://vllm:8000
             - name: PIQ_SGLANG_URL
@@ -92,6 +96,8 @@ spec:
           args:
             - --query-dashboard
             - --record-receipts
+            - --verify-after-capture
+            - --require-telemetry-coverage
             - --receipt-log
             - $(PIQ_SERVING_RECEIPT_LOG)
             - --repetitions

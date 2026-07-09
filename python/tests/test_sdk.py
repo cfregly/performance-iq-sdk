@@ -73,6 +73,8 @@ class PerformanceIQSdkTest(unittest.TestCase):
         "PIQ_SERVING_COLLECT_HARDWARE_METRICS",
         "PIQ_SERVING_REQUIRE_NATIVE_TELEMETRY",
         "PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY",
+        "PIQ_SERVING_VERIFY_AFTER_CAPTURE",
+        "PIQ_SERVING_REQUIRE_TELEMETRY_COVERAGE",
         "PIQ_VLLM_METRICS_URL",
         "PIQ_SGLANG_METRICS_URL",
         "PIQ_TENSORRT_LLM_METRICS_URL",
@@ -1541,6 +1543,27 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertFalse(tampered_verification["ok"])
         self.assertTrue(any("eventId digest" in error for error in tampered_verification["errors"]))
 
+    def test_serving_smoke_verify_proof_requires_all_telemetry_when_requested(self):
+        proof_path, _summary = self.write_full_serving_proof()
+        stdout = StringIO()
+        stderr = StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = serving_smoke_main([
+                "--verify-proof", proof_path,
+                "--require-telemetry-coverage",
+            ])
+
+        self.assertEqual(code, 1, stderr.getvalue() + stdout.getvalue())
+        report = json.loads(stdout.getvalue())
+        self.assertTrue(report["ok"], json.dumps(report, indent=2))
+        self.assertFalse(report["telemetryCoverage"]["allProven"])
+        self.assertFalse(report["strictTelemetryGate"]["ok"])
+        self.assertTrue(report["strictTelemetryGate"]["proofOk"])
+        self.assertFalse(report["strictTelemetryGate"]["allTelemetryProven"])
+        self.assertIn("dcgmHardwareTelemetry", report["strictTelemetryGate"]["missingCategories"])
+        self.assertIn("nativeRuntimeTelemetry", report["strictTelemetryGate"]["missingCategories"])
+
     def test_serving_smoke_fake_full_telemetry_proves_all_coverage(self):
         proof_path = os.path.join(self.tmp_dir, "fake-full-proof.json")
         event_log_path = os.path.join(self.tmp_dir, "fake-events.jsonl")
@@ -2037,6 +2060,9 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertIn("PIQ_SERVING_USD_PER_GPU_HOUR", plan["strictProof"]["command"])
         self.assertIn("PIQ_SERVING_REQUIRE_NATIVE_TELEMETRY=true", plan["strictProof"]["command"])
         self.assertIn("PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true", plan["strictProof"]["command"])
+        self.assertIn("PIQ_SERVING_VERIFY_AFTER_CAPTURE=true", plan["strictProof"]["command"])
+        self.assertIn("PIQ_SERVING_REQUIRE_TELEMETRY_COVERAGE=true", plan["strictProof"]["command"])
+        self.assertIn("--require-telemetry-coverage", plan["strictProof"]["verify"])
         self.assertIn("serving_request_samples", plan["strictProof"]["dashboardSurfaces"])
         self.assertIn("serving_token_timeline", plan["strictProof"]["dashboardSurfaces"])
         self.assertIn("serving_telemetry_coverage", plan["strictProof"]["dashboardSurfaces"])
@@ -2053,6 +2079,8 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         os.environ["PIQ_SERVING_POWER_WATTS_PER_GPU"] = "700"
         os.environ["PIQ_SERVING_RESOLVE_TOKEN_IDS_WITH_TOKENIZER"] = "true"
         os.environ["PIQ_SERVING_TOKENIZER_MODEL"] = "Qwen/Qwen2.5-0.5B-Instruct"
+        os.environ["PIQ_SERVING_VERIFY_AFTER_CAPTURE"] = "true"
+        os.environ["PIQ_SERVING_REQUIRE_TELEMETRY_COVERAGE"] = "true"
 
         args = serving_smoke_parser().parse_args([])
 
@@ -2061,6 +2089,8 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertEqual(args.power_watts_per_gpu, 700)
         self.assertTrue(args.resolve_token_ids_with_tokenizer)
         self.assertEqual(args.tokenizer_model, "Qwen/Qwen2.5-0.5B-Instruct")
+        self.assertTrue(args.verify_after_capture)
+        self.assertTrue(args.require_telemetry_coverage)
 
     def test_serving_smoke_diagnostics_reports_cache_ports_and_blockers(self):
         old_home = os.environ.get("HOME")

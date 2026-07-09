@@ -304,6 +304,8 @@ rows, native runtime telemetry, DCGM hardware telemetry, prompt token IDs,
 output token IDs/logprobs, operator-full artifacts, raw native/DCGM metric
 snapshots, runtime provenance, and Kafka-ready event rows. `--dump-proof-rows` also emits
 `telemetryCoverageRows`, one row per engine/category from the verifier.
+Add `--require-telemetry-coverage` to make `verify-proof` exit nonzero unless
+`telemetryCoverage.allProven` is true.
 It fails fast unless all three URLs are configured and the configured endpoints
 pass the model-aware `/v1/models` preflight. Use `--allow-missing-engines` only
 for partial local debugging and `--skip-preflight` only when debugging a
