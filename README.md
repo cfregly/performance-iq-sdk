@@ -184,7 +184,17 @@ PYTHONPATH=python/src python -m performance_iq_sdk.serving_smoke \
 
 The preflight prints local binary/module status (`vllm`, `sglang`,
 `trtllm-serve`, `nvidia-smi`) and probes each configured endpoint at
-`/v1/models`. It does not send inference requests or write Performance IQ runs.
+`/v1/models`. When the endpoint returns a standard model list, the preflight
+also verifies that the configured smoke model is actually served. It does not
+send inference requests or write Performance IQ runs.
+
+To print the host-aware launch plan without probing endpoints:
+
+```bash
+PYTHONPATH=python/src python -m performance_iq_sdk.serving_smoke \
+  --launch-plan-only \
+  --model Qwen/Qwen2.5-0.5B-Instruct
+```
 
 Reference launch shapes for the same smoke model:
 
@@ -207,6 +217,16 @@ trtllm-serve Qwen/Qwen2.5-0.5B-Instruct \
   --host 127.0.0.1 \
   --port 8001
 ```
+
+Host notes:
+
+- vLLM on Apple Silicon is a source-build path today; use the launch-plan
+  output to keep the endpoint and model name aligned with the smoke runner.
+- SGLang on Apple Silicon should run through its Metal/MLX path with
+  `SGLANG_USE_MLX=1`.
+- TensorRT-LLM requires a Linux x86_64/aarch64 target with supported NVIDIA
+  GPUs. From a Mac, point `PIQ_TENSORRT_LLM_URL` at a reachable remote
+  OpenAI-compatible TensorRT-LLM server.
 
 ## Safety Rules
 

@@ -28,3 +28,14 @@ producer runs, and verifies the fixed Performance IQ dashboard query surfaces.
 
 Use `--preflight-only` to check local runtime availability and configured
 `/v1/models` endpoints without sending inference requests or submitting runs.
+The preflight validates the requested model when the endpoint returns a
+standard OpenAI-compatible model list.
+
+Use `--launch-plan-only` to print host-aware launch commands and endpoint env
+vars for vLLM, SGLang, and TensorRT-LLM:
+
+```bash
+PYTHONPATH=src python -m performance_iq_sdk.serving_smoke \
+  --launch-plan-only \
+  --model Qwen/Qwen2.5-0.5B-Instruct
+```

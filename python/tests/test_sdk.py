@@ -10,7 +10,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 from performance_iq_sdk import PerformanceIQ, build_manifest, laptop_smoke_model, run_serving_producer, validate_run
-from performance_iq_sdk.serving_smoke import engine_configs_from_env, endpoint_probe, run_serving_smoke, runtime_preflight
+from performance_iq_sdk.serving_smoke import (
+    engine_configs_from_env,
+    endpoint_probe,
+    run_serving_smoke,
+    runtime_launch_plan,
+    runtime_preflight,
+)
 
 
 class PerformanceIQSdkTest(unittest.TestCase):
@@ -227,13 +233,24 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(missing, ["sglang (PIQ_SGLANG_URL)", "tensorrt-llm (PIQ_TENSORRT_LLM_URL)"])
 
     def test_serving_smoke_preflight_reports_missing_without_requests(self):
-        preflight = runtime_preflight([], ["vllm (PIQ_VLLM_URL)"])
+        preflight = runtime_preflight([], ["vllm (PIQ_VLLM_URL)"], model=laptop_smoke_model())
 
         self.assertFalse(preflight["ready"])
         self.assertEqual(preflight["missingEngineUrls"], ["vllm (PIQ_VLLM_URL)"])
         self.assertEqual(preflight["endpoints"], [])
         self.assertIn("vllmCommand", preflight["localRuntime"])
         self.assertIn("python", preflight["host"])
+        self.assertEqual(preflight["launchPlan"]["model"], laptop_smoke_model())
+        self.assertEqual(preflight["launchPlan"]["endpointEnv"]["PIQ_VLLM_URL"], "http://127.0.0.1:8000")
+
+    def test_serving_smoke_launch_plan_includes_all_engine_commands(self):
+        plan = runtime_launch_plan(laptop_smoke_model())
+
+        self.assertEqual(set(plan["engines"].keys()), {"vllm", "sglang", "tensorrt-llm"})
+        self.assertIn("vllm serve", plan["engines"]["vllm"]["serve"])
+        self.assertIn("sglang.launch_server", plan["engines"]["sglang"]["serve"])
+        self.assertIn("trtllm-serve", plan["engines"]["tensorrt-llm"]["serve"])
+        self.assertEqual(plan["endpointEnv"]["PIQ_SGLANG_URL"], "http://127.0.0.1:30000")
 
     def test_serving_smoke_endpoint_preflight_rejects_not_found_models_route(self):
         class Handler(BaseHTTPRequestHandler):
@@ -261,6 +278,35 @@ class PerformanceIQSdkTest(unittest.TestCase):
 
         self.assertTrue(result["reachable"])
         self.assertEqual(result["status"], 404)
+        self.assertFalse(result["ok"])
+
+    def test_serving_smoke_endpoint_preflight_rejects_wrong_served_model(self):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                return
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"object":"list","data":[{"id":"other-model","object":"model"}]}')
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = endpoint_probe({
+                "engine": "sglang",
+                "baseUrl": f"http://127.0.0.1:{server.server_address[1]}",
+            }, model=laptop_smoke_model())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertTrue(result["reachable"])
+        self.assertTrue(result["modelChecked"])
+        self.assertFalse(result["modelAvailable"])
         self.assertFalse(result["ok"])
 
 

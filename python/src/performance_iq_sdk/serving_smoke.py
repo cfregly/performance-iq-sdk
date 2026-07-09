@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,11 @@ ENGINE_API_KEY_ENV = {
     "tensorrt-llm": "PIQ_TENSORRT_LLM_API_KEY",
 }
 QUERY_NAMES = ("price_performance", "capacity_best", "campaign_provenance", "run_details")
+ENGINE_DEFAULT_PORT = {
+    "vllm": 8000,
+    "sglang": 30000,
+    "tensorrt-llm": 8001,
+}
 
 
 def _utc_slug() -> str:
@@ -110,7 +116,39 @@ def module_probe(module: str) -> dict[str, Any]:
     }
 
 
-def endpoint_probe(engine: dict[str, Any]) -> dict[str, Any]:
+def _model_ids(body: dict[str, Any]) -> list[str]:
+    items = body.get("data")
+    if not isinstance(items, list):
+        return []
+    model_ids: list[str] = []
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            model_ids.append(item["id"])
+    return model_ids
+
+
+def _with_model_check(result: dict[str, Any], body: dict[str, Any] | None, model: str | None) -> dict[str, Any]:
+    if not model or body is None:
+        return result
+    served_models = _model_ids(body)
+    if not served_models:
+        return {
+            **result,
+            "modelChecked": False,
+            "servedModels": [],
+            "modelAvailable": None,
+        }
+    model_available = model in served_models
+    return {
+        **result,
+        "ok": bool(result.get("ok")) and model_available,
+        "modelChecked": True,
+        "servedModels": served_models[:20],
+        "modelAvailable": model_available,
+    }
+
+
+def endpoint_probe(engine: dict[str, Any], model: str | None = None) -> dict[str, Any]:
     url = f"{str(engine['baseUrl']).rstrip('/')}/v1/models"
     request = urllib.request.Request(
         url,
@@ -122,15 +160,19 @@ def endpoint_probe(engine: dict[str, Any]) -> dict[str, Any]:
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
-            body = response.read(2048).decode("utf-8", errors="replace")
-            return {
+            raw_body = response.read(4096).decode("utf-8", errors="replace")
+            try:
+                body = json.loads(raw_body) if raw_body.strip().startswith("{") else None
+            except json.JSONDecodeError:
+                body = None
+            return _with_model_check({
                 "engine": engine["engine"],
                 "url": url,
                 "reachable": True,
                 "status": response.status,
                 "ok": 200 <= response.status < 300,
-                "bodyPreview": body[:300],
-            }
+                "bodyPreview": raw_body[:300],
+            }, body, model)
     except urllib.error.HTTPError as exc:
         body = exc.read(2048).decode("utf-8", errors="replace")
         return {
@@ -151,8 +193,87 @@ def endpoint_probe(engine: dict[str, Any]) -> dict[str, Any]:
         }
 
 
-def runtime_preflight(engines: list[dict[str, Any]], missing_urls: list[str]) -> dict[str, Any]:
-    endpoint_results = [endpoint_probe(engine) for engine in engines]
+def runtime_launch_plan(model: str) -> dict[str, Any]:
+    system = platform.system()
+    machine = platform.machine()
+    apple_silicon = system == "Darwin" and machine == "arm64"
+    linux_nvidia = system == "Linux" and shutil.which("nvidia-smi") is not None
+    quoted_model = shlex.quote(model)
+    return {
+        "model": model,
+        "host": {
+            "system": system,
+            "machine": machine,
+        },
+        "endpointEnv": {
+            "PIQ_VLLM_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['vllm']}",
+            "PIQ_SGLANG_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['sglang']}",
+            "PIQ_TENSORRT_LLM_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}",
+        },
+        "engines": {
+            "vllm": {
+                "localSupport": "apple-silicon-source-build-required" if apple_silicon else "install-required",
+                "install": [
+                    "git clone https://github.com/vllm-project/vllm.git",
+                    "cd vllm",
+                    "uv venv --python 3.12 --seed --managed-python",
+                    "source .venv/bin/activate",
+                    "uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match",
+                    "uv pip install -e .",
+                ] if apple_silicon else [
+                    "Follow the vLLM CPU/GPU install path for this host, then run the serve command below.",
+                ],
+                "serve": (
+                    f"vllm serve {quoted_model} --host 127.0.0.1 "
+                    f"--port {ENGINE_DEFAULT_PORT['vllm']} --served-model-name {quoted_model}"
+                ),
+                "verify": f"curl -fsS http://127.0.0.1:{ENGINE_DEFAULT_PORT['vllm']}/v1/models",
+            },
+            "sglang": {
+                "localSupport": "apple-metal-source-build-required" if apple_silicon else "install-required",
+                "install": [
+                    "git clone https://github.com/sgl-project/sglang.git",
+                    "cd sglang",
+                    "uv venv -p 3.12 sglang-metal",
+                    "source sglang-metal/bin/activate",
+                    "uv pip install --upgrade pip",
+                    "uv run sgl-kernel/setup_metal.py install",
+                    "rm -f python/pyproject.toml",
+                    "mv python/pyproject_other.toml python/pyproject.toml",
+                    'uv pip install -e "python[all_mps]"',
+                ] if apple_silicon else [
+                    "Follow the SGLang platform install path for this host, then run the serve command below.",
+                ],
+                "serve": (
+                    f"SGLANG_USE_MLX=1 python -m sglang.launch_server --model {quoted_model} "
+                    f"--disable-cuda-graph --host 127.0.0.1 --port {ENGINE_DEFAULT_PORT['sglang']} "
+                    f"--served-model-name {quoted_model}"
+                ) if apple_silicon else (
+                    f"python -m sglang.launch_server --model-path {quoted_model} --host 127.0.0.1 "
+                    f"--port {ENGINE_DEFAULT_PORT['sglang']} --served-model-name {quoted_model}"
+                ),
+                "verify": f"curl -fsS http://127.0.0.1:{ENGINE_DEFAULT_PORT['sglang']}/v1/models",
+            },
+            "tensorrt-llm": {
+                "localSupport": "ready-on-this-host" if linux_nvidia else "requires-linux-nvidia-target-or-remote-endpoint",
+                "install": [
+                    "Run TensorRT-LLM on a Linux x86_64/aarch64 host with a supported NVIDIA GPU.",
+                    "Expose its OpenAI-compatible server to this smoke runner and set PIQ_TENSORRT_LLM_URL.",
+                ] if not linux_nvidia else [
+                    "Install TensorRT-LLM for this NVIDIA Linux host, then run the serve command below.",
+                ],
+                "serve": (
+                    f"trtllm-serve {quoted_model} --host 127.0.0.1 "
+                    f"--port {ENGINE_DEFAULT_PORT['tensorrt-llm']}"
+                ),
+                "verify": f"curl -fsS http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}/v1/models",
+            },
+        },
+    }
+
+
+def runtime_preflight(engines: list[dict[str, Any]], missing_urls: list[str], model: str | None = None) -> dict[str, Any]:
+    endpoint_results = [endpoint_probe(engine, model=model) for engine in engines]
     return {
         "host": {
             "system": platform.system(),
@@ -169,6 +290,7 @@ def runtime_preflight(engines: list[dict[str, Any]], missing_urls: list[str]) ->
         },
         "missingEngineUrls": missing_urls,
         "endpoints": endpoint_results,
+        "launchPlan": runtime_launch_plan(model or laptop_smoke_model()),
         "ready": not missing_urls and all(item.get("ok") for item in endpoint_results),
     }
 
@@ -289,14 +411,18 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--query-dashboard", action="store_true", help="Query fixed dashboard surfaces after submission.")
     parser.add_argument("--allow-missing-engines", action="store_true", help="Run configured engines only instead of requiring all three URLs.")
     parser.add_argument("--preflight-only", action="store_true", help="Report local runtime and endpoint readiness without sending completion requests.")
+    parser.add_argument("--launch-plan-only", action="store_true", help="Print host-aware launch commands for the three serving engines.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     engines, missing = engine_configs_from_env(args)
+    if args.launch_plan_only:
+        print(json.dumps(runtime_launch_plan(args.model), indent=2))
+        return 0
     if args.preflight_only:
-        preflight = runtime_preflight(engines, missing)
+        preflight = runtime_preflight(engines, missing, model=args.model)
         print(json.dumps(preflight, indent=2))
         return 0 if preflight["ready"] else 1
     if missing and not args.allow_missing_engines:
