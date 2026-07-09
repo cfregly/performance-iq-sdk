@@ -85,6 +85,12 @@ def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> Se
         }
 
 
+def _get_text(url: str, headers: dict[str, str]) -> str:
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    with urllib.request.urlopen(request, timeout=2) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
 def _post_json_stream(
     url: str,
     headers: dict[str, str],
@@ -238,6 +244,214 @@ def _native_telemetry(engine: dict[str, Any], body: dict[str, Any] | None = None
     }
 
 
+def _metrics_url(engine: dict[str, Any]) -> str | None:
+    configured = engine.get("metricsUrl")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    if engine.get("collectNativeMetrics") is True:
+        return f"{_normalize_base_url(str(engine['baseUrl']))}/metrics"
+    return None
+
+
+def _metrics_headers(engine: dict[str, Any]) -> dict[str, str]:
+    return {
+        "accept": "text/plain",
+        **({"authorization": f"Bearer {engine['apiKey']}"} if engine.get("apiKey") else {}),
+    }
+
+
+def _parse_prometheus_metrics(text: str) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = PROMETHEUS_SAMPLE_RE.match(line)
+        if not match:
+            continue
+        try:
+            value = float(match.group(2))
+        except ValueError:
+            continue
+        metrics[match.group(1)] = metrics.get(match.group(1), 0.0) + value
+    return metrics
+
+
+def _read_native_metrics(engine: dict[str, Any], http_get_text: HttpGetText | None = None) -> dict[str, Any]:
+    url = _metrics_url(engine)
+    if not url:
+        return {"available": False, "source": "metrics-url-not-configured"}
+    try:
+        text = (http_get_text or _get_text)(url, _metrics_headers(engine))
+    except Exception as exc:
+        return {"available": False, "source": "prometheus-unavailable", "metricsUrl": url, "error": str(exc)}
+    metrics = _parse_prometheus_metrics(text)
+    if not metrics:
+        return {"available": False, "source": "prometheus-empty", "metricsUrl": url}
+    return {
+        "available": True,
+        "source": "prometheus-snapshot",
+        "metricsUrl": url,
+        "metrics": metrics,
+        "capturedAtUtc": _now_iso(),
+    }
+
+
+def _metric_value(metrics: dict[str, float], candidates: list[str]) -> float | None:
+    for name in candidates:
+        value = metrics.get(name)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
+def _counter_delta(before: dict[str, float], after: dict[str, float], candidates: list[str]) -> float | None:
+    before_value = _metric_value(before, candidates)
+    after_value = _metric_value(after, candidates)
+    if before_value is None or after_value is None:
+        return None
+    delta = after_value - before_value
+    return delta if delta >= 0 else None
+
+
+def _histogram_delta_mean_ms(before: dict[str, float], after: dict[str, float], bases: list[str]) -> float | None:
+    for base in bases:
+        sum_delta = _counter_delta(before, after, [f"{base}_sum"])
+        count_delta = _counter_delta(before, after, [f"{base}_count"])
+        if sum_delta is not None and count_delta and count_delta > 0:
+            return (sum_delta / count_delta) * 1000
+    return None
+
+
+def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    if not before.get("available") or not after.get("available"):
+        return {
+            "available": False,
+            "source": "prometheus-delta-unavailable",
+            "metricsUrl": before.get("metricsUrl") or after.get("metricsUrl") or _metrics_url(engine),
+            "before": before,
+            "after": after,
+        }
+    before_metrics = before.get("metrics") if isinstance(before.get("metrics"), dict) else {}
+    after_metrics = after.get("metrics") if isinstance(after.get("metrics"), dict) else {}
+    if not isinstance(before_metrics, dict) or not isinstance(after_metrics, dict):
+        return {"available": False, "source": "prometheus-delta-invalid"}
+
+    native_ttft_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
+        "vllm:time_to_first_token_seconds",
+        "sglang:time_to_first_token_seconds",
+        "sglang_time_to_first_token_seconds",
+        "trtllm:time_to_first_token_seconds",
+        "trtllm_time_to_first_token_seconds",
+    ])
+    native_tpot_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
+        "vllm:request_time_per_output_token_seconds",
+        "sglang:request_time_per_output_token_seconds",
+        "sglang_request_time_per_output_token_seconds",
+        "trtllm:request_time_per_output_token_seconds",
+        "trtllm_request_time_per_output_token_seconds",
+    ])
+    native_inter_token_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
+        "vllm:inter_token_latency_seconds",
+        "sglang:inter_token_latency_seconds",
+        "sglang_inter_token_latency_seconds",
+        "trtllm:inter_token_latency_seconds",
+        "trtllm_inter_token_latency_seconds",
+    ])
+    native_e2e_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
+        "vllm:e2e_request_latency_seconds",
+        "sglang:e2e_request_latency_seconds",
+        "sglang_e2e_request_latency_seconds",
+        "trtllm:e2e_request_latency_seconds",
+        "trtllm_e2e_request_latency_seconds",
+    ])
+    queue_wait_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
+        "vllm:request_queue_time_seconds",
+        "sglang:request_queue_time_seconds",
+        "sglang_request_queue_time_seconds",
+        "trtllm:request_queue_time_seconds",
+        "trtllm_request_queue_time_seconds",
+    ])
+    prefill_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
+        "vllm:request_prefill_time_seconds",
+        "sglang:request_prefill_time_seconds",
+        "sglang_request_prefill_time_seconds",
+        "trtllm:request_prefill_time_seconds",
+        "trtllm_request_prefill_time_seconds",
+    ])
+    decode_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
+        "vllm:request_decode_time_seconds",
+        "sglang:request_decode_time_seconds",
+        "sglang_request_decode_time_seconds",
+        "trtllm:request_decode_time_seconds",
+        "trtllm_request_decode_time_seconds",
+    ])
+    prefix_queries = _counter_delta(before_metrics, after_metrics, [
+        "vllm:prefix_cache_queries_total",
+        "sglang:prefix_cache_queries_total",
+        "sglang_prefix_cache_queries_total",
+        "trtllm:prefix_cache_queries_total",
+        "trtllm_prefix_cache_queries_total",
+    ])
+    prefix_hits = _counter_delta(before_metrics, after_metrics, [
+        "vllm:prefix_cache_hits_total",
+        "sglang:prefix_cache_hits_total",
+        "sglang_prefix_cache_hits_total",
+        "trtllm:prefix_cache_hits_total",
+        "trtllm_prefix_cache_hits_total",
+    ])
+    cache_hit_rate = (prefix_hits / prefix_queries) if prefix_hits is not None and prefix_queries and prefix_queries > 0 else None
+    values = {
+        "nativeTtftMs": native_ttft_ms,
+        "nativeTpotMs": native_tpot_ms,
+        "nativeInterTokenLatencyMs": native_inter_token_ms,
+        "nativeE2eLatencyMs": native_e2e_ms,
+        "queueWaitMs": queue_wait_ms,
+        "prefillMs": prefill_ms,
+        "decodeMs": decode_ms,
+        "runningRequests": _metric_value(after_metrics, ["vllm:num_requests_running", "sglang:num_running_reqs", "sglang_num_running_reqs"]),
+        "waitingRequests": _metric_value(after_metrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs"]),
+        "kvCacheUsagePct": _metric_value(after_metrics, ["vllm:kv_cache_usage_perc", "sglang:token_usage", "sglang_token_usage"]),
+        "prefixCacheQueriesDelta": prefix_queries,
+        "prefixCacheHitsDelta": prefix_hits,
+        "cacheHitRate": cache_hit_rate,
+        "promptTokensCachedDelta": _counter_delta(before_metrics, after_metrics, [
+            "vllm:prompt_tokens_cached_total",
+            "sglang:prompt_tokens_cached_total",
+            "sglang_prompt_tokens_cached_total",
+        ]),
+        "promptTokensComputedDelta": _counter_delta(before_metrics, after_metrics, [
+            "vllm:request_prefill_kv_computed_tokens_sum",
+            "sglang:request_prefill_kv_computed_tokens_sum",
+            "sglang_request_prefill_kv_computed_tokens_sum",
+        ]),
+    }
+    available_values = {key: value for key, value in values.items() if value is not None}
+    return {
+        "available": bool(available_values),
+        "source": "prometheus-delta",
+        "metricsUrl": after.get("metricsUrl") or before.get("metricsUrl"),
+        "beforeCapturedAtUtc": before.get("capturedAtUtc"),
+        "afterCapturedAtUtc": after.get("capturedAtUtc"),
+        **available_values,
+    }
+
+
+def _combine_native_telemetry(*items: dict[str, Any]) -> dict[str, Any]:
+    combined: dict[str, Any] = {}
+    sources: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("source"):
+            sources.append(str(item["source"]))
+        combined.update(item)
+    combined["available"] = any(bool(item.get("available")) for item in items if isinstance(item, dict))
+    if sources:
+        combined["source"] = "+".join(dict.fromkeys(sources))
+    return combined
+
+
 def _avg_numbers(samples: list[dict[str, Any]], key: str) -> float | None:
     values = [float(sample[key]) for sample in samples if isinstance(sample.get(key), (int, float))]
     return sum(values) / len(values) if values else None
@@ -269,6 +483,7 @@ def _send_streaming_chat_completion(
     campaign_id: str,
     run_id: str,
     http_stream_json: HttpStreamJson | None,
+    http_get_text: HttpGetText | None,
 ) -> dict[str, Any]:
     endpoint = f"{_normalize_base_url(engine['baseUrl'])}{engine.get('requestPath', '/v1/chat/completions')}"
     request_id = _request_trace_id(engine, run_id, request_index)
@@ -278,9 +493,10 @@ def _send_streaming_chat_completion(
     }
     if engine.get("apiKey"):
         headers["authorization"] = f"Bearer {engine['apiKey']}"
+    payload = _request_payload(request, stream=True)
+    native_before = _read_native_metrics(engine, http_get_text)
     started = time.perf_counter()
     request_started_at_utc = _now_iso()
-    payload = _request_payload(request, stream=True)
     try:
         raw_result = (http_stream_json or (lambda url, hdrs, body: _post_json_stream(url, hdrs, body, started)))(
             endpoint,
@@ -321,6 +537,11 @@ def _send_streaming_chat_completion(
                     "receivedMs": event["receivedMs"],
                     "receivedAtUtc": event["receivedAtUtc"],
                 })
+        native_after = _read_native_metrics(engine, http_get_text)
+        native_telemetry = _combine_native_telemetry(
+            native_telemetry,
+            _native_metrics_delta(engine, native_before, native_after),
+        )
         first_chunk = events[0] if events else None
         first_output = output_chunks[0] if output_chunks else None
         last_output = output_chunks[-1] if output_chunks else None
@@ -435,6 +656,7 @@ def _send_non_streaming_chat_completion(
     campaign_id: str,
     run_id: str,
     http_post_json: HttpPostJson | None,
+    http_get_text: HttpGetText | None,
 ) -> dict[str, Any]:
     endpoint = f"{_normalize_base_url(engine['baseUrl'])}{engine.get('requestPath', '/v1/chat/completions')}"
     request_id = _request_trace_id(engine, run_id, request_index)
@@ -444,9 +666,10 @@ def _send_non_streaming_chat_completion(
     }
     if engine.get("apiKey"):
         headers["authorization"] = f"Bearer {engine['apiKey']}"
+    payload = _request_payload(request, stream=False)
+    native_before = _read_native_metrics(engine, http_get_text)
     started = time.perf_counter()
     request_started_at_utc = _now_iso()
-    payload = _request_payload(request, stream=False)
     try:
         result = (http_post_json or _post_json)(endpoint, headers, payload)
         latency_ms = (time.perf_counter() - started) * 1000
@@ -455,7 +678,11 @@ def _send_non_streaming_chat_completion(
         usage = body.get("usage") or {}
         status = int(result.get("status", 0))
         output_text = _choice_content(body)
-        native_telemetry = _native_telemetry(engine, body)
+        native_after = _read_native_metrics(engine, http_get_text)
+        native_telemetry = _combine_native_telemetry(
+            _native_telemetry(engine, body),
+            _native_metrics_delta(engine, native_before, native_after),
+        )
         return {
             "requestId": request_id,
             "requestIndex": request_index,
@@ -540,10 +767,11 @@ def _send_chat_completion(
     run_id: str,
     http_post_json: HttpPostJson | None,
     http_stream_json: HttpStreamJson | None,
+    http_get_text: HttpGetText | None,
 ) -> dict[str, Any]:
     if bool(request.get("stream", True)) and http_post_json is None:
-        return _send_streaming_chat_completion(engine, request, request_index, campaign_id, run_id, http_stream_json)
-    return _send_non_streaming_chat_completion(engine, request, request_index, campaign_id, run_id, http_post_json)
+        return _send_streaming_chat_completion(engine, request, request_index, campaign_id, run_id, http_stream_json, http_get_text)
+    return _send_non_streaming_chat_completion(engine, request, request_index, campaign_id, run_id, http_post_json, http_get_text)
 
 
 def _sum(samples: list[dict[str, Any]], key: str) -> float:
