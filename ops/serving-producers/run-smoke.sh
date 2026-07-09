@@ -87,6 +87,7 @@ common=(
 strict_common=(
   --capture-token-details
   --top-logprobs "${PIQ_SERVING_TOP_LOGPROBS:-5}"
+  --resolve-token-ids-with-tokenizer
   --collect-hardware-metrics
   --require-native-telemetry
   --require-hardware-telemetry

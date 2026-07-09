@@ -41,6 +41,8 @@ spec:
               value: "true"
             - name: PIQ_SERVING_TOP_LOGPROBS
               value: "5"
+            - name: PIQ_SERVING_RESOLVE_TOKEN_IDS_WITH_TOKENIZER
+              value: "true"
             - name: PIQ_SERVING_COLLECT_HARDWARE_METRICS
               value: "true"
             - name: PIQ_SERVING_REQUIRE_NATIVE_TELEMETRY

@@ -27,5 +27,11 @@ classifiers = [
 [project.scripts]
 piq-serving-smoke = "performance_iq_sdk.serving_smoke:main"
 
+[project.optional-dependencies]
+tokenizers = [
+  "transformers>=4.41,<5",
+  "tokenizers>=0.19",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
