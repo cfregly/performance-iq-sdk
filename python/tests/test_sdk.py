@@ -599,6 +599,52 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(len(raw_artifacts), 1)
         self.assertTrue(os.path.exists(raw_artifacts[0]["path"]))
 
+    def test_serving_producer_fails_closed_on_interrupted_stream(self):
+        def http_stream_json(url, headers, payload):
+            raise RuntimeError("stream interrupted after role chunk")
+
+        result = run_serving_producer(
+            engine={"engine": "vllm", "baseUrl": "http://127.0.0.1:8000"},
+            request={
+                "model": laptop_smoke_model(),
+                "messages": [{"role": "user", "content": "Say ok."}],
+                "maxTokens": 16,
+            },
+            artifact_dir=self.tmp_dir,
+            workload={"hardware": "local stream engine", "operatingPoint": "laptop-smoke"},
+            pricing={"usdPerGpuHour": 1, "gpuCount": 1, "powerWattsPerGpu": 100},
+            http_stream_json=http_stream_json,
+        )
+
+        sample = result["samples"][0]
+        self.assertFalse(sample["ok"])
+        self.assertEqual(sample["status"], 0)
+        self.assertEqual(sample["streaming"], True)
+        self.assertIsInstance(sample["e2eLatencyMs"], float)
+        self.assertIsNone(sample["timeToFirstByteMs"])
+        self.assertIsNone(sample["ttftMs"])
+        self.assertIsNone(sample["ttfotMs"])
+        self.assertIsNone(sample["tpotMs"])
+        self.assertEqual(sample["streamChunkCount"], 0)
+        self.assertEqual(sample["outputTokenCount"], 0)
+        self.assertIn("stream interrupted", sample["error"])
+
+        aggregate = result["measurements"][0]
+        self.assertEqual(aggregate["successCount"], 0)
+        self.assertEqual(aggregate["errorCount"], 1)
+        self.assertLess(aggregate["metricCompleteness"], 1)
+
+        sample_rows = [row for row in result["measurements"] if row.get("surface") == "serving_request_sample"]
+        token_rows = [row for row in result["measurements"] if row.get("surface") == "serving_token_timeline"]
+        coverage_rows = [row for row in result["measurements"] if row.get("surface") == "serving_telemetry_coverage"]
+        self.assertEqual(sample_rows[0]["ok"], False)
+        self.assertIsNone(sample_rows[0]["ttftMs"])
+        self.assertEqual(token_rows, [])
+        self.assertEqual(
+            next(row for row in coverage_rows if row["coverageCategory"] == "clientStreamTiming")["coverageStatus"],
+            "missing",
+        )
+
     def test_serving_producer_captures_tokenizer_prompt_token_rows(self):
         class FakePromptTokenizer:
             def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True):
