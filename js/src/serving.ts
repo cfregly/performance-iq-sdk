@@ -1474,6 +1474,14 @@ async function sendChatCompletion(
           outputText,
           tokenDetails: rawTokenDetails,
           promptTokenDetails: promptTokens.details,
+          nativeMetricsRaw: {
+            before: nativeBefore,
+            after: nativeAfter,
+          },
+          hardwareMetricsRaw: {
+            before: hardwareBefore,
+            after: hardwareAfter,
+          },
           nativeTelemetry: telemetry,
           hardwareTelemetry: hwTelemetry,
           runtimeProvenance: provenance,
@@ -1601,6 +1609,14 @@ async function sendChatCompletion(
         outputText,
         tokenDetails: rawTokenDetails,
         promptTokenDetails: promptTokens.details,
+        nativeMetricsRaw: {
+          before: nativeBefore,
+          after: nativeAfter,
+        },
+        hardwareMetricsRaw: {
+          before: hardwareBefore,
+          after: hardwareAfter,
+        },
         nativeTelemetry: telemetry,
         hardwareTelemetry: hwTelemetry,
         runtimeProvenance: provenance,
@@ -1907,6 +1923,7 @@ const PRODUCER_COVERAGE_DESCRIPTIONS: Record<string, string> = {
   promptTokenIds: "Tokenizer-exact prompt/input token IDs and prompt token provenance.",
   outputTokenIdsLogprobs: "Output token IDs, token logprobs, top-logprobs, and token provenance.",
   operatorFullArtifacts: "Operator-full raw request/response artifacts retained outside customer-safe rows.",
+  rawMetricSnapshots: "Operator-full before/after native and DCGM metric snapshots retained outside customer-safe rows.",
   runtimeProvenance: "Engine version, model revision, image, server args, process, container, pod, node, or host provenance.",
 }
 
@@ -1931,11 +1948,32 @@ function hasRuntimeProvenance(sample: ServingRequestSample): boolean {
   ].some((value) => value != null && value !== "")
 }
 
+function rawSnapshotAvailable(capture: Record<string, unknown>, key: string): boolean {
+  const snapshot = capture[key]
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return false
+  const before = (snapshot as Record<string, unknown>).before
+  const after = (snapshot as Record<string, unknown>).after
+  if (!before || typeof before !== "object" || Array.isArray(before)) return false
+  if (!after || typeof after !== "object" || Array.isArray(after)) return false
+  const beforeRecord = before as Record<string, unknown>
+  const afterRecord = after as Record<string, unknown>
+  const beforeHasMetrics = Boolean(beforeRecord.available) && (
+    beforeRecord.metrics != null && typeof beforeRecord.metrics === "object" && !Array.isArray(beforeRecord.metrics)
+    || beforeRecord.jsonMetrics != null && typeof beforeRecord.jsonMetrics === "object" && !Array.isArray(beforeRecord.jsonMetrics)
+  )
+  const afterHasMetrics = Boolean(afterRecord.available) && (
+    afterRecord.metrics != null && typeof afterRecord.metrics === "object" && !Array.isArray(afterRecord.metrics)
+    || afterRecord.jsonMetrics != null && typeof afterRecord.jsonMetrics === "object" && !Array.isArray(afterRecord.jsonMetrics)
+  )
+  return beforeHasMetrics && afterHasMetrics
+}
+
 function producerCoverageRows(
   config: ServingProducerConfig,
   samples: ServingRequestSample[],
   aggregateRow: Record<string, unknown>,
   rawArtifactPath: string,
+  rawCaptures: Record<string, unknown>[],
   capturedAtUtc: string,
 ): Record<string, unknown>[] {
   const successful = samples.filter((sample) => sample.ok)
@@ -2023,6 +2061,18 @@ function producerCoverageRows(
     rawPresent,
     1,
     rawPresent ? [] : ["operator-full raw artifact missing"],
+  ])
+
+  const rawSnapshotExpected = nativeExpected > 0 || hardwareExpected > 0 ? expectedSamples : 0
+  const rawSnapshotProven = rawCaptures.filter((capture) =>
+    (nativeExpected === 0 || rawSnapshotAvailable(capture, "nativeMetricsRaw")) &&
+    (hardwareExpected === 0 || rawSnapshotAvailable(capture, "hardwareMetricsRaw")),
+  ).length
+  specs.push([
+    "rawMetricSnapshots",
+    rawSnapshotProven,
+    rawSnapshotExpected,
+    rawSnapshotExpected === 0 || rawSnapshotProven === rawSnapshotExpected ? [] : ["operator-full native/DCGM raw metric snapshots missing"],
   ])
 
   const runtimeProven = successful.filter(hasRuntimeProvenance).length
@@ -2183,7 +2233,7 @@ export async function runServingProducer(config: ServingProducerConfig): Promise
 
   const measurements = buildMeasurements(config, samples, capturedAtUtc)
   const rawArtifactPath = await writeRawArtifact(config, rawCaptures, capturedAtUtc)
-  measurements.push(...producerCoverageRows(config, samples, measurements[0], rawArtifactPath, capturedAtUtc))
+  measurements.push(...producerCoverageRows(config, samples, measurements[0], rawArtifactPath, rawCaptures, capturedAtUtc))
   const artifactPath = await writeSummaryArtifact(config, samples, measurements, capturedAtUtc, rawArtifactPath)
   const engineLabel = ENGINE_LABELS[config.engine.engine]
   const runInput: PerformanceIQRunInput = {

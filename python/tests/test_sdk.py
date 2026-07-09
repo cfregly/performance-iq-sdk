@@ -587,7 +587,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
         coverage_rows = [row for row in result["measurements"] if row.get("surface") == "serving_telemetry_coverage"]
         self.assertEqual(len(sample_rows), 1)
         self.assertEqual(len(token_rows), 2)
-        self.assertEqual(len(coverage_rows), 7)
+        self.assertEqual(len(coverage_rows), 8)
         self.assertIn("clientStreamTiming", {row["coverageCategory"] for row in coverage_rows})
         with open(result["artifactPath"], encoding="utf-8") as handle:
             artifact = json.load(handle)
@@ -1343,6 +1343,7 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertEqual(coverage["categorySummary"]["requestReceipts"]["status"], "proven")
         self.assertEqual(coverage["categorySummary"]["dashboardFineGrainRows"]["status"], "proven")
         self.assertEqual(coverage["categorySummary"]["operatorFullArtifacts"]["status"], "proven")
+        self.assertEqual(coverage["categorySummary"]["rawMetricSnapshots"]["status"], "missing")
         self.assertEqual(coverage["categorySummary"]["nativeRuntimeTelemetry"]["status"], "missing")
         self.assertEqual(coverage["categorySummary"]["dcgmHardwareTelemetry"]["status"], "missing")
         self.assertEqual(coverage["categorySummary"]["promptTokenIds"]["status"], "missing")
@@ -1363,7 +1364,7 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertEqual(rows["rowCounts"]["servingRequestSamples"], 3)
         self.assertEqual(rows["rowCounts"]["servingTokenTimeline"], 6)
         self.assertEqual(rows["rowCounts"]["requestReceipts"], 3)
-        self.assertEqual(rows["rowCounts"]["telemetryCoverageRows"], 30)
+        self.assertEqual(rows["rowCounts"]["telemetryCoverageRows"], 33)
         self.assertEqual({row["engine"] for row in rows["servingRequestSamples"]}, {"vllm", "sglang", "tensorrt-llm"})
         self.assertEqual({row["coverageSource"] for row in rows["telemetryCoverageRows"]}, {"proof-verifier"})
         self.assertTrue(all(row.get("campaignId") for row in rows["servingTokenTimeline"]))
@@ -1374,7 +1375,7 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
             persisted_rows = json.load(handle)
         self.assertEqual(persisted_rows["schemaVersion"], "performance-iq.serving-proof-rows.v1")
         self.assertEqual(persisted_rows["telemetryCoverage"]["schemaVersion"], "performance-iq.serving-telemetry-coverage.v1")
-        self.assertEqual(persisted_rows["rowCounts"]["telemetryCoverageRows"], 30)
+        self.assertEqual(persisted_rows["rowCounts"]["telemetryCoverageRows"], 33)
         self.assertEqual(persisted_rows["rowCounts"]["servingTokenTimeline"], 6)
         self.assertEqual(write_proof_rows(proof_path, rows_path)["rowCounts"]["servingRequestSamples"], 3)
 
@@ -1489,13 +1490,22 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         for category, summary in coverage["categorySummary"].items():
             self.assertEqual(summary["status"], "proven", category)
         self.assertEqual(coverage["engines"]["tensorrt-llm"]["dcgmHardwareTelemetry"]["status"], "proven")
+        self.assertEqual(coverage["engines"]["tensorrt-llm"]["rawMetricSnapshots"]["status"], "proven")
         self.assertEqual(verification["eventCounts"]["serving.measurement.serving_request_sample"], 3)
         self.assertGreaterEqual(verification["eventCounts"]["serving.request_receipt"], 3)
 
         rows = write_proof_rows(proof_path, rows_path, verification=verification)
         self.assertTrue(rows["telemetryCoverage"]["allProven"])
         self.assertEqual(rows["rowCounts"]["servingRequestSamples"], 3)
+        self.assertEqual(rows["rowCounts"]["telemetryCoverageRows"], 33)
         self.assertGreaterEqual(rows["rowCounts"]["servingTokenTimeline"], 18)
+        raw_artifact_path = rows["submissions"][0]["artifactPath"].replace(".json", "-operator-full.json")
+        with open(raw_artifact_path, encoding="utf-8") as handle:
+            raw_artifact = json.load(handle)
+        self.assertIn("nativeMetricsRaw", raw_artifact["captures"][0])
+        self.assertIn("hardwareMetricsRaw", raw_artifact["captures"][0])
+        self.assertTrue(raw_artifact["captures"][0]["nativeMetricsRaw"]["before"]["available"])
+        self.assertTrue(raw_artifact["captures"][0]["hardwareMetricsRaw"]["after"]["available"])
 
     def test_serving_smoke_verifies_partial_proof_only_when_allowed(self):
         proof_path, summary = self.write_full_serving_proof()

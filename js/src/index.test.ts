@@ -237,7 +237,7 @@ describe("performance-iq-sdk js", () => {
     expect(result.measurements.filter((row) => row.surface === "serving_request_sample")).toHaveLength(2)
     expect(result.measurements.filter((row) => row.surface === "serving_token_timeline")).toHaveLength(4)
     const coverageRows = result.measurements.filter((row) => row.surface === "serving_telemetry_coverage")
-    expect(coverageRows).toHaveLength(7)
+    expect(coverageRows).toHaveLength(8)
     expect(coverageRows.map((row) => row.coverageCategory)).toContain("clientStreamTiming")
     expect(fs.existsSync(result.artifactPath)).toBe(true)
     expect(fs.existsSync(result.manifestPath)).toBe(true)
@@ -420,6 +420,11 @@ describe("performance-iq-sdk js", () => {
     const promptTimelineRows = result.measurements.filter((row) => row.surface === "serving_token_timeline" && row.tokenPhase === "prompt")
     expect(promptTimelineRows).toHaveLength(3)
     expect(promptTimelineRows[0].tokenId).toBe(11)
+    const artifact = JSON.parse(fs.readFileSync(result.artifactPath, "utf-8"))
+    const rawArtifact = JSON.parse(fs.readFileSync(artifact.capturePolicy.rawArtifactPath, "utf-8"))
+    expect(rawArtifact.captures[0].nativeMetricsRaw.before.available).toBe(true)
+    expect(rawArtifact.captures[0].nativeMetricsRaw.after.available).toBe(true)
+    expect(rawArtifact.captures[0].nativeMetricsRaw.before.metrics).toHaveProperty("vllm:time_to_first_token_seconds_count")
   })
 
   it("defaults TensorRT-LLM native metrics collection to the Prometheus endpoint", async () => {

@@ -116,7 +116,8 @@ Runtime provenance has two layers. Dashboard rows get safe identifiers and
 hashes: framework version, model revision, image tag/digest, server-args hash,
 process/container/pod/node/host identifiers, and raw artifact links. Operator
 artifacts retain the full raw request/response, token details, native telemetry,
-hardware telemetry, and full runtime provenance for internal audit.
+hardware telemetry, full before/after native and DCGM metric snapshots, and full
+runtime provenance for internal audit.
 
 ## Files
 
@@ -257,10 +258,11 @@ bash ops/serving-producers/run-smoke.sh fake-strict-smoke \
 `fake-strict-smoke` starts local fake OpenAI-compatible vLLM, SGLang, and
 TensorRT-LLM endpoints, routes traffic through receipt proxies, captures
 stream timing, token IDs/logprobs, prompt token IDs, native metrics, DCGM
-counters, operator-full artifacts, Kafka-ready event rows, and a synthetic
-dashboard row snapshot. The command fails unless `verify-proof` is `ok` and
-`telemetryCoverage.allProven` is true. This is local contract proof only; it
-does not replace `strict-recorded-smoke` against real serving engines.
+counters, operator-full artifacts, raw native/DCGM metric snapshots,
+Kafka-ready event rows, and a synthetic dashboard row snapshot. The command
+fails unless `verify-proof` is `ok` and `telemetryCoverage.allProven` is true.
+This is local contract proof only; it does not replace `strict-recorded-smoke`
+against real serving engines.
 
 Verify the saved proof bundle offline:
 
@@ -277,7 +279,8 @@ Read two fields in the verifier output separately:
   present across required engines: client stream timing, native runtime
   telemetry, DCGM counters, tokenizer-exact prompt IDs, output token
   IDs/logprobs, operator-full raw artifacts, request receipts, runtime
-  provenance, dashboard fine-grain rows, and Kafka-ready event rows.
+  provenance, dashboard fine-grain rows, raw native/DCGM metric snapshots, and
+  Kafka-ready event rows.
 
 To inspect every generated row, add a proof-row dump. The output includes
 submitted runs, dashboard row snapshots, request samples, token timeline rows,

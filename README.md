@@ -208,7 +208,10 @@ token-summary, provenance, and artifact fields. `serving_token_timeline` is
 prompt and output token/chunk detail with `tokenPhase`, token IDs, logprobs,
 hashes, timing, and provenance. `serving_telemetry_coverage` is one row per
 engine/category showing whether producer-local telemetry categories were
-proven, missing, partial, or not configured.
+proven, missing, partial, or not configured. Restricted operator-full artifacts
+also retain the full before/after native metrics and DCGM Prometheus snapshots;
+dashboard rows expose bounded derived fields and artifact links rather than raw
+metric maps.
 
 To exercise the full telemetry contract without real serving runtimes, use the
 deterministic fake strict path:
@@ -223,9 +226,10 @@ bash ops/serving-producers/run-smoke.sh fake-strict-smoke \
 This starts local fake OpenAI-compatible vLLM, SGLang, and TensorRT-LLM
 endpoints, routes them through receipt proxies, captures stream timings,
 token IDs/logprobs, native metrics, DCGM counters, prompt token IDs, raw
-operator artifacts, Kafka-ready events, and proof rows, then verifies
-`telemetryCoverage.allProven`. It is CI/local contract proof only; real product
-proof still requires `strict-recorded-smoke` against actual serving engines.
+operator artifacts, raw native/DCGM metric snapshots, Kafka-ready events, and
+proof rows, then verifies `telemetryCoverage.allProven`. It is CI/local
+contract proof only; real product proof still requires `strict-recorded-smoke`
+against actual serving engines.
 
 ### Three-engine smoke
 
@@ -297,8 +301,8 @@ bundle is internally valid, while `telemetryCoverage.allProven: true` means the
 bundle has the full product telemetry set across all required engines. Coverage
 categories include client stream timing, request receipts, dashboard fine-grain
 rows, native runtime telemetry, DCGM hardware telemetry, prompt token IDs,
-output token IDs/logprobs, operator-full artifacts, runtime provenance, and
-Kafka-ready event rows. `--dump-proof-rows` also emits
+output token IDs/logprobs, operator-full artifacts, raw native/DCGM metric
+snapshots, runtime provenance, and Kafka-ready event rows. `--dump-proof-rows` also emits
 `telemetryCoverageRows`, one row per engine/category from the verifier.
 It fails fast unless all three URLs are configured and the configured endpoints
 pass the model-aware `/v1/models` preflight. Use `--allow-missing-engines` only

@@ -1367,6 +1367,14 @@ def _send_streaming_chat_completion(
                 "outputText": output_text,
                 "promptTokenDetails": prompt_token_details,
                 "tokenDetails": raw_token_details,
+                "nativeMetricsRaw": {
+                    "before": native_before,
+                    "after": native_after,
+                },
+                "hardwareMetricsRaw": {
+                    "before": hardware_before,
+                    "after": hardware_after,
+                },
                 "nativeTelemetry": native_telemetry,
                 "hardwareTelemetry": hardware_telemetry,
                 "runtimeProvenance": runtime_provenance,
@@ -1563,6 +1571,14 @@ def _send_non_streaming_chat_completion(
                 "outputText": output_text,
                 "promptTokenDetails": prompt_token_details,
                 "tokenDetails": raw_token_details,
+                "nativeMetricsRaw": {
+                    "before": native_before,
+                    "after": native_after,
+                },
+                "hardwareMetricsRaw": {
+                    "before": hardware_before,
+                    "after": hardware_after,
+                },
                 "nativeTelemetry": native_telemetry,
                 "hardwareTelemetry": hardware_telemetry,
                 "runtimeProvenance": runtime_provenance,
@@ -1989,6 +2005,7 @@ PRODUCER_COVERAGE_DESCRIPTIONS: dict[str, str] = {
     "promptTokenIds": "Tokenizer-exact prompt/input token IDs and prompt token provenance.",
     "outputTokenIdsLogprobs": "Output token IDs, token logprobs, top-logprobs, and token provenance.",
     "operatorFullArtifacts": "Operator-full raw request/response artifacts retained outside customer-safe rows.",
+    "rawMetricSnapshots": "Operator-full before/after native and DCGM metric snapshots retained outside customer-safe rows.",
     "runtimeProvenance": "Engine version, model revision, image, server args, process, container, pod, node, or host provenance.",
 }
 
@@ -2018,6 +2035,23 @@ def _has_runtime_provenance(sample: dict[str, Any]) -> bool:
             "hostName",
         ]
     )
+
+
+def _raw_snapshot_available(capture: dict[str, Any], key: str) -> bool:
+    snapshot = capture.get(key)
+    if not isinstance(snapshot, dict):
+        return False
+    before = snapshot.get("before")
+    after = snapshot.get("after")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    before_has_metrics = bool(before.get("available")) and (
+        isinstance(before.get("metrics"), dict) or isinstance(before.get("jsonMetrics"), dict)
+    )
+    after_has_metrics = bool(after.get("available")) and (
+        isinstance(after.get("metrics"), dict) or isinstance(after.get("jsonMetrics"), dict)
+    )
+    return before_has_metrics and after_has_metrics
 
 
 def _coverage_row(
@@ -2058,6 +2092,7 @@ def _build_producer_coverage_rows(
     samples: list[dict[str, Any]],
     aggregate_row: dict[str, Any],
     raw_artifact_path: str,
+    raw_captures: list[dict[str, Any]],
     captured_at_utc: str,
 ) -> list[dict[str, Any]]:
     engine_id = str(engine["engine"])
@@ -2140,6 +2175,20 @@ def _build_producer_coverage_rows(
         raw_present,
         1,
         [] if raw_present else ["operator-full raw artifact missing"],
+    ))
+
+    raw_snapshot_expected = expected_samples if native_expected > 0 or hardware_expected > 0 else 0
+    raw_snapshot_proven = sum(
+        1 for capture in raw_captures
+        if isinstance(capture, dict)
+        and (native_expected == 0 or _raw_snapshot_available(capture, "nativeMetricsRaw"))
+        and (hardware_expected == 0 or _raw_snapshot_available(capture, "hardwareMetricsRaw"))
+    )
+    coverage_specs.append((
+        "rawMetricSnapshots",
+        raw_snapshot_proven,
+        raw_snapshot_expected,
+        [] if raw_snapshot_expected == 0 or raw_snapshot_proven == raw_snapshot_expected else ["operator-full native/DCGM raw metric snapshots missing"],
     ))
 
     runtime_proven = sum(1 for sample in successful if _has_runtime_provenance(sample))
@@ -2374,6 +2423,7 @@ def run_serving_producer(
         samples,
         measurements[0],
         raw_artifact_path,
+        raw_captures,
         captured_at_utc,
     ))
     artifact_path = _write_summary_artifact(

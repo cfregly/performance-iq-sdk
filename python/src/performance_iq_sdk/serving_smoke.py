@@ -674,6 +674,7 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
                 "response or tokenizer-resolved output token IDs",
                 "response logprobs/top-logprobs",
                 "operator-full raw artifacts",
+                "raw native/DCGM metric snapshots",
                 "request receipts",
                 "runtime provenance",
             ],
@@ -1162,6 +1163,9 @@ def _telemetry_coverage_from_proof(
         "operatorFullArtifacts": {
             "description": "Operator-full raw request/response, token, native, hardware, and runtime artifacts.",
         },
+        "rawMetricSnapshots": {
+            "description": "Operator-full before/after native and DCGM metric snapshots for all configured telemetry endpoints.",
+        },
         "runtimeProvenance": {
             "description": "Runtime version/revision/image/process/container/pod/node/host/server-arg provenance when configured.",
         },
@@ -1341,11 +1345,43 @@ def _telemetry_coverage_from_proof(
 
         raw_path = _resolve_proof_member_path(capture_policy.get("rawArtifactPath"), proof_dir)
         raw_present = capture_policy.get("mode") == "operator-full" and bool(raw_path) and os.path.exists(raw_path or "")
+        raw_artifact = _read_json_object(raw_path or "") if raw_present else {}
+        raw_captures = raw_artifact.get("captures") if isinstance(raw_artifact.get("captures"), list) else []
         engine_coverage["operatorFullArtifacts"] = _coverage_item(
             "proven" if raw_present else "missing",
             1 if raw_present else 0,
             1,
             [] if raw_present else ["operator-full raw artifact is missing"],
+        )
+
+        def raw_snapshot_available(capture: dict[str, Any], key: str) -> bool:
+            snapshot = capture.get(key)
+            if not isinstance(snapshot, dict):
+                return False
+            before = snapshot.get("before")
+            after = snapshot.get("after")
+            if not isinstance(before, dict) or not isinstance(after, dict):
+                return False
+            before_has_metrics = bool(before.get("available")) and (
+                isinstance(before.get("metrics"), dict) or isinstance(before.get("jsonMetrics"), dict)
+            )
+            after_has_metrics = bool(after.get("available")) and (
+                isinstance(after.get("metrics"), dict) or isinstance(after.get("jsonMetrics"), dict)
+            )
+            return before_has_metrics and after_has_metrics
+
+        raw_metric_proven = sum(
+            1 for capture in raw_captures
+            if isinstance(capture, dict)
+            and (not native_required or raw_snapshot_available(capture, "nativeMetricsRaw"))
+            and (not hardware_required or raw_snapshot_available(capture, "hardwareMetricsRaw"))
+        )
+        raw_metric_expected = expected_samples if native_required or hardware_required else 0
+        engine_coverage["rawMetricSnapshots"] = _coverage_item(
+            _coverage_status(raw_metric_proven, raw_metric_expected),
+            raw_metric_proven,
+            raw_metric_expected,
+            [] if raw_metric_expected == 0 or raw_metric_proven == raw_metric_expected else ["operator-full raw native/DCGM metric snapshots are missing"],
         )
 
         runtime_proven = sum(
