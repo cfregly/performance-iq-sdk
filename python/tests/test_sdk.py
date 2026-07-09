@@ -1817,6 +1817,85 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertIn("dcgmHardwareTelemetry", report["strictTelemetryGate"]["missingCategories"])
         self.assertIn("nativeRuntimeTelemetry", report["strictTelemetryGate"]["missingCategories"])
 
+    def test_serving_smoke_require_telemetry_coverage_rejects_unconfigured_token_details(self):
+        proof_path = os.path.join(self.tmp_dir, "fake-full-without-token-detail-proof.json")
+        event_log_path = os.path.join(self.tmp_dir, "fake-without-token-detail-events.jsonl")
+        receipt_log_path = os.path.join(self.tmp_dir, "fake-without-token-detail-receipts.jsonl")
+        stdout = StringIO()
+        stderr = StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = serving_smoke_main([
+                "--fake-full-telemetry",
+                "--model", laptop_smoke_model(),
+                "--repetitions", "1",
+                "--max-tokens", "8",
+                "--artifact-dir", self.tmp_dir,
+                "--run-suffix", "fake-without-token-detail",
+                "--summary-out", proof_path,
+                "--event-log", event_log_path,
+                "--receipt-log", receipt_log_path,
+            ])
+
+        self.assertEqual(code, 0, stderr.getvalue() + stdout.getvalue())
+        with open(proof_path, encoding="utf-8") as handle:
+            proof = json.load(handle)
+        for submission in proof["submissions"]:
+            artifact_path = submission["artifactPath"]
+            with open(artifact_path, encoding="utf-8") as handle:
+                artifact = json.load(handle)
+            artifact["measurements"][0].update({
+                "tokenDetailsRequired": False,
+                "tokenDetailsAvailableCount": 0,
+                "tokenIdsAvailableCount": 0,
+                "logprobsAvailableCount": 0,
+                "promptTokenDetailsRequired": False,
+                "promptTokenIdsAvailableCount": 0,
+            })
+            for sample in artifact["samples"]:
+                sample.update({
+                    "tokenDetailsAvailable": False,
+                    "tokenIdsAvailable": False,
+                    "logprobsAvailable": False,
+                    "tokenDetailCount": 0,
+                    "tokenDetailSource": "not-requested",
+                    "tokenIdSource": None,
+                    "promptTokenIdsAvailable": False,
+                    "promptTokenDetailCount": 0,
+                    "promptTokenIdSource": None,
+                    "promptTokenIdsSha256": None,
+                    "promptTokenizationSource": "not-requested",
+                })
+            for row in artifact["tokenTimeline"]:
+                row["tokenId"] = None
+                row["tokenIdSource"] = None
+                row["tokenLogprob"] = None
+                row["topLogprobsJson"] = None
+                row["tokenDetailSource"] = "not-requested"
+            with open(artifact_path, "w", encoding="utf-8") as handle:
+                json.dump(artifact, handle, indent=2)
+                handle.write("\n")
+            self.refresh_proof_artifact_hashes(proof_path, submission["engine"])
+
+        stdout = StringIO()
+        stderr = StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = serving_smoke_main([
+                "--verify-proof", proof_path,
+                "--require-telemetry-coverage",
+            ])
+
+        self.assertEqual(code, 1, stderr.getvalue() + stdout.getvalue())
+        report = json.loads(stdout.getvalue())
+        self.assertTrue(report["ok"], json.dumps(report, indent=2))
+        self.assertTrue(report["telemetryCoverage"]["allProven"], json.dumps(report["telemetryCoverage"], indent=2))
+        self.assertFalse(report["strictTelemetryGate"]["ok"])
+        self.assertTrue(report["strictTelemetryGate"]["configuredTelemetryAllProven"])
+        self.assertIn("promptTokenIds", report["strictTelemetryGate"]["notConfiguredCategories"])
+        self.assertIn("outputTokenIdsLogprobs", report["strictTelemetryGate"]["notConfiguredCategories"])
+        self.assertIn("promptTokenIds", report["strictTelemetryGate"]["missingCategories"])
+        self.assertIn("outputTokenIdsLogprobs", report["strictTelemetryGate"]["missingCategories"])
+
     def test_serving_smoke_fake_full_telemetry_proves_all_coverage(self):
         proof_path = os.path.join(self.tmp_dir, "fake-full-proof.json")
         event_log_path = os.path.join(self.tmp_dir, "fake-events.jsonl")
@@ -1846,6 +1925,8 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertTrue(os.path.exists(receipt_log_path))
         verification = report["verification"]
         self.assertTrue(verification["ok"], json.dumps(verification, indent=2))
+        self.assertTrue(report["strictTelemetryGate"]["ok"], json.dumps(report["strictTelemetryGate"], indent=2))
+        self.assertEqual(report["strictTelemetryGate"]["notConfiguredCategories"], [])
         coverage = verification["telemetryCoverage"]
         self.assertTrue(coverage["allProven"], json.dumps(coverage, indent=2))
         for category, summary in coverage["categorySummary"].items():

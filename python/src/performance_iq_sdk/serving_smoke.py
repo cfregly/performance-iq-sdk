@@ -123,6 +123,19 @@ REQUIRED_NATIVE_SAMPLE_FIELDS = (
     "promptTokensCachedDelta",
     "promptTokensComputedDelta",
 )
+STRICT_PRODUCT_TELEMETRY_CATEGORIES = (
+    "clientStreamTiming",
+    "requestReceipts",
+    "dashboardFineGrainRows",
+    "nativeRuntimeTelemetry",
+    "dcgmHardwareTelemetry",
+    "promptTokenIds",
+    "outputTokenIdsLogprobs",
+    "operatorFullArtifacts",
+    "rawMetricSnapshots",
+    "runtimeProvenance",
+    "kafkaEventLog",
+)
 
 
 def default_native_metrics_url(engine: str, base_url: str) -> str:
@@ -2736,16 +2749,35 @@ def write_proof_summary(summary: dict[str, Any], artifact_dir: str, summary_out:
 def strict_telemetry_gate(verification: dict[str, Any]) -> dict[str, Any]:
     coverage = verification.get("telemetryCoverage") if isinstance(verification.get("telemetryCoverage"), dict) else {}
     category_summary = coverage.get("categorySummary") if isinstance(coverage.get("categorySummary"), dict) else {}
-    missing = [
+    engines = coverage.get("engines") if isinstance(coverage.get("engines"), dict) else {}
+    required_engines = coverage.get("expectedEngines") if isinstance(coverage.get("expectedEngines"), list) else verification.get("requiredEngines")
+    required_engine_count = len(required_engines) if isinstance(required_engines, list) else 0
+    missing = {
         category
         for category, item in sorted(category_summary.items())
         if isinstance(item, dict) and item.get("status") != "proven"
-    ]
+    }
+    not_configured = set()
+    for category in STRICT_PRODUCT_TELEMETRY_CATEGORIES:
+        summary = category_summary.get(category) if isinstance(category_summary.get(category), dict) else {}
+        if summary.get("status") != "proven" or summary.get("expectedEngines") != required_engine_count:
+            not_configured.add(category)
+        for engine in required_engines if isinstance(required_engines, list) else []:
+            engine_coverage = engines.get(engine) if isinstance(engines.get(engine), dict) else {}
+            item = engine_coverage.get(category) if isinstance(engine_coverage.get(category), dict) else {}
+            if item.get("status") != "proven" or int(item.get("expectedCount") or 0) <= 0:
+                not_configured.add(category)
+    missing_categories = sorted(missing | not_configured)
+    coverage_all_proven = coverage.get("allProven") is True and not missing_categories
     return {
-        "ok": verification.get("ok") is True and coverage.get("allProven") is True,
+        "ok": verification.get("ok") is True and coverage_all_proven,
         "proofOk": verification.get("ok") is True,
-        "allTelemetryProven": coverage.get("allProven") is True,
-        "missingCategories": missing,
+        "allTelemetryProven": coverage_all_proven,
+        "configuredTelemetryAllProven": coverage.get("allProven") is True,
+        "requiredEngineCount": required_engine_count,
+        "strictRequiredCategories": list(STRICT_PRODUCT_TELEMETRY_CATEGORIES),
+        "notConfiguredCategories": sorted(not_configured),
+        "missingCategories": missing_categories,
     }
 
 
@@ -3305,7 +3337,7 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--record-receipts", action="store_true", help="Start in-process receipt proxies and route engine traffic through them.")
     parser.add_argument("--receipt-proxy-host", default=_env("PIQ_SERVING_RECEIPT_PROXY_HOST", "127.0.0.1"))
     parser.add_argument("--verify-after-capture", action="store_true", default=_env("PIQ_SERVING_VERIFY_AFTER_CAPTURE", "false").lower() == "true", help="Run the saved-proof verifier after capture/submission completes.")
-    parser.add_argument("--require-telemetry-coverage", action="store_true", default=_env("PIQ_SERVING_REQUIRE_TELEMETRY_COVERAGE", "false").lower() == "true", help="Fail verification unless telemetryCoverage.allProven is true.")
+    parser.add_argument("--require-telemetry-coverage", action="store_true", default=_env("PIQ_SERVING_REQUIRE_TELEMETRY_COVERAGE", "false").lower() == "true", help="Fail verification unless strictTelemetryGate.ok is true for every full-product telemetry category.")
     parser.add_argument("--no-submit", action="store_true", help="Capture artifacts and manifests without submitting to Performance IQ.")
     parser.add_argument("--query-dashboard", action="store_true", help="Query fixed dashboard surfaces after submission.")
     parser.add_argument("--allow-missing-engines", action="store_true", help="Run configured engines only instead of requiring all three URLs.")
@@ -3352,10 +3384,10 @@ def main(argv: list[str] | None = None) -> int:
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        print(json.dumps(report, indent=2))
         verification = report.get("verification") if isinstance(report.get("verification"), dict) else {}
-        coverage = verification.get("telemetryCoverage") if isinstance(verification.get("telemetryCoverage"), dict) else {}
-        return 0 if verification.get("ok") is True and coverage.get("allProven") is True else 1
+        report["strictTelemetryGate"] = strict_telemetry_gate(verification)
+        print(json.dumps(report, indent=2))
+        return 0 if report["strictTelemetryGate"]["ok"] else 1
     if args.preflight_only:
         preflight = runtime_preflight(
             engines,

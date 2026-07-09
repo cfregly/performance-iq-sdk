@@ -227,7 +227,7 @@ This starts local fake OpenAI-compatible vLLM, SGLang, and TensorRT-LLM
 endpoints, routes them through receipt proxies, captures stream timings,
 token IDs/logprobs, native metrics, DCGM counters, prompt token IDs, raw
 operator artifacts, raw native/DCGM metric snapshots, Kafka-ready events, and
-proof rows, then verifies `telemetryCoverage.allProven`. It is CI/local
+proof rows, then verifies `strictTelemetryGate.ok`. It is CI/local
 contract proof only; real product proof still requires `strict-recorded-smoke`
 against actual serving engines.
 
@@ -297,19 +297,21 @@ The verifier requires all three producers, accepted submissions, matching
 artifact hashes, producer manifests, model-aware endpoint preflight, dashboard
 campaign rows, and runtime framework provenance.
 Its JSON output also includes `telemetryCoverage`: `ok: true` means the proof
-bundle is internally valid, while `telemetryCoverage.allProven: true` means the
-bundle has the full product telemetry set across all required engines. Coverage
-categories include client stream timing, request receipts, dashboard fine-grain
-rows, native runtime telemetry, DCGM hardware telemetry, prompt token IDs,
-output token IDs/logprobs, operator-full artifacts, raw native/DCGM metric
-snapshots, runtime provenance, and Kafka-ready event rows. `--dump-proof-rows` also emits
-`telemetryCoverageRows`, one row per engine/category from the verifier.
+bundle is internally valid, while `telemetryCoverage.allProven: true` means all
+telemetry categories configured by the run are proven across required engines.
+Coverage categories include client stream timing, request receipts, dashboard
+fine-grain rows, native runtime telemetry, DCGM hardware telemetry, prompt token
+IDs, output token IDs/logprobs, operator-full artifacts, raw native/DCGM metric
+snapshots, runtime provenance, and Kafka-ready event rows. `--dump-proof-rows`
+also emits `telemetryCoverageRows`, one row per engine/category from the verifier.
 Dashboard and Kafka-ready event-log coverage is evaluated per required engine
 campaign, not from global row totals alone.
 Native runtime telemetry, DCGM hardware telemetry, token timeline rows, and
 operator-full raw metric snapshots are matched by request ID.
 Add `--require-telemetry-coverage` to make `verify-proof` exit nonzero unless
-`telemetryCoverage.allProven` is true.
+`strictTelemetryGate.ok` is true. That gate requires every full-product category
+to be configured and proven for every required engine, including prompt token
+IDs and output token IDs/logprobs.
 It fails fast unless all three URLs are configured and the configured endpoints
 pass the model-aware `/v1/models` preflight. Use `--allow-missing-engines` only
 for partial local debugging and `--skip-preflight` only when debugging a

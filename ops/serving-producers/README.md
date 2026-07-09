@@ -247,7 +247,7 @@ counters, dashboard rows, request receipts, and configured GPU cost. Use
 `strict-smoke` when another gateway/proxy writes receipts to
 `PIQ_SERVING_RECEIPT_LOG`; use `strict-recorded-smoke` to start managed
 in-process receipt proxies. These strict wrapper modes also run the saved-proof
-verifier after capture and fail unless `telemetryCoverage.allProven` is true.
+verifier after capture and fail unless `strictTelemetryGate.ok` is true.
 
 For CI and local contract checks without real runtimes, use deterministic fake
 engines:
@@ -264,7 +264,7 @@ TensorRT-LLM endpoints, routes traffic through receipt proxies, captures
 stream timing, token IDs/logprobs, prompt token IDs, native metrics, DCGM
 counters, operator-full artifacts, raw native/DCGM metric snapshots,
 Kafka-ready event rows, and a synthetic dashboard row snapshot. The command
-fails unless `verify-proof` is `ok` and `telemetryCoverage.allProven` is true.
+fails unless `verify-proof` is `ok` and `strictTelemetryGate.ok` is true.
 This is local contract proof only; it does not replace `strict-recorded-smoke`
 against real serving engines.
 
@@ -279,9 +279,11 @@ Read two fields in the verifier output separately:
 
 - `ok` proves the proof bundle is internally valid: artifacts hash, manifests
   match, receipts line up, preflight passed, and dashboard rows are queryable.
-- `telemetryCoverage.allProven` proves the full product telemetry set is
-  present across required engines: client stream timing, native runtime
-  telemetry, DCGM counters, tokenizer-exact prompt IDs, output token
+- `telemetryCoverage.allProven` proves every telemetry category configured by
+  the run is present across required engines.
+- `strictTelemetryGate.ok` proves the full product telemetry set is both
+  configured and present across required engines: client stream timing, native
+  runtime telemetry, DCGM counters, tokenizer-exact prompt IDs, output token
   IDs/logprobs, operator-full raw artifacts, request receipts, runtime
   provenance, dashboard fine-grain rows, raw native/DCGM metric snapshots, and
   Kafka-ready event rows.
