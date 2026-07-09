@@ -529,6 +529,107 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(len(raw_artifacts), 1)
         self.assertTrue(os.path.exists(raw_artifacts[0]["path"]))
 
+    def test_serving_producer_derives_native_prometheus_deltas(self):
+        metric_snapshots = [
+            """
+vllm:time_to_first_token_seconds_count{model_name="qwen"} 7
+vllm:time_to_first_token_seconds_sum{model_name="qwen"} 1.4
+vllm:request_time_per_output_token_seconds_count{model_name="qwen"} 7
+vllm:request_time_per_output_token_seconds_sum{model_name="qwen"} 0.21
+vllm:e2e_request_latency_seconds_count{model_name="qwen"} 7
+vllm:e2e_request_latency_seconds_sum{model_name="qwen"} 3.5
+vllm:request_queue_time_seconds_count{model_name="qwen"} 7
+vllm:request_queue_time_seconds_sum{model_name="qwen"} 0.07
+vllm:request_prefill_time_seconds_count{model_name="qwen"} 7
+vllm:request_prefill_time_seconds_sum{model_name="qwen"} 0.35
+vllm:request_decode_time_seconds_count{model_name="qwen"} 7
+vllm:request_decode_time_seconds_sum{model_name="qwen"} 0.7
+vllm:kv_cache_usage_perc{model_name="qwen"} 0.125
+vllm:prefix_cache_queries_total{model_name="qwen"} 20
+vllm:prefix_cache_hits_total{model_name="qwen"} 5
+""",
+            """
+vllm:time_to_first_token_seconds_count{model_name="qwen"} 8
+vllm:time_to_first_token_seconds_sum{model_name="qwen"} 1.65
+vllm:request_time_per_output_token_seconds_count{model_name="qwen"} 8
+vllm:request_time_per_output_token_seconds_sum{model_name="qwen"} 0.23
+vllm:e2e_request_latency_seconds_count{model_name="qwen"} 8
+vllm:e2e_request_latency_seconds_sum{model_name="qwen"} 4.1
+vllm:request_queue_time_seconds_count{model_name="qwen"} 8
+vllm:request_queue_time_seconds_sum{model_name="qwen"} 0.073
+vllm:request_prefill_time_seconds_count{model_name="qwen"} 8
+vllm:request_prefill_time_seconds_sum{model_name="qwen"} 0.41
+vllm:request_decode_time_seconds_count{model_name="qwen"} 8
+vllm:request_decode_time_seconds_sum{model_name="qwen"} 0.82
+vllm:kv_cache_usage_perc{model_name="qwen"} 0.25
+vllm:prefix_cache_queries_total{model_name="qwen"} 30
+vllm:prefix_cache_hits_total{model_name="qwen"} 7
+""",
+        ]
+
+        def http_get_text(url, headers):
+            self.assertEqual(url, "http://127.0.0.1:8000/metrics")
+            self.assertEqual(headers["accept"], "text/plain")
+            return metric_snapshots.pop(0)
+
+        def http_stream_json(url, headers, payload):
+            return {
+                "status": 200,
+                "events": [
+                    {
+                        "receivedMs": 5,
+                        "receivedAtUtc": "2026-07-09T12:00:00.005Z",
+                        "body": {"id": "chatcmpl-stream", "model": laptop_smoke_model(), "choices": [{"delta": {"content": "ok"}}]},
+                    },
+                    {
+                        "receivedMs": 15,
+                        "receivedAtUtc": "2026-07-09T12:00:00.015Z",
+                        "body": {
+                            "id": "chatcmpl-stream",
+                            "model": laptop_smoke_model(),
+                            "choices": [{"delta": {}, "finish_reason": "stop"}],
+                            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+                        },
+                    },
+                ],
+            }
+
+        result = run_serving_producer(
+            engine={
+                "engine": "vllm",
+                "baseUrl": "http://127.0.0.1:8000",
+                "metricsUrl": "http://127.0.0.1:8000/metrics",
+            },
+            request={
+                "model": laptop_smoke_model(),
+                "messages": [{"role": "user", "content": "Say ok."}],
+                "maxTokens": 16,
+            },
+            artifact_dir=self.tmp_dir,
+            workload={"hardware": "local stream engine", "operatingPoint": "laptop-smoke"},
+            pricing={"usdPerGpuHour": 1, "gpuCount": 1, "powerWattsPerGpu": 100},
+            http_stream_json=http_stream_json,
+            http_get_text=http_get_text,
+        )
+
+        self.assertEqual(metric_snapshots, [])
+        sample = result["samples"][0]
+        self.assertTrue(sample["nativeTelemetryAvailable"])
+        self.assertAlmostEqual(sample["nativeTelemetry"]["nativeTtftMs"], 250)
+        self.assertAlmostEqual(sample["nativeTelemetry"]["nativeTpotMs"], 20)
+        self.assertAlmostEqual(sample["nativeTelemetry"]["nativeE2eLatencyMs"], 600)
+        self.assertAlmostEqual(sample["queueWaitMs"], 3)
+        self.assertAlmostEqual(sample["prefillMs"], 60)
+        self.assertAlmostEqual(sample["decodeMs"], 120)
+        self.assertEqual(sample["nativeTelemetry"]["prefixCacheQueriesDelta"], 10)
+        self.assertEqual(sample["nativeTelemetry"]["prefixCacheHitsDelta"], 2)
+        self.assertAlmostEqual(sample["nativeTelemetry"]["cacheHitRate"], 0.2)
+        aggregate = result["measurements"][0]
+        self.assertEqual(aggregate["nativeTelemetryAvailableCount"], 1)
+        self.assertAlmostEqual(aggregate["avgQueueWaitMs"], 3)
+        self.assertAlmostEqual(aggregate["avgPrefillMs"], 60)
+        self.assertAlmostEqual(aggregate["avgDecodeMs"], 120)
+
     def test_serving_smoke_runs_all_configured_engines(self):
         calls = []
         submissions = []
