@@ -1805,8 +1805,11 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
 
         verification = verify_proof_summary(proof_path)
         sglang_coverage = verification["telemetryCoverage"]["engines"]["sglang"]["outputTokenIdsLogprobs"]
+        output_summary = verification["telemetryCoverage"]["categorySummary"]["outputTokenIdsLogprobs"]
 
         self.assertEqual(sglang_coverage["expectedCount"], 0)
+        self.assertEqual(output_summary["expectedEngines"], 0)
+        self.assertEqual(output_summary["status"], "proven")
         self.assertNotIn("sglang measurement tokenIdsAvailableCount must equal successCount", " ".join(verification["errors"]))
 
     def test_serving_smoke_verify_proof_rejects_missing_dashboard_rows(self):

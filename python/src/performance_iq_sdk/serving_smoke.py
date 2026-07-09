@@ -1632,16 +1632,22 @@ def _telemetry_coverage_from_proof(
         coverage["engines"][engine] = engine_coverage
 
     for category in categories:
-        statuses = [
-            engine_coverage.get(category, {}).get("status")
+        items = [
+            engine_coverage.get(category, {})
             for engine_coverage in coverage["engines"].values()
             if isinstance(engine_coverage, dict)
         ]
-        proven = sum(1 for status in statuses if status == "proven")
+        expected_items = [
+            item for item in items
+            if isinstance(item, dict) and int(item.get("expectedCount") or 0) > 0
+        ]
+        expected_count = len(expected_items)
+        proven = sum(1 for item in expected_items if item.get("status") == "proven")
+        status = "proven" if expected_count == 0 or proven == expected_count else "partial" if proven else "missing"
         coverage["categorySummary"][category] = {
-            "status": "proven" if proven == len(expected_engines) and expected_engines else "partial" if proven else "missing",
+            "status": status,
             "provenEngines": proven,
-            "expectedEngines": len(expected_engines),
+            "expectedEngines": expected_count,
         }
     coverage["allProven"] = all(
         summary.get("status") == "proven"
