@@ -38,6 +38,17 @@ export PIQ_SERVING_CAPTURE_TOKEN_DETAILS=true
 export PIQ_SERVING_TOP_LOGPROBS=5
 ```
 
+When logprob items include `token_id`, that engine-provided ID is used. When an
+engine returns token text/logprob but omits IDs, strict smoke can resolve IDs
+with the Hugging Face tokenizer and records `tokenIdSource` as tokenizer-backed
+provenance:
+
+```bash
+export PIQ_SERVING_RESOLVE_TOKEN_IDS_WITH_TOKENIZER=true
+# Optional; defaults to PIQ_SERVING_MODEL when left blank.
+export PIQ_SERVING_TOKENIZER_MODEL=Qwen/Qwen2.5-0.5B-Instruct
+```
+
 DCGM hardware counters are captured from a Prometheus/DCGM exporter endpoint
 when configured:
 
@@ -191,8 +202,8 @@ Use `smoke` only when request receipts are being captured by another layer.
 through them, writes `PIQ_SERVING_RECEIPT_LOG`, submits the producer runs,
 queries the dashboard surfaces, and writes the proof summary.
 Use `strict-smoke` or `strict-recorded-smoke` for product proof: these require
-token IDs/logprobs, native engine telemetry, DCGM hardware counters, dashboard
-rows, request receipts, and configured GPU cost.
+token IDs/logprobs, token ID provenance, native engine telemetry, DCGM hardware
+counters, dashboard rows, request receipts, and configured GPU cost.
 
 Verify the saved proof bundle offline:
 

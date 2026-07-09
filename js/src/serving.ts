@@ -30,6 +30,8 @@ export interface ServingEngineConfig {
   requireHardwareTelemetry?: boolean
   nativeTelemetry?: Record<string, unknown>
   hardwareTelemetry?: Record<string, unknown>
+  tokenIdMap?: Record<string, number | string>
+  tokenIdResolver?: (token: string, item: Record<string, unknown>, engine: ServingEngineConfig, request: ServingRequestConfig) => number | string | null | undefined
   frameworkVersion?: string
   modelRevision?: string
   imageDigest?: string
@@ -147,6 +149,7 @@ export interface ServingRequestSample {
   logprobsAvailable?: boolean
   tokenDetailCount?: number
   tokenDetailSource?: string
+  tokenIdSource?: string | null
   queueWaitMs?: number | null
   prefillMs?: number | null
   decodeMs?: number | null
@@ -174,6 +177,7 @@ export interface ServingTokenTimelineChunk {
   isFirstOutput: boolean
   tokenIndex?: number | null
   tokenId?: number | null
+  tokenIdSource?: string | null
   tokenLogprob?: number | null
   tokenTextSha256?: string | null
   topLogprobsJson?: string | null

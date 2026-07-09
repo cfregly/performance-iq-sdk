@@ -625,7 +625,7 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
             "mode": "strict-recorded-smoke",
             "requires": [
                 "OpenAI-compatible streaming chat completions for all configured engines",
-                "OpenAI-compatible token logprobs/token IDs",
+                "OpenAI-compatible token logprobs plus response or tokenizer-resolved token IDs",
                 "native engine Prometheus metrics",
                 "DCGM exporter Prometheus metrics",
                 "configured per-GPU hourly cost",
@@ -637,6 +637,7 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
                 "PIQ_SERVING_USD_PER_GPU_HOUR=<actual-blended-gpu-hourly-cost> "
                 "PIQ_SERVING_CAPTURE_TOKEN_DETAILS=true "
                 "PIQ_SERVING_TOP_LOGPROBS=5 "
+                "PIQ_SERVING_RESOLVE_TOKEN_IDS_WITH_TOKENIZER=true "
                 "PIQ_SERVING_COLLECT_HARDWARE_METRICS=true "
                 "PIQ_SERVING_REQUIRE_NATIVE_TELEMETRY=true "
                 "PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true "
