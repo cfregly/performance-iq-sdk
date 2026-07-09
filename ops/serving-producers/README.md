@@ -174,8 +174,10 @@ set the runtime discovery knobs before running preflight or smoke:
 ```bash
 export PIQ_PYTHON_BIN=/opt/miniconda3/bin/python
 export PIQ_SERVING_BIN_DIR=/opt/miniconda3/bin
+export PIQ_VLLM_PYTHON_BIN=/Users/admin/vllm/.venv-piq/bin/python
+export PIQ_SGLANG_PYTHON_BIN=/Users/admin/dev/cw/.runtime/sglang/sglang-metal/bin/python
 export PIQ_VLLM_SOURCE_PATH=/Users/admin/vllm
-export PIQ_SGLANG_SOURCE_PATH=/Users/admin/sglang
+export PIQ_SGLANG_SOURCE_PATH=/Users/admin/dev/cw/.runtime/sglang/python
 
 bash ops/serving-producers/run-smoke.sh preflight
 ```
@@ -183,8 +185,22 @@ bash ops/serving-producers/run-smoke.sh preflight
 `PIQ_PYTHON_BIN` controls which Python executes the smoke CLI.
 `PIQ_SERVING_BIN_DIR` is prepended to `PATH` for commands such as `vllm` and
 `trtllm-serve`; use a colon-separated value when the serving framework CLIs live
-in different virtualenvs. `PIQ_VLLM_SOURCE_PATH` and `PIQ_SGLANG_SOURCE_PATH` are
-prepended to `PYTHONPATH` for source-build checkouts.
+in different virtualenvs. `PIQ_VLLM_PYTHON_BIN` and `PIQ_SGLANG_PYTHON_BIN`
+point runtime discovery at the interpreter that can actually import the serving
+framework, even when the smoke CLI Python cannot. `PIQ_VLLM_SOURCE_PATH` and
+`PIQ_SGLANG_SOURCE_PATH` are prepended to `PYTHONPATH` for source-build
+checkouts. The launch plan includes `runtimeDiscovery` and rewrites vLLM/SGLang
+serve commands to the preferred working runtime when one is found. With
+`--resolve-token-ids-with-tokenizer`, that runtime-specific Python is also used
+as an external Hugging Face tokenizer fallback for tokenizer-exact prompt and
+output token IDs.
+
+On local Apple Silicon, SGLang MPS/MLX does not safely return decode logprobs.
+The smoke runner reads SGLang `/server_info`; when it sees `device=mps` and token
+details were requested, it records an `outputTokenIdsLogprobs` capability gap and
+sends the streaming request without `logprobs` so the runtime keeps serving.
+Strict full-product proof still requires a SGLang endpoint that can return token
+logprobs, or an explicit `PIQ_SGLANG_ALLOW_UNSAFE_TOKEN_DETAILS=true` debug run.
 
 For one-engine debugging, set the other endpoint env vars to empty and pass
 `--allow-missing-engines`. Alternatively, set `PIQ_SERVING_ALLOW_PARTIAL=true`

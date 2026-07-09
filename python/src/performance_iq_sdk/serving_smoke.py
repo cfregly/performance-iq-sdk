@@ -231,6 +231,19 @@ def command_probe_timeout_seconds() -> float:
     return max(1.0, timeout)
 
 
+def preferred_runtime_python(engine: str) -> str | None:
+    explicit = _env(ENGINE_RUNTIME_PYTHON_ENV.get(engine, ""))
+    if explicit:
+        return explicit
+    if engine not in {"vllm", "sglang"}:
+        return None
+    for python_bin in runtime_python_candidates(engine):
+        candidate = _runtime_candidate(engine, python_bin)
+        if candidate.get("usable") and isinstance(candidate.get("python"), str):
+            return str(candidate["python"])
+    return None
+
+
 def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, Any]], list[str]]:
     urls = {
         "vllm": args.vllm_url or _env("PIQ_VLLM_URL"),
@@ -258,6 +271,7 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
             server_args = getattr(args, "server_args", None)
         tokenizer_model = _env(_engine_env_name(engine, "TOKENIZER_MODEL"), getattr(args, "tokenizer_model", None))
         resolve_token_ids = bool(getattr(args, "resolve_token_ids_with_tokenizer", False))
+        tokenizer_python_bin = preferred_runtime_python(engine) if resolve_token_ids else None
         capture_token_details = _bool_env(_engine_env_name(engine, "CAPTURE_TOKEN_DETAILS"))
         top_logprobs = _int_env(_engine_env_name(engine, "TOP_LOGPROBS"))
         process_id = _env(_engine_env_name(engine, "PROCESS_ID"), getattr(args, "process_id", None))
@@ -281,6 +295,7 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
             **({"serverArgs": server_args} if server_args is not None else {}),
             **({"tokenizerModel": tokenizer_model} if tokenizer_model else {}),
             **({"resolveTokenIdsWithTokenizer": True} if resolve_token_ids else {}),
+            **({"tokenizerPythonBin": tokenizer_python_bin} if tokenizer_python_bin else {}),
             **({"captureTokenDetails": capture_token_details} if capture_token_details is not None else {}),
             **({"topLogprobs": top_logprobs} if top_logprobs is not None else {}),
             **({"processId": process_id} if process_id else {}),
@@ -823,13 +838,15 @@ def _with_model_check(result: dict[str, Any], body: dict[str, Any] | None, model
 
 
 def endpoint_probe(engine: dict[str, Any], model: str | None = None) -> dict[str, Any]:
-    url = f"{str(engine['baseUrl']).rstrip('/')}/v1/models"
+    base_url = str(engine["baseUrl"]).rstrip("/")
+    url = f"{base_url}/v1/models"
+    headers = {
+        "accept": "application/json",
+        **({"authorization": f"Bearer {engine['apiKey']}"} if engine.get("apiKey") else {}),
+    }
     request = urllib.request.Request(
         url,
-        headers={
-            "accept": "application/json",
-            **({"authorization": f"Bearer {engine['apiKey']}"} if engine.get("apiKey") else {}),
-        },
+        headers=headers,
         method="GET",
     )
     try:
@@ -839,7 +856,7 @@ def endpoint_probe(engine: dict[str, Any], model: str | None = None) -> dict[str
                 body = json.loads(raw_body) if raw_body.strip().startswith("{") else None
             except json.JSONDecodeError:
                 body = None
-            return _with_model_check({
+            result = _with_model_check({
                 "engine": engine["engine"],
                 "url": url,
                 "reachable": True,
@@ -847,6 +864,9 @@ def endpoint_probe(engine: dict[str, Any], model: str | None = None) -> dict[str
                 "ok": 200 <= response.status < 300,
                 "bodyPreview": raw_body[:300],
             }, body, model)
+            if engine.get("engine") == "sglang":
+                result.update(_sglang_runtime_endpoint_info(base_url, headers))
+            return result
     except urllib.error.HTTPError as exc:
         body = exc.read(2048).decode("utf-8", errors="replace")
         return {
@@ -868,7 +888,117 @@ def endpoint_probe(engine: dict[str, Any], model: str | None = None) -> dict[str
         }
 
 
-def runtime_launch_plan(model: str) -> dict[str, Any]:
+SGLANG_SERVER_INFO_KEYS = (
+    "device",
+    "model_path",
+    "tokenizer_path",
+    "served_model_name",
+    "weight_version",
+    "context_length",
+    "max_total_tokens",
+    "disable_overlap_schedule",
+    "attention_backend",
+    "decode_attention_backend",
+    "prefill_attention_backend",
+    "sampling_backend",
+    "enable_metrics",
+    "enable_cache_report",
+)
+
+
+def _json_endpoint(base_url: str, path: str, headers: dict[str, str], *, max_bytes: int = 65536) -> dict[str, Any] | None:
+    request = urllib.request.Request(f"{base_url.rstrip('/')}{path}", headers=headers, method="GET")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        raw_body = response.read(max_bytes).decode("utf-8", errors="replace")
+    body = json.loads(raw_body) if raw_body.strip().startswith("{") else None
+    return body if isinstance(body, dict) else None
+
+
+def _sglang_runtime_endpoint_info(base_url: str, headers: dict[str, str]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    try:
+        model_info = _json_endpoint(base_url, "/model_info", headers)
+    except Exception as exc:
+        result["modelInfoError"] = str(exc)
+    else:
+        if model_info:
+            result["modelInfo"] = {
+                key: value
+                for key, value in model_info.items()
+                if key in {
+                    "model_path",
+                    "tokenizer_path",
+                    "is_generation",
+                    "weight_version",
+                    "model_type",
+                    "architectures",
+                }
+            }
+            result["modelInfoSha256"] = _sha256_json(model_info)
+    try:
+        server_info = _json_endpoint(base_url, "/server_info", headers)
+    except Exception as exc:
+        result["serverInfoError"] = str(exc)
+    else:
+        if server_info:
+            result["serverInfo"] = {
+                key: server_info.get(key)
+                for key in SGLANG_SERVER_INFO_KEYS
+                if key in server_info
+            }
+            result["serverInfoSha256"] = _sha256_json(server_info)
+    return result
+
+
+def _sglang_mps_logprobs_unsafe(engine: dict[str, Any]) -> bool:
+    if engine.get("engine") != "sglang":
+        return False
+    endpoint_preflight = engine.get("endpointPreflight") if isinstance(engine.get("endpointPreflight"), dict) else {}
+    server_info = endpoint_preflight.get("serverInfo") if isinstance(endpoint_preflight.get("serverInfo"), dict) else {}
+    if str(server_info.get("device") or "").lower() == "mps":
+        return True
+    if _env("PIQ_SGLANG_BACKEND", "").lower() in {"mlx", "mps", "metal"}:
+        return True
+    return False
+
+
+def token_detail_capability_policy(engine: dict[str, Any], requested: bool) -> dict[str, Any] | None:
+    if not requested:
+        return None
+    if _sglang_mps_logprobs_unsafe(engine) and _bool_env("PIQ_SGLANG_ALLOW_UNSAFE_TOKEN_DETAILS") is not True:
+        return {
+            "requested": True,
+            "supported": False,
+            "safeToRequest": False,
+            "status": "unsupported-runtime",
+            "reason": "sglang-mps-mlx-logprobs-crash",
+            "evidence": (
+                "Local SGLang MPS/MLX returns no decode next_token_logprobs; "
+                "chat logprobs=true crashed scheduler _normalize_decode_outputs with NoneType.tolist."
+            ),
+            "operatorOverrideEnv": "PIQ_SGLANG_ALLOW_UNSAFE_TOKEN_DETAILS=true",
+        }
+    return {
+        "requested": True,
+        "supported": True,
+        "safeToRequest": True,
+        "status": "requested",
+    }
+
+
+def _runtime_discovery_summary(runtime_candidates: dict[str, Any], engine: str) -> dict[str, Any]:
+    engine_candidates = runtime_candidates.get(engine) if isinstance(runtime_candidates.get(engine), dict) else {}
+    preferred = engine_candidates.get("preferred") if isinstance(engine_candidates.get("preferred"), dict) else {}
+    command = preferred.get("command") if isinstance(preferred.get("command"), dict) else {}
+    return {
+        "pythonEnv": ENGINE_RUNTIME_PYTHON_ENV[engine],
+        "usable": bool(engine_candidates.get("usable")),
+        "preferredPython": preferred.get("python"),
+        "preferredCommand": command.get("command") or command.get("path"),
+    }
+
+
+def runtime_launch_plan(model: str, runtime_candidates: dict[str, Any] | None = None) -> dict[str, Any]:
     system = platform.system()
     machine = platform.machine()
     apple_silicon = system == "Darwin" and machine == "arm64"
@@ -880,6 +1010,13 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
         warnings.append(
             f"{storage.get('freeGiB')} GiB free under {storage.get('path')}; source builds and model downloads may fail."
         )
+    runtime_candidates = runtime_candidates if runtime_candidates is not None else local_runtime_discovery()
+    runtime_discovery = {
+        "vllm": _runtime_discovery_summary(runtime_candidates, "vllm"),
+        "sglang": _runtime_discovery_summary(runtime_candidates, "sglang"),
+    }
+    vllm_command = runtime_discovery["vllm"].get("preferredCommand") or "vllm"
+    sglang_python = runtime_discovery["sglang"].get("preferredPython") or "python"
     return {
         "model": model,
         "host": {
@@ -897,6 +1034,7 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
             "PIQ_TENSORRT_LLM_METRICS_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}/prometheus/metrics",
             "PIQ_TENSORRT_LLM_JSON_METRICS_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}/metrics",
         },
+        "runtimeDiscovery": runtime_discovery,
         "telemetryModel": {
             "streamingCollection": (
                 "The producer sends OpenAI-compatible stream=true requests, reads SSE data frames as they arrive, "
@@ -970,7 +1108,7 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
                     "Follow the vLLM CPU/GPU install path for this host, then run the serve command below.",
                 ],
                 "serve": (
-                    f"vllm serve {quoted_model} --host 127.0.0.1 "
+                    f"{shlex.quote(str(vllm_command))} serve {quoted_model} --host 127.0.0.1 "
                     f"--port {ENGINE_DEFAULT_PORT['vllm']} --served-model-name {quoted_model}"
                 ),
                 "verify": f"curl -fsS http://127.0.0.1:{ENGINE_DEFAULT_PORT['vllm']}/v1/models",
@@ -991,11 +1129,11 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
                     "Follow the SGLang platform install path for this host, then run the serve command below.",
                 ],
                 "serve": (
-                    f"SGLANG_USE_MLX=1 python -m sglang.launch_server --model {quoted_model} "
+                    f"SGLANG_USE_MLX=1 {shlex.quote(str(sglang_python))} -m sglang.launch_server --model {quoted_model} "
                     f"--disable-cuda-graph --host 127.0.0.1 --port {ENGINE_DEFAULT_PORT['sglang']} "
                     f"--served-model-name {quoted_model} --enable-metrics"
                 ) if apple_silicon else (
-                    f"python -m sglang.launch_server --model-path {quoted_model} --host 127.0.0.1 "
+                    f"{shlex.quote(str(sglang_python))} -m sglang.launch_server --model-path {quoted_model} --host 127.0.0.1 "
                     f"--port {ENGINE_DEFAULT_PORT['sglang']} --served-model-name {quoted_model} --enable-metrics"
                 ),
                 "verify": f"curl -fsS http://127.0.0.1:{ENGINE_DEFAULT_PORT['sglang']}/v1/models",
@@ -1042,7 +1180,7 @@ def runtime_preflight(engines: list[dict[str, Any]], missing_urls: list[str], mo
         "missingEngineUrls": missing_urls,
         "endpoints": endpoint_results,
         "configuredEngineCount": len(endpoint_results),
-        "launchPlan": runtime_launch_plan(model or laptop_smoke_model()),
+        "launchPlan": runtime_launch_plan(model or laptop_smoke_model(), runtime_candidates=runtime_candidates),
         "ready": bool(endpoint_results) and not missing_urls and all(item.get("ok") for item in endpoint_results),
     }
 
@@ -1471,6 +1609,7 @@ def _telemetry_coverage_from_proof(
         samples = artifact.get("samples") if isinstance(artifact.get("samples"), list) else []
         measurements = artifact.get("measurements") if isinstance(artifact.get("measurements"), list) else []
         first_measurement = measurements[0] if measurements and isinstance(measurements[0], dict) else {}
+        token_details_capability = artifact.get("tokenDetailsCapability") if isinstance(artifact.get("tokenDetailsCapability"), dict) else {}
         token_timeline = artifact.get("tokenTimeline") if isinstance(artifact.get("tokenTimeline"), list) else []
         native_telemetry = artifact.get("nativeTelemetry") if isinstance(artifact.get("nativeTelemetry"), list) else []
         hardware_telemetry = artifact.get("hardwareTelemetry") if isinstance(artifact.get("hardwareTelemetry"), list) else []
@@ -1641,18 +1780,29 @@ def _telemetry_coverage_from_proof(
             ):
                 valid_output_row_request_ids.add(request_id)
         output_rows_proven = len(valid_output_row_request_ids)
-        token_required = first_measurement.get("tokenDetailsRequired") is True
+        token_requested_unsupported = (
+            token_details_capability.get("requested") is True
+            and token_details_capability.get("supported") is False
+        )
+        token_required = first_measurement.get("tokenDetailsRequired") is True or token_requested_unsupported
         output_ok = output_sample_proven == expected_samples and output_rows_proven == expected_samples
         output_expected = expected_samples if token_required else 0
         output_proven = min(output_sample_proven, output_rows_proven)
+        output_missing = []
+        if not output_ok:
+            if token_requested_unsupported:
+                reason = token_details_capability.get("reason") or "runtime-token-details-unsupported"
+                output_missing.append(f"output token IDs/logprobs were requested but unsupported by runtime: {reason}")
+            else:
+                output_missing.append(
+                    "output token IDs/logprobs or token timeline details are missing"
+                    + (" even though output token details are required" if token_required else "")
+                )
         engine_coverage["outputTokenIdsLogprobs"] = _coverage_item(
             "proven" if output_ok else _coverage_status(output_proven, output_expected),
             output_proven,
             output_expected,
-            [] if output_ok else [
-                "output token IDs/logprobs or token timeline details are missing"
-                + (" even though output token details are required" if token_required else "")
-            ],
+            [] if output_ok else output_missing,
         )
 
         raw_path = _resolve_proof_member_path(capture_policy.get("rawArtifactPath"), proof_dir)
@@ -3080,6 +3230,7 @@ def run_serving_smoke(
 ) -> dict[str, Any]:
     suffix = run_suffix or _utc_slug()
     submissions: list[dict[str, Any]] = []
+    capability_gaps: list[dict[str, Any]] = []
     for engine in engines:
         engine_id = engine["engine"]
         engine_capture_token_details = (
@@ -3087,9 +3238,21 @@ def run_serving_smoke(
             if "captureTokenDetails" in engine
             else capture_token_details
         )
+        engine_for_run = dict(engine)
+        token_detail_policy = token_detail_capability_policy(engine_for_run, engine_capture_token_details)
+        if token_detail_policy:
+            engine_for_run["tokenDetailsCapability"] = token_detail_policy
+        if token_detail_policy and token_detail_policy.get("safeToRequest") is False:
+            engine_capture_token_details = False
+            engine_for_run["captureTokenDetails"] = False
+            capability_gaps.append({
+                "engine": engine_id,
+                "category": "outputTokenIdsLogprobs",
+                **token_detail_policy,
+            })
         engine_top_logprobs = engine.get("topLogprobs", top_logprobs)
         result = run_serving_producer(
-            engine=engine,
+            engine=engine_for_run,
             request={
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
@@ -3139,6 +3302,7 @@ def run_serving_smoke(
         "artifactDir": artifact_dir,
         "proofBoundary": "configured serving endpoint capture with measured client telemetry and dashboard snapshot when queried",
         "submissions": submissions,
+        "telemetryCapabilityGaps": capability_gaps,
     }
 
 

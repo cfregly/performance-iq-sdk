@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import time
 import urllib.request
 from typing import Any, Callable, Literal, TypedDict
@@ -35,6 +36,8 @@ HttpGetText = Callable[[str, dict[str, str]], str]
 PROMETHEUS_SAMPLE_RE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+([-+0-9.eE]+)")
 PROMETHEUS_LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"')
 _TOKENIZER_CACHE: dict[str, Any] = {}
+_EXTERNAL_TOKENIZER_CACHE: dict[tuple[str, str, str, bool], int | None] = {}
+_EXTERNAL_PROMPT_TOKENIZER_CACHE: dict[tuple[str, str, str, bool], dict[str, Any] | None] = {}
 
 
 def laptop_smoke_model() -> str:
@@ -98,12 +101,17 @@ def _engine_provenance_value(engine: dict[str, Any], *keys: str) -> Any:
 def _runtime_provenance(engine: dict[str, Any], native_telemetry: dict[str, Any] | None = None) -> dict[str, Any]:
     telemetry = native_telemetry if isinstance(native_telemetry, dict) else {}
     server_args = telemetry.get("serverArgs", engine.get("serverArgs"))
+    token_details_capability = _token_details_capability(engine)
     return {
         "engineVersion": telemetry.get("engineVersion", engine.get("frameworkVersion")),
         "modelRevision": telemetry.get("modelRevision", engine.get("modelRevision")),
         "imageTag": _engine_provenance_value(engine, "imageTag", "containerImageTag"),
         "imageDigest": _engine_provenance_value(engine, "imageDigest", "containerImageDigest"),
         "serverArgsSha256": _sha256_optional_json(server_args),
+        "tokenizerModel": _engine_provenance_value(engine, "tokenizerModel", "tokenizer_model"),
+        "tokenizerPythonBinSha256": _sha256_text(str(engine.get("tokenizerPythonBin"))) if engine.get("tokenizerPythonBin") else None,
+        "tokenDetailsCapabilityStatus": token_details_capability.get("status") if token_details_capability else None,
+        "tokenDetailsUnsupportedReason": token_details_capability.get("reason") if token_details_capability else None,
         "processId": _engine_provenance_value(engine, "processId", "pid") or _nested_value(engine, "process", "pid", "processId"),
         "containerId": _engine_provenance_value(engine, "containerId") or _nested_value(engine, "container", "id", "containerId"),
         "podName": _engine_provenance_value(engine, "podName") or _nested_value(engine, "container", "podName"),
@@ -842,6 +850,9 @@ def _extract_token_id_with_source(item: dict[str, Any], token: str, engine: dict
             resolved = _token_id_from_tokenizer(tokenizer, token)
             if resolved is not None:
                 return resolved, "hf-tokenizer"
+        resolved = _external_hf_token_id(tokenizer_model, token, engine)
+        if resolved is not None:
+            return resolved, "external-hf-tokenizer"
     return None, None
 
 
@@ -861,6 +872,194 @@ def _load_hf_tokenizer(model: str, engine: dict[str, Any]) -> Any | None:
         return None
     _TOKENIZER_CACHE[model] = tokenizer
     return tokenizer
+
+
+def _tokenizer_python_bin(engine: dict[str, Any]) -> str | None:
+    value = engine.get("tokenizerPythonBin") or engine.get("tokenizer_python_bin")
+    return str(value) if isinstance(value, str) and value else None
+
+
+def _external_tokenizer_timeout(engine: dict[str, Any]) -> float:
+    value = engine.get("tokenizerResolveTimeoutSeconds") or engine.get("tokenizer_resolve_timeout_seconds")
+    try:
+        return max(1.0, float(value))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _external_hf_tokenizer(
+    *,
+    mode: str,
+    model: str,
+    payload: Any,
+    engine: dict[str, Any],
+) -> dict[str, Any] | None:
+    python_bin = _tokenizer_python_bin(engine)
+    if not python_bin or not os.path.exists(python_bin):
+        return None
+    code = r"""
+import json
+import sys
+
+mode = sys.argv[1]
+model = sys.argv[2]
+payload = json.loads(sys.argv[3])
+trust_remote_code = sys.argv[4] == "1"
+
+try:
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=trust_remote_code)
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": str(exc)}, sort_keys=True))
+    raise SystemExit(0)
+
+def coerce_token_ids(value):
+    if not isinstance(value, list):
+        return []
+    ids = []
+    for item in value:
+        if isinstance(item, int) and not isinstance(item, bool):
+            ids.append(item)
+        elif isinstance(item, str) and item.isdigit():
+            ids.append(int(item))
+    return ids
+
+def token_id(token):
+    if not token:
+        return None
+    try:
+        value = tokenizer.convert_tokens_to_ids(token)
+        unknown = getattr(tokenizer, "unk_token_id", None)
+        if isinstance(value, int) and value >= 0 and value != unknown:
+            return value
+    except Exception:
+        pass
+    try:
+        encoded = tokenizer.encode(token, add_special_tokens=False)
+        if isinstance(encoded, list) and len(encoded) == 1 and isinstance(encoded[0], int):
+            return encoded[0]
+    except Exception:
+        pass
+    try:
+        encoded = tokenizer(token, add_special_tokens=False)
+        input_ids = encoded.get("input_ids") if isinstance(encoded, dict) else None
+        if isinstance(input_ids, list) and len(input_ids) == 1 and isinstance(input_ids[0], int):
+            return input_ids[0]
+    except Exception:
+        pass
+    return None
+
+if mode == "token":
+    print(json.dumps({"ok": True, "tokenId": token_id(str(payload))}, sort_keys=True))
+elif mode == "prompt":
+    prompt_payload = payload if isinstance(payload, dict) else {}
+    token_ids = []
+    tokenization_mode = "tokenizer-empty"
+    messages = prompt_payload.get("messages")
+    if isinstance(messages, list) and hasattr(tokenizer, "apply_chat_template"):
+        for kwargs in (
+            {"tokenize": True, "add_generation_prompt": True},
+            {"tokenize": True},
+        ):
+            try:
+                token_ids = coerce_token_ids(tokenizer.apply_chat_template(messages, **kwargs))
+                if token_ids:
+                    tokenization_mode = "chat-template"
+                    break
+            except Exception:
+                pass
+    if not token_ids:
+        parts = []
+        for message in prompt_payload.get("messages", []) or []:
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                parts.append(message["content"])
+        text = "\n".join(parts) or str(prompt_payload.get("prompt") or "")
+        if text:
+            try:
+                token_ids = coerce_token_ids(tokenizer.encode(text, add_special_tokens=False))
+                if token_ids:
+                    tokenization_mode = "prompt-text"
+            except Exception:
+                pass
+    token_texts = []
+    for token_id_value in token_ids:
+        try:
+            value = tokenizer.convert_ids_to_tokens(token_id_value)
+            if isinstance(value, str):
+                token_texts.append(value)
+                continue
+        except Exception:
+            pass
+        try:
+            value = tokenizer.decode([token_id_value], skip_special_tokens=False)
+            token_texts.append(value if isinstance(value, str) else None)
+        except Exception:
+            token_texts.append(None)
+    print(json.dumps({"ok": True, "tokenIds": token_ids, "tokenTexts": token_texts, "mode": tokenization_mode}, sort_keys=True))
+else:
+    print(json.dumps({"ok": False, "error": "unknown mode"}, sort_keys=True))
+""".strip()
+    try:
+        completed = subprocess.run(
+            [
+                python_bin,
+                "-c",
+                code,
+                mode,
+                model,
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                "1" if engine.get("tokenizerTrustRemoteCode") or engine.get("trustRemoteCode") else "0",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=_external_tokenizer_timeout(engine),
+        )
+    except Exception:
+        return None
+    for line in reversed((completed.stdout or "").splitlines()):
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and parsed.get("ok") is True:
+            return parsed
+    return None
+
+
+def _external_hf_token_id(model: str, token: str, engine: dict[str, Any]) -> int | None:
+    python_bin = _tokenizer_python_bin(engine)
+    if not python_bin:
+        return None
+    key = (python_bin, model, token, bool(engine.get("tokenizerTrustRemoteCode") or engine.get("trustRemoteCode")))
+    if key not in _EXTERNAL_TOKENIZER_CACHE:
+        result = _external_hf_tokenizer(mode="token", model=model, payload=token, engine=engine)
+        token_id = result.get("tokenId") if isinstance(result, dict) else None
+        _EXTERNAL_TOKENIZER_CACHE[key] = token_id if isinstance(token_id, int) and not isinstance(token_id, bool) else None
+    return _EXTERNAL_TOKENIZER_CACHE[key]
+
+
+def _external_prompt_tokens(model: str, payload: dict[str, Any], engine: dict[str, Any]) -> dict[str, Any] | None:
+    python_bin = _tokenizer_python_bin(engine)
+    if not python_bin:
+        return None
+    key = (
+        python_bin,
+        model,
+        _stable_json(payload),
+        bool(engine.get("tokenizerTrustRemoteCode") or engine.get("trustRemoteCode")),
+    )
+    if key not in _EXTERNAL_PROMPT_TOKENIZER_CACHE:
+        result = _external_hf_tokenizer(mode="prompt", model=model, payload=payload, engine=engine)
+        token_ids = _coerce_token_ids(result.get("tokenIds") if isinstance(result, dict) else None)
+        if token_ids:
+            _EXTERNAL_PROMPT_TOKENIZER_CACHE[key] = {
+                "tokenIds": token_ids,
+                "tokenTexts": result.get("tokenTexts") if isinstance(result.get("tokenTexts"), list) else [],
+                "mode": result.get("mode") if isinstance(result.get("mode"), str) else "external",
+            }
+        else:
+            _EXTERNAL_PROMPT_TOKENIZER_CACHE[key] = None
+    return _EXTERNAL_PROMPT_TOKENIZER_CACHE[key]
 
 
 def _token_id_from_tokenizer(tokenizer: Any, token: str) -> int | None:
@@ -981,6 +1180,38 @@ def _prompt_token_details(engine: dict[str, Any], request: dict[str, Any], paylo
     else:
         tokenizer, source, tokenizer_model = _prompt_tokenizer(engine, request)
         if tokenizer is None or source is None:
+            tokenizer_model = request.get("tokenizerModel") or engine.get("tokenizerModel") or engine.get("tokenizer_model") or request.get("model")
+            external = _external_prompt_tokens(str(tokenizer_model), payload, engine) if isinstance(tokenizer_model, str) and tokenizer_model else None
+            if external is not None:
+                token_ids = _coerce_token_ids(external.get("tokenIds"))
+                token_texts = external.get("tokenTexts") if isinstance(external.get("tokenTexts"), list) else []
+                source = "external-hf-tokenizer"
+                tokenization_source = f"{source}-{external.get('mode') or 'external'}"
+                details = []
+                for index, token_id in enumerate(token_ids):
+                    token_text = token_texts[index] if index < len(token_texts) and isinstance(token_texts[index], str) else None
+                    details.append({
+                        "tokenPhase": "prompt",
+                        "tokenIndex": index,
+                        "tokenId": token_id,
+                        "tokenIdSource": source,
+                        "tokenText": token_text,
+                        "tokenTextSha256": _sha256_text(token_text) if token_text else None,
+                        "tokenBytes": len(token_text.encode("utf-8")) if token_text else None,
+                        "tokenLogprob": None,
+                        "tokenDetailSource": tokenization_source,
+                    })
+                return {
+                    "summary": {
+                        "promptTokenIdsAvailable": bool(details),
+                        "promptTokenDetailCount": len(details),
+                        "promptTokenIdSource": source if details else None,
+                        "promptTokenIdsSha256": _sha256_json(token_ids) if details else None,
+                        "promptTokenizationSource": tokenization_source,
+                        "promptTokenizerModel": tokenizer_model,
+                    },
+                    "details": details,
+                }
             return {
                 "summary": {
                     "promptTokenIdsAvailable": False,
@@ -1129,6 +1360,11 @@ def _token_detail_summary(details: list[dict[str, Any]], requested: bool) -> dic
             if detail.get("tokenId") is not None and detail.get("tokenIdSource")
         )) or None,
     }
+
+
+def _token_details_capability(engine: dict[str, Any]) -> dict[str, Any] | None:
+    capability = engine.get("tokenDetailsCapability")
+    return capability if isinstance(capability, dict) else None
 
 
 def _avg_numbers(samples: list[dict[str, Any]], key: str) -> float | None:
@@ -1715,6 +1951,7 @@ def _build_measurements(
         else observed_power_watts_per_gpu
     )
     gpu_count = float((pricing or {}).get("gpuCount") or workload.get("parallelism") or 1)
+    token_details_capability = _token_details_capability(engine)
     cost_usd = (
         (duration_seconds / 3600) * float(usd_per_gpu_hour) * gpu_count
         if isinstance(usd_per_gpu_hour, (int, float))
@@ -1805,6 +2042,8 @@ def _build_measurements(
         "tokenIdsAvailableCount": sum(1 for sample in successful if sample.get("tokenIdsAvailable")),
         "logprobsAvailableCount": sum(1 for sample in successful if sample.get("logprobsAvailable")),
         "tokenDetailsRequired": bool(_request_payload(request, stream=bool(request.get("stream", True))).get("logprobs")),
+        "tokenDetailsCapabilityStatus": token_details_capability.get("status") if token_details_capability else None,
+        "tokenDetailsUnsupportedReason": token_details_capability.get("reason") if token_details_capability else None,
         "promptTokenIdsAvailableCount": sum(1 for sample in successful if sample.get("promptTokenIdsAvailable")),
         "promptTokenDetailsRequired": bool(
             request.get("promptTokenIds")
@@ -1969,6 +2208,8 @@ def _build_measurements(
             "tokenDetailCount": sample.get("tokenDetailCount"),
             "tokenDetailSource": sample.get("tokenDetailSource"),
             "tokenIdSource": sample.get("tokenIdSource"),
+            "tokenDetailsCapabilityStatus": sample.get("tokenDetailsCapabilityStatus"),
+            "tokenDetailsUnsupportedReason": sample.get("tokenDetailsUnsupportedReason"),
             "promptTokenIdsAvailable": sample.get("promptTokenIdsAvailable"),
             "promptTokenDetailCount": sample.get("promptTokenDetailCount"),
             "promptTokenIdSource": sample.get("promptTokenIdSource"),
@@ -2314,6 +2555,7 @@ def _write_summary_artifact(
                 "baseUrl": engine["baseUrl"],
                 "requestPath": engine.get("requestPath", "/v1/chat/completions"),
                 "endpointPreflight": engine.get("endpointPreflight"),
+                "tokenDetailsCapability": engine.get("tokenDetailsCapability"),
                 "model": request["model"],
                 "capturePolicy": {
                     "mode": "operator-full",
@@ -2366,6 +2608,8 @@ def _write_summary_artifact(
                         "tokenDetailCount": sample.get("tokenDetailCount"),
                         "tokenDetailSource": sample.get("tokenDetailSource"),
                         "tokenIdSource": sample.get("tokenIdSource"),
+                        "tokenDetailsCapabilityStatus": sample.get("tokenDetailsCapabilityStatus"),
+                        "tokenDetailsUnsupportedReason": sample.get("tokenDetailsUnsupportedReason"),
                     }
                     for sample in samples
                 ],

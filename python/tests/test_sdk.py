@@ -133,6 +133,8 @@ class PerformanceIQSdkTest(unittest.TestCase):
         "PIQ_VLLM_TOP_LOGPROBS",
         "PIQ_SGLANG_TOP_LOGPROBS",
         "PIQ_TENSORRT_LLM_TOP_LOGPROBS",
+        "PIQ_SGLANG_BACKEND",
+        "PIQ_SGLANG_ALLOW_UNSAFE_TOKEN_DETAILS",
         "PIQ_SERVING_ALLOW_PARTIAL",
         "PIQ_COMMAND_PROBE_TIMEOUT_SECONDS",
     ]
@@ -1378,6 +1380,97 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertEqual(token_rows[1]["tokenId"], 202)
         self.assertEqual(token_rows[1]["tokenIdSource"], "configured-token-id-map")
 
+    def test_serving_producer_resolves_token_ids_with_external_tokenizer_python(self):
+        tokenizer_python = os.path.join(self.tmp_dir, "fake-tokenizer-python")
+        with open(tokenizer_python, "w", encoding="utf-8") as handle:
+            handle.write("""#!/usr/bin/env python3
+import json
+import sys
+
+mode = sys.argv[3]
+payload = json.loads(sys.argv[5])
+if mode == "token":
+    print(json.dumps({"ok": True, "tokenId": {"o": 101, "k": 202, "ok": 303}.get(payload)}))
+elif mode == "prompt":
+    print(json.dumps({"ok": True, "tokenIds": [501, 502], "tokenTexts": ["Return", " ok"], "mode": "chat-template"}))
+else:
+    print(json.dumps({"ok": False}))
+""")
+        os.chmod(tokenizer_python, 0o755)
+
+        def http_stream_json(url, headers, payload):
+            return {
+                "status": 200,
+                "events": [
+                    {
+                        "receivedMs": 5,
+                        "receivedAtUtc": "2026-07-09T12:00:00.005Z",
+                        "body": {
+                            "id": "chatcmpl-external-tokenizer",
+                            "model": laptop_smoke_model(),
+                            "choices": [{"delta": {"content": "o"}, "finish_reason": None, "logprobs": {"content": [{
+                                "token": "o",
+                                "logprob": -0.1,
+                                "top_logprobs": [{"token": "o", "logprob": -0.1}],
+                            }]}}],
+                        },
+                    },
+                    {
+                        "receivedMs": 8,
+                        "receivedAtUtc": "2026-07-09T12:00:00.008Z",
+                        "body": {
+                            "id": "chatcmpl-external-tokenizer",
+                            "model": laptop_smoke_model(),
+                            "choices": [{"delta": {"content": "k"}, "finish_reason": "stop", "logprobs": {"content": [{
+                                "token": "k",
+                                "logprob": -0.2,
+                            }]}}],
+                            "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
+                        },
+                    },
+                ],
+            }
+
+        with patch("performance_iq_sdk.producers.serving._load_hf_tokenizer", return_value=None):
+            result = run_serving_producer(
+                engine={
+                    "engine": "vllm",
+                    "baseUrl": "http://127.0.0.1:8000",
+                    "tokenizerPythonBin": tokenizer_python,
+                    "resolveTokenIdsWithTokenizer": True,
+                },
+                request={
+                    "model": laptop_smoke_model(),
+                    "messages": [{"role": "user", "content": "Return ok."}],
+                    "captureTokenDetails": True,
+                    "topLogprobs": 1,
+                    "resolveTokenIdsWithTokenizer": True,
+                },
+                artifact_dir=self.tmp_dir,
+                workload={"hardware": "local tokenizer runtime", "operatingPoint": "laptop-smoke"},
+                pricing={"usdPerGpuHour": 1, "gpuCount": 1, "powerWattsPerGpu": 100},
+                http_stream_json=http_stream_json,
+            )
+
+        sample = result["samples"][0]
+        self.assertTrue(sample["promptTokenIdsAvailable"])
+        self.assertEqual(sample["promptTokenIdSource"], "external-hf-tokenizer")
+        self.assertTrue(sample["tokenIdsAvailable"])
+        self.assertEqual(sample["tokenIdSource"], "external-hf-tokenizer")
+        output_rows = [
+            row for row in sample["tokenTimeline"]
+            if row.get("tokenPhase", "output") == "output"
+        ]
+        self.assertEqual(output_rows[0]["tokenId"], 101)
+        self.assertEqual(output_rows[0]["tokenIdSource"], "external-hf-tokenizer")
+        top_logprobs = json.loads(output_rows[0]["topLogprobsJson"])
+        self.assertEqual(top_logprobs[0]["tokenId"], 101)
+        prompt_rows = [
+            row for row in result["measurements"]
+            if row.get("surface") == "serving_token_timeline" and row.get("tokenPhase") == "prompt"
+        ]
+        self.assertEqual([row["tokenId"] for row in prompt_rows], [501, 502])
+
     def test_serving_smoke_runs_all_configured_engines(self):
         calls = []
         submissions = []
@@ -1438,6 +1531,55 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertTrue(all(item["successCount"] == 2 for item in summary["submissions"]))
         self.assertTrue(all(os.path.exists(item["manifestPath"]) for item in summary["submissions"]))
         self.assertTrue(all(item["artifactSha256"] for item in summary["submissions"]))
+
+    def test_serving_smoke_disables_sglang_mps_token_details_before_request(self):
+        calls = []
+
+        def fake_run_serving_producer(**kwargs):
+            calls.append(kwargs)
+            return {
+                "measurements": [{"runtimeFramework": "SGLang"}],
+                "samples": [{"ok": True}],
+                "manifest": {
+                    "campaign": kwargs["campaign"],
+                    "artifacts": [{"sha256": "a" * 64}],
+                },
+                "artifactPath": os.path.join(self.tmp_dir, "sglang-summary.json"),
+                "manifestPath": os.path.join(self.tmp_dir, "sglang-manifest.json"),
+                "submission": None,
+            }
+
+        with patch("performance_iq_sdk.serving_smoke.run_serving_producer", side_effect=fake_run_serving_producer):
+            summary = run_serving_smoke(
+                engines=[{
+                    "engine": "sglang",
+                    "baseUrl": "http://127.0.0.1:30000",
+                    "endpointPreflight": {"serverInfo": {"device": "mps"}},
+                }],
+                performance_iq=None,
+                model=laptop_smoke_model(),
+                prompt="Say ok.",
+                artifact_dir=self.tmp_dir,
+                repetitions=1,
+                max_tokens=16,
+                hardware="local endpoints",
+                operating_point="laptop-smoke",
+                pricing={"usdPerGpuHour": 1, "gpuCount": 1, "powerWattsPerGpu": 100},
+                run_suffix="sglang-mps",
+                capture_token_details=True,
+                top_logprobs=3,
+                submit=False,
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("captureTokenDetails", calls[0]["request"])
+        self.assertNotIn("topLogprobs", calls[0]["request"])
+        self.assertFalse(calls[0]["engine"]["captureTokenDetails"])
+        capability = calls[0]["engine"]["tokenDetailsCapability"]
+        self.assertFalse(capability["supported"])
+        self.assertFalse(capability["safeToRequest"])
+        self.assertEqual(capability["reason"], "sglang-mps-mlx-logprobs-crash")
+        self.assertEqual(summary["telemetryCapabilityGaps"][0]["category"], "outputTokenIdsLogprobs")
 
     def test_serving_smoke_verifies_full_proof_bundle(self):
         proof_path, summary = self.write_full_serving_proof()
@@ -2255,6 +2397,46 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertEqual(output_summary["status"], "proven")
         self.assertNotIn("sglang measurement tokenIdsAvailableCount must equal successCount", " ".join(verification["errors"]))
 
+    def test_serving_smoke_coverage_flags_unsupported_requested_token_details(self):
+        proof_path, summary = self.write_full_serving_proof()
+
+        def mark_sglang_output_token_details_unsupported(artifact):
+            artifact["tokenDetailsCapability"] = {
+                "requested": True,
+                "supported": False,
+                "safeToRequest": False,
+                "status": "unsupported-runtime",
+                "reason": "sglang-mps-mlx-logprobs-crash",
+            }
+            artifact["measurements"][0]["tokenDetailsRequired"] = False
+            artifact["measurements"][0]["tokenDetailsAvailableCount"] = 0
+            artifact["measurements"][0]["tokenIdsAvailableCount"] = 0
+            artifact["measurements"][0]["logprobsAvailableCount"] = 0
+            for sample in artifact["samples"]:
+                sample["tokenDetailsAvailable"] = False
+                sample["tokenIdsAvailable"] = False
+                sample["logprobsAvailable"] = False
+                sample["tokenDetailSource"] = "not-requested"
+                sample["tokenDetailsCapabilityStatus"] = "unsupported-runtime"
+                sample["tokenDetailsUnsupportedReason"] = "sglang-mps-mlx-logprobs-crash"
+            for row in artifact["tokenTimeline"]:
+                if row.get("tokenPhase") != "prompt":
+                    row["tokenId"] = None
+                    row["tokenIdSource"] = None
+                    row["tokenLogprob"] = None
+
+        self.rewrite_engine_artifact(summary, "sglang", mark_sglang_output_token_details_unsupported)
+
+        verification = verify_proof_summary(proof_path)
+        sglang_coverage = verification["telemetryCoverage"]["engines"]["sglang"]["outputTokenIdsLogprobs"]
+        output_summary = verification["telemetryCoverage"]["categorySummary"]["outputTokenIdsLogprobs"]
+
+        self.assertEqual(sglang_coverage["expectedCount"], 1)
+        self.assertEqual(sglang_coverage["status"], "missing")
+        self.assertIn("unsupported by runtime", " ".join(sglang_coverage["missing"]))
+        self.assertEqual(output_summary["expectedEngines"], 1)
+        self.assertEqual(output_summary["status"], "missing")
+
     def test_serving_smoke_verify_proof_rejects_missing_dashboard_rows(self):
         proof_path, _summary = self.write_full_serving_proof()
         self.rewrite_proof_dashboard(proof_path, lambda dashboard: dashboard["rows"].pop("price_performance"))
@@ -2321,6 +2503,33 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertTrue(by_engine["vllm"]["captureTokenDetails"])
         self.assertEqual(by_engine["vllm"]["topLogprobs"], 3)
         self.assertFalse(by_engine["sglang"]["captureTokenDetails"])
+
+    def test_serving_smoke_passes_runtime_python_for_tokenizer_resolution(self):
+        class Args:
+            vllm_url = "http://127.0.0.1:8000"
+            sglang_url = None
+            tensorrt_llm_url = None
+            framework_version = None
+            model_revision = None
+            image_digest = None
+            image_tag = None
+            server_args = None
+            tokenizer_model = None
+            resolve_token_ids_with_tokenizer = True
+            collect_hardware_metrics = False
+            require_native_telemetry = False
+            require_hardware_telemetry = False
+            process_id = None
+            container_id = None
+            pod_name = None
+            node_name = None
+            host_name = None
+
+        with patch("performance_iq_sdk.serving_smoke.preferred_runtime_python", return_value="/tmp/runtime-python"):
+            configs, _missing = engine_configs_from_env(Args())
+
+        self.assertEqual(configs[0]["tokenizerPythonBin"], "/tmp/runtime-python")
+        self.assertTrue(configs[0]["resolveTokenIdsWithTokenizer"])
 
     def test_serving_smoke_preflight_reports_missing_without_requests(self):
         os.environ["PIQ_COMMAND_PROBE_TIMEOUT_SECONDS"] = "2.5"
@@ -2459,6 +2668,9 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertIn("vllm serve", plan["engines"]["vllm"]["serve"])
         self.assertIn("sglang.launch_server", plan["engines"]["sglang"]["serve"])
         self.assertIn("trtllm-serve", plan["engines"]["tensorrt-llm"]["serve"])
+        self.assertEqual(plan["runtimeDiscovery"]["vllm"]["pythonEnv"], "PIQ_VLLM_PYTHON_BIN")
+        self.assertEqual(plan["runtimeDiscovery"]["sglang"]["pythonEnv"], "PIQ_SGLANG_PYTHON_BIN")
+        self.assertIn("usable", plan["runtimeDiscovery"]["vllm"])
         self.assertIn("freeGiB", plan["storage"])
         self.assertEqual(plan["endpointEnv"]["PIQ_SGLANG_URL"], "http://127.0.0.1:30000")
         self.assertEqual(plan["strictProof"]["mode"], "strict-recorded-smoke")
@@ -2589,6 +2801,66 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertTrue(result["modelChecked"])
         self.assertFalse(result["modelAvailable"])
         self.assertFalse(result["ok"])
+
+    def test_serving_smoke_endpoint_preflight_captures_sglang_server_info(self):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                return
+
+            def do_GET(self):
+                if self.path == "/v1/models":
+                    payload = {
+                        "object": "list",
+                        "data": [{"id": laptop_smoke_model(), "object": "model"}],
+                    }
+                elif self.path == "/model_info":
+                    payload = {
+                        "model_path": laptop_smoke_model(),
+                        "tokenizer_path": laptop_smoke_model(),
+                        "is_generation": True,
+                        "weight_version": "default",
+                        "model_type": "qwen2",
+                    }
+                elif self.path == "/server_info":
+                    payload = {
+                        "device": "mps",
+                        "model_path": laptop_smoke_model(),
+                        "served_model_name": laptop_smoke_model(),
+                        "context_length": 512,
+                        "max_total_tokens": 512,
+                        "disable_overlap_schedule": True,
+                        "api_key": "must-not-leak",
+                    }
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                body = json.dumps(payload).encode("utf-8")
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = endpoint_probe({
+                "engine": "sglang",
+                "baseUrl": f"http://127.0.0.1:{server.server_address[1]}",
+            }, model=laptop_smoke_model())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["serverInfo"]["device"], "mps")
+        self.assertEqual(result["serverInfo"]["context_length"], 512)
+        self.assertNotIn("api_key", result["serverInfo"])
+        self.assertEqual(result["modelInfo"]["model_path"], laptop_smoke_model())
+        self.assertIsInstance(result["serverInfoSha256"], str)
 
     def test_serving_smoke_endpoint_preflight_rejects_nonstandard_model_list(self):
         class Handler(BaseHTTPRequestHandler):

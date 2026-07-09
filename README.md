@@ -351,6 +351,9 @@ bash ops/serving-producers/run-smoke.sh preflight
 
 `PIQ_PYTHON_BIN` selects the Python that runs the smoke CLI.
 `PIQ_SERVING_BIN_DIR` is prepended to `PATH` for runtime commands.
+`PIQ_VLLM_PYTHON_BIN` and `PIQ_SGLANG_PYTHON_BIN` point at runtime-specific
+Python environments when the smoke CLI Python is not the same interpreter that
+can import the serving framework.
 `PIQ_VLLM_SOURCE_PATH` and `PIQ_SGLANG_SOURCE_PATH` are prepended to
 `PYTHONPATH` so source-build checkouts are visible to preflight.
 
@@ -369,6 +372,23 @@ PYTHONPATH=python/src python -m performance_iq_sdk.serving_smoke \
   --launch-plan-only \
   --model Qwen/Qwen2.5-0.5B-Instruct
 ```
+
+`runtimeDiscovery` in the launch plan reports usable per-engine Python
+candidates and rewrites the vLLM/SGLang serve commands to the preferred working
+binary when one is found. A missing `vllm` or `sglang` import in the smoke CLI
+Python is not fatal when the corresponding runtime-specific candidate is usable.
+When `--resolve-token-ids-with-tokenizer` is enabled, the producer also uses the
+runtime-specific Python as an external Hugging Face tokenizer fallback, so
+dashboard-safe token rows can still carry tokenizer-exact IDs when the smoke CLI
+Python lacks `transformers`.
+
+SGLang's Apple Silicon MPS/MLX path currently does not safely return decode
+logprobs. Preflight reads SGLang `/server_info`; when `device` is `mps` and
+token details are requested, the smoke runner records an
+`outputTokenIdsLogprobs` capability gap and omits `logprobs` from the request so
+the local server does not crash. Use a CUDA/Linux SGLang endpoint, or explicitly
+set `PIQ_SGLANG_ALLOW_UNSAFE_TOKEN_DETAILS=true` for debugging that failure
+mode.
 
 To print read-only setup diagnostics before installing or deleting anything:
 
