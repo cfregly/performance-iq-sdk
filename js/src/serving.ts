@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { existsSync } from "node:fs"
 import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 
@@ -314,17 +315,52 @@ function metricCompleteness(row: Record<string, unknown>): number {
     row.usdPer1mOutputTokens,
     row.usdPer1mTotalTokens,
     row.tokensPerWatt,
+    row.p50LatencyMs,
+    row.p95LatencyMs,
+    row.p99LatencyMs,
+    row.avgTimeToFirstByteMs,
     row.avgTtftMs,
+    row.p50TtftMs,
+    row.p95TtftMs,
+    row.p99TtftMs,
     row.avgTpotMs,
+    row.p50TpotMs,
+    row.p95TpotMs,
+    row.p99TpotMs,
     row.avgTtfotMs,
+    row.p50TtfotMs,
+    row.p95TtfotMs,
+    row.p99TtfotMs,
     row.requestCount === row.successCount ? row.requestCount : null,
+    row.streamingRequestCount === row.successCount ? row.streamingRequestCount : null,
     row.hardwareProvenance === "configured" ? 1 : null,
   ]
   if (row.nativeTelemetryRequired) {
     required.push(row.nativeTelemetryAvailableCount === row.successCount ? row.nativeTelemetryAvailableCount : null)
+    required.push(
+      row.avgQueueWaitMs,
+      row.p50QueueWaitMs,
+      row.p95QueueWaitMs,
+      row.p99QueueWaitMs,
+      row.avgPrefillMs,
+      row.p50PrefillMs,
+      row.p95PrefillMs,
+      row.p99PrefillMs,
+      row.avgDecodeMs,
+      row.p50DecodeMs,
+      row.p95DecodeMs,
+      row.p99DecodeMs,
+    )
   }
   if (row.hardwareTelemetryRequired) {
     required.push(row.hardwareTelemetryAvailableCount === row.successCount ? row.hardwareTelemetryAvailableCount : null)
+    required.push(
+      row.avgPowerWatts,
+      row.avgPowerWattsPerGpu,
+      row.avgGpuUtilizationPct,
+      row.avgMemoryCopyUtilizationPct,
+      row.totalEnergyJoules,
+    )
   }
   if (row.tokenDetailsRequired) {
     required.push(row.logprobsAvailableCount === row.successCount ? row.logprobsAvailableCount : null)
@@ -1651,6 +1687,10 @@ function buildMeasurements(
   const ttfots = successful.map((sample) => sample.ttfotMs).filter(finite)
   const tpots = successful.map((sample) => sample.tpotMs).filter(finite)
   const firstBytes = successful.map((sample) => sample.timeToFirstByteMs).filter(finite)
+  const interTokenLatencies = successful.map((sample) => sample.interTokenLatencyMs).filter(finite)
+  const queueWaits = successful.map((sample) => sample.queueWaitMs ?? null).filter(finite)
+  const prefills = successful.map((sample) => sample.prefillMs ?? null).filter(finite)
+  const decodes = successful.map((sample) => sample.decodeMs ?? null).filter(finite)
   const avgLatencyMs = successful.length ? sum(successful.map((sample) => sample.e2eLatencyMs)) / successful.length : null
   const row: Record<string, unknown> = {
     surface: "result",
@@ -1672,19 +1712,37 @@ function buildMeasurements(
     p95LatencyMs: percentile(latencies, 95),
     p99LatencyMs: percentile(latencies, 99),
     avgTimeToFirstByteMs: avg(firstBytes),
+    p50TimeToFirstByteMs: percentile(firstBytes, 50),
     p95TimeToFirstByteMs: percentile(firstBytes, 95),
+    p99TimeToFirstByteMs: percentile(firstBytes, 99),
     avgTtftMs: avg(ttfts),
     p50TtftMs: percentile(ttfts, 50),
     p95TtftMs: percentile(ttfts, 95),
     p99TtftMs: percentile(ttfts, 99),
     avgTtfotMs: avg(ttfots),
+    p50TtfotMs: percentile(ttfots, 50),
     p95TtfotMs: percentile(ttfots, 95),
+    p99TtfotMs: percentile(ttfots, 99),
     avgTpotMs: avg(tpots),
+    p50TpotMs: percentile(tpots, 50),
     p95TpotMs: percentile(tpots, 95),
-    avgInterTokenLatencyMs: avg(successful.map((sample) => sample.interTokenLatencyMs).filter(finite)),
-    avgQueueWaitMs: avg(successful.map((sample) => sample.queueWaitMs ?? null).filter(finite)),
-    avgPrefillMs: avg(successful.map((sample) => sample.prefillMs ?? null).filter(finite)),
-    avgDecodeMs: avg(successful.map((sample) => sample.decodeMs ?? null).filter(finite)),
+    p99TpotMs: percentile(tpots, 99),
+    avgInterTokenLatencyMs: avg(interTokenLatencies),
+    p50InterTokenLatencyMs: percentile(interTokenLatencies, 50),
+    p95InterTokenLatencyMs: percentile(interTokenLatencies, 95),
+    p99InterTokenLatencyMs: percentile(interTokenLatencies, 99),
+    avgQueueWaitMs: avg(queueWaits),
+    p50QueueWaitMs: percentile(queueWaits, 50),
+    p95QueueWaitMs: percentile(queueWaits, 95),
+    p99QueueWaitMs: percentile(queueWaits, 99),
+    avgPrefillMs: avg(prefills),
+    p50PrefillMs: percentile(prefills, 50),
+    p95PrefillMs: percentile(prefills, 95),
+    p99PrefillMs: percentile(prefills, 99),
+    avgDecodeMs: avg(decodes),
+    p50DecodeMs: percentile(decodes, 50),
+    p95DecodeMs: percentile(decodes, 95),
+    p99DecodeMs: percentile(decodes, 99),
     avgNativeIterationLatencyMs: avg(successful.map((sample) => sample.nativeIterationLatencyMs ?? null).filter(finite)),
     avgNativeGpuMemoryBytes: avg(successful.map((sample) => sample.nativeGpuMemoryBytes ?? null).filter(finite)),
     avgNativeKvCacheUsedBlocks: avg(successful.map((sample) => sample.nativeKvCacheUsedBlocks ?? null).filter(finite)),
@@ -1842,6 +1900,158 @@ function buildMeasurements(
   return [row, ...sampleRows, ...timelineRows]
 }
 
+const PRODUCER_COVERAGE_DESCRIPTIONS: Record<string, string> = {
+  clientStreamTiming: "Client stream=true timing for E2E, TTFB, TTFT, TTFOT, TPOT, and output token timeline rows.",
+  nativeRuntimeTelemetry: "Native runtime timing/cache/concurrency fields exposed by vLLM, SGLang, or TensorRT-LLM metrics.",
+  dcgmHardwareTelemetry: "DCGM hardware counters for power, utilization, clocks, memory, temperature, and energy.",
+  promptTokenIds: "Tokenizer-exact prompt/input token IDs and prompt token provenance.",
+  outputTokenIdsLogprobs: "Output token IDs, token logprobs, top-logprobs, and token provenance.",
+  operatorFullArtifacts: "Operator-full raw request/response artifacts retained outside customer-safe rows.",
+  runtimeProvenance: "Engine version, model revision, image, server args, process, container, pod, node, or host provenance.",
+}
+
+function coverageStatus(proven: number, expected: number): string {
+  if (expected <= 0) return "not_configured"
+  if (proven >= expected) return "proven"
+  if (proven > 0) return "partial"
+  return "missing"
+}
+
+function hasRuntimeProvenance(sample: ServingRequestSample): boolean {
+  return [
+    sample.engineVersion,
+    sample.modelRevision,
+    sample.imageDigest,
+    sample.serverArgsSha256,
+    sample.processId,
+    sample.containerId,
+    sample.podName,
+    sample.nodeName,
+    sample.hostName,
+  ].some((value) => value != null && value !== "")
+}
+
+function producerCoverageRows(
+  config: ServingProducerConfig,
+  samples: ServingRequestSample[],
+  aggregateRow: Record<string, unknown>,
+  rawArtifactPath: string,
+  capturedAtUtc: string,
+): Record<string, unknown>[] {
+  const successful = samples.filter((sample) => sample.ok)
+  const expectedSamples = successful.length || samples.length || 1
+  const tokenRequired = Boolean(requestPayload(config.request, config.request.stream !== false).logprobs)
+  const promptRequired = Boolean(aggregateRow.promptTokenDetailsRequired)
+  const nativeExpected = aggregateRow.nativeTelemetryRequired ? expectedSamples : 0
+  const hardwareExpected = aggregateRow.hardwareTelemetryRequired ? expectedSamples : 0
+  const specs: Array<[string, number, number, string[]]> = []
+
+  const streamProven = successful.filter((sample) =>
+    sample.streaming === true &&
+    finite(sample.e2eLatencyMs) &&
+    finite(sample.timeToFirstByteMs) &&
+    finite(sample.ttftMs) &&
+    finite(sample.ttfotMs) &&
+    finite(sample.tpotMs) &&
+    Boolean(sample.tokenTimeline?.some((row) => (row.tokenPhase ?? "output") === "output")),
+  ).length
+  specs.push([
+    "clientStreamTiming",
+    streamProven,
+    expectedSamples,
+    streamProven === expectedSamples ? [] : ["stream timing or output token timeline rows missing"],
+  ])
+
+  const nativeProven = successful.filter((sample) =>
+    sample.nativeTelemetryAvailable === true &&
+    finite(sample.nativeTtftMs) &&
+    finite(sample.nativeTpotMs) &&
+    finite(sample.nativeE2eLatencyMs) &&
+    finite(sample.queueWaitMs) &&
+    finite(sample.prefillMs) &&
+    finite(sample.decodeMs),
+  ).length
+  specs.push([
+    "nativeRuntimeTelemetry",
+    nativeProven,
+    nativeExpected,
+    nativeExpected === 0 || nativeProven === nativeExpected ? [] : ["native runtime metrics missing"],
+  ])
+
+  const hardwareProven = successful.filter((sample) =>
+    sample.hardwareTelemetryAvailable === true &&
+    finite(sample.avgPowerWatts) &&
+    finite(sample.gpuUtilizationPct) &&
+    finite(sample.gpuTemperatureC) &&
+    finite(sample.energyJoules),
+  ).length
+  specs.push([
+    "dcgmHardwareTelemetry",
+    hardwareProven,
+    hardwareExpected,
+    hardwareExpected === 0 || hardwareProven === hardwareExpected ? [] : ["DCGM hardware counters missing"],
+  ])
+
+  const promptProven = successful.filter((sample) =>
+    sample.promptTokenIdsAvailable === true &&
+    typeof sample.promptTokenIdsSha256 === "string" &&
+    typeof sample.promptTokenIdSource === "string",
+  ).length
+  specs.push([
+    "promptTokenIds",
+    promptProven,
+    promptRequired ? expectedSamples : 0,
+    !promptRequired || promptProven === expectedSamples ? [] : ["prompt token IDs missing"],
+  ])
+
+  const outputProven = successful.filter((sample) =>
+    sample.tokenDetailsAvailable === true &&
+    sample.tokenIdsAvailable === true &&
+    sample.logprobsAvailable === true &&
+    typeof sample.tokenIdSource === "string",
+  ).length
+  specs.push([
+    "outputTokenIdsLogprobs",
+    outputProven,
+    tokenRequired ? expectedSamples : 0,
+    !tokenRequired || outputProven === expectedSamples ? [] : ["output token IDs/logprobs missing"],
+  ])
+
+  const rawPresent = rawArtifactPath && existsSync(rawArtifactPath) ? 1 : 0
+  specs.push([
+    "operatorFullArtifacts",
+    rawPresent,
+    1,
+    rawPresent ? [] : ["operator-full raw artifact missing"],
+  ])
+
+  const runtimeProven = successful.filter(hasRuntimeProvenance).length
+  specs.push([
+    "runtimeProvenance",
+    runtimeProven,
+    expectedSamples,
+    runtimeProven === expectedSamples ? [] : ["runtime provenance missing or partial"],
+  ])
+
+  const allProven = specs.every(([, proven, expected]) => ["proven", "not_configured"].includes(coverageStatus(proven, expected)))
+  return specs.map(([category, proven, expected, missing]) => ({
+    surface: "serving_telemetry_coverage",
+    model: config.request.model,
+    hardware: config.workload?.hardware ?? "unknown",
+    runtimeFramework: ENGINE_LABELS[config.engine.engine],
+    runtimeEngine: config.engine.engine,
+    coverageSource: "producer-submit",
+    coverageCategory: category,
+    coverageStatus: coverageStatus(proven, expected),
+    provenCount: proven,
+    expectedCount: expected,
+    missingJson: JSON.stringify(missing),
+    description: PRODUCER_COVERAGE_DESCRIPTIONS[category],
+    allProven,
+    latestCapturedAtUtc: capturedAtUtc,
+  }))
+}
+
 async function writeSummaryArtifact(
   config: ServingProducerConfig,
   samples: ServingRequestSample[],
@@ -1973,6 +2183,7 @@ export async function runServingProducer(config: ServingProducerConfig): Promise
 
   const measurements = buildMeasurements(config, samples, capturedAtUtc)
   const rawArtifactPath = await writeRawArtifact(config, rawCaptures, capturedAtUtc)
+  measurements.push(...producerCoverageRows(config, samples, measurements[0], rawArtifactPath, capturedAtUtc))
   const artifactPath = await writeSummaryArtifact(config, samples, measurements, capturedAtUtc, rawArtifactPath)
   const engineLabel = ENGINE_LABELS[config.engine.engine]
   const runInput: PerformanceIQRunInput = {

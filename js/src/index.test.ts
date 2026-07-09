@@ -231,9 +231,14 @@ describe("performance-iq-sdk js", () => {
       successCount: 2,
       completionTokens: 16,
       totalTokens: 40,
+      p50TtftMs: expect.any(Number),
+      p99TpotMs: expect.any(Number),
     })
     expect(result.measurements.filter((row) => row.surface === "serving_request_sample")).toHaveLength(2)
     expect(result.measurements.filter((row) => row.surface === "serving_token_timeline")).toHaveLength(4)
+    const coverageRows = result.measurements.filter((row) => row.surface === "serving_telemetry_coverage")
+    expect(coverageRows).toHaveLength(7)
+    expect(coverageRows.map((row) => row.coverageCategory)).toContain("clientStreamTiming")
     expect(fs.existsSync(result.artifactPath)).toBe(true)
     expect(fs.existsSync(result.manifestPath)).toBe(true)
     const artifact = JSON.parse(fs.readFileSync(result.artifactPath, "utf-8"))

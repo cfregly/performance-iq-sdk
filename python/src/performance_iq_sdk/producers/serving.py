@@ -1645,6 +1645,14 @@ def _percentile(values: list[float], percentile: float) -> float | None:
     return ordered[index]
 
 
+def _number_values(rows: list[dict[str, Any]], key: str) -> list[float]:
+    return [
+        float(row[key])
+        for row in rows
+        if isinstance(row.get(key), (int, float)) and not isinstance(row.get(key), bool)
+    ]
+
+
 def _build_measurements(
     engine: dict[str, Any],
     request: dict[str, Any],
@@ -1660,15 +1668,15 @@ def _build_measurements(
     output_tokens = _sum(successful, "completionTokens")
     total_tokens = _sum(successful, "totalTokens")
     prompt_tokens = _sum(successful, "promptTokens")
-    latencies = [float(sample["e2eLatencyMs"]) for sample in successful if isinstance(sample.get("e2eLatencyMs"), (int, float))]
-    ttfts = [float(sample["ttftMs"]) for sample in successful if isinstance(sample.get("ttftMs"), (int, float))]
-    ttfots = [float(sample["ttfotMs"]) for sample in successful if isinstance(sample.get("ttfotMs"), (int, float))]
-    tpots = [float(sample["tpotMs"]) for sample in successful if isinstance(sample.get("tpotMs"), (int, float))]
-    first_bytes = [
-        float(sample["timeToFirstByteMs"])
-        for sample in successful
-        if isinstance(sample.get("timeToFirstByteMs"), (int, float))
-    ]
+    latencies = _number_values(successful, "e2eLatencyMs")
+    first_bytes = _number_values(successful, "timeToFirstByteMs")
+    ttfts = _number_values(successful, "ttftMs")
+    ttfots = _number_values(successful, "ttfotMs")
+    tpots = _number_values(successful, "tpotMs")
+    inter_token_latencies = _number_values(successful, "interTokenLatencyMs")
+    queue_waits = _number_values(successful, "queueWaitMs")
+    prefills = _number_values(successful, "prefillMs")
+    decodes = _number_values(successful, "decodeMs")
     usd_per_gpu_hour = (pricing or {}).get("usdPerGpuHour")
     configured_power_watts_per_gpu = (pricing or {}).get("powerWattsPerGpu")
     observed_power_watts_per_gpu = _avg_numbers(successful, "avgPowerWattsPerGpu")
@@ -1703,19 +1711,37 @@ def _build_measurements(
         "p95LatencyMs": _percentile(latencies, 95),
         "p99LatencyMs": _percentile(latencies, 99),
         "avgTimeToFirstByteMs": _avg_numbers(successful, "timeToFirstByteMs"),
+        "p50TimeToFirstByteMs": _percentile(first_bytes, 50),
+        "p95TimeToFirstByteMs": _percentile(first_bytes, 95),
+        "p99TimeToFirstByteMs": _percentile(first_bytes, 99),
         "avgTtftMs": _avg_numbers(successful, "ttftMs"),
         "p50TtftMs": _percentile(ttfts, 50),
         "p95TtftMs": _percentile(ttfts, 95),
         "p99TtftMs": _percentile(ttfts, 99),
         "avgTtfotMs": _avg_numbers(successful, "ttfotMs"),
+        "p50TtfotMs": _percentile(ttfots, 50),
         "p95TtfotMs": _percentile(ttfots, 95),
+        "p99TtfotMs": _percentile(ttfots, 99),
         "avgTpotMs": _avg_numbers(successful, "tpotMs"),
+        "p50TpotMs": _percentile(tpots, 50),
         "p95TpotMs": _percentile(tpots, 95),
+        "p99TpotMs": _percentile(tpots, 99),
         "avgInterTokenLatencyMs": _avg_numbers(successful, "interTokenLatencyMs"),
-        "p95TimeToFirstByteMs": _percentile(first_bytes, 95),
+        "p50InterTokenLatencyMs": _percentile(inter_token_latencies, 50),
+        "p95InterTokenLatencyMs": _percentile(inter_token_latencies, 95),
+        "p99InterTokenLatencyMs": _percentile(inter_token_latencies, 99),
         "avgQueueWaitMs": _avg_numbers(successful, "queueWaitMs"),
+        "p50QueueWaitMs": _percentile(queue_waits, 50),
+        "p95QueueWaitMs": _percentile(queue_waits, 95),
+        "p99QueueWaitMs": _percentile(queue_waits, 99),
         "avgPrefillMs": _avg_numbers(successful, "prefillMs"),
+        "p50PrefillMs": _percentile(prefills, 50),
+        "p95PrefillMs": _percentile(prefills, 95),
+        "p99PrefillMs": _percentile(prefills, 99),
         "avgDecodeMs": _avg_numbers(successful, "decodeMs"),
+        "p50DecodeMs": _percentile(decodes, 50),
+        "p95DecodeMs": _percentile(decodes, 95),
+        "p99DecodeMs": _percentile(decodes, 99),
         "avgNativeIterationLatencyMs": _avg_numbers(successful, "nativeIterationLatencyMs"),
         "avgNativeGpuMemoryBytes": _avg_numbers(successful, "nativeGpuMemoryBytes"),
         "avgNativeKvCacheUsedBlocks": _avg_numbers(successful, "nativeKvCacheUsedBlocks"),
@@ -1770,10 +1796,24 @@ def _build_measurements(
         row["usdPer1mOutputTokens"],
         row["usdPer1mTotalTokens"],
         row["tokensPerWatt"],
+        row["p50LatencyMs"],
+        row["p95LatencyMs"],
+        row["p99LatencyMs"],
+        row["avgTimeToFirstByteMs"],
         row["avgTtftMs"],
+        row["p50TtftMs"],
+        row["p95TtftMs"],
+        row["p99TtftMs"],
         row["avgTpotMs"],
+        row["p50TpotMs"],
+        row["p95TpotMs"],
+        row["p99TpotMs"],
         row["avgTtfotMs"],
+        row["p50TtfotMs"],
+        row["p95TtfotMs"],
+        row["p99TtfotMs"],
         row["requestCount"] if row["requestCount"] == row["successCount"] else None,
+        row["streamingRequestCount"] if row["streamingRequestCount"] == row["successCount"] else None,
         1 if row["hardwareProvenance"] == "configured" else None,
     ]
     if row["nativeTelemetryRequired"]:
@@ -1782,12 +1822,33 @@ def _build_measurements(
             if row["nativeTelemetryAvailableCount"] == row["successCount"]
             else None
         )
+        required.extend([
+            row["avgQueueWaitMs"],
+            row["p50QueueWaitMs"],
+            row["p95QueueWaitMs"],
+            row["p99QueueWaitMs"],
+            row["avgPrefillMs"],
+            row["p50PrefillMs"],
+            row["p95PrefillMs"],
+            row["p99PrefillMs"],
+            row["avgDecodeMs"],
+            row["p50DecodeMs"],
+            row["p95DecodeMs"],
+            row["p99DecodeMs"],
+        ])
     if row["hardwareTelemetryRequired"]:
         required.append(
             row["hardwareTelemetryAvailableCount"]
             if row["hardwareTelemetryAvailableCount"] == row["successCount"]
             else None
         )
+        required.extend([
+            row["avgPowerWatts"],
+            row["avgPowerWattsPerGpu"],
+            row["avgGpuUtilizationPct"],
+            row["avgMemoryCopyUtilizationPct"],
+            row["totalEnergyJoules"],
+        ])
     if row["tokenDetailsRequired"]:
         required.append(
             row["logprobsAvailableCount"]
@@ -1919,6 +1980,192 @@ def _build_measurements(
                 "latestCapturedAtUtc": captured_at_utc,
             })
     return [row, *sample_rows, *timeline_rows]
+
+
+PRODUCER_COVERAGE_DESCRIPTIONS: dict[str, str] = {
+    "clientStreamTiming": "Client stream=true timing for E2E, TTFB, TTFT, TTFOT, TPOT, and output token timeline rows.",
+    "nativeRuntimeTelemetry": "Native runtime timing/cache/concurrency fields exposed by vLLM, SGLang, or TensorRT-LLM metrics.",
+    "dcgmHardwareTelemetry": "DCGM hardware counters for power, utilization, clocks, memory, temperature, and energy.",
+    "promptTokenIds": "Tokenizer-exact prompt/input token IDs and prompt token provenance.",
+    "outputTokenIdsLogprobs": "Output token IDs, token logprobs, top-logprobs, and token provenance.",
+    "operatorFullArtifacts": "Operator-full raw request/response artifacts retained outside customer-safe rows.",
+    "runtimeProvenance": "Engine version, model revision, image, server args, process, container, pod, node, or host provenance.",
+}
+
+
+def _coverage_status(proven: int, expected: int) -> str:
+    if expected <= 0:
+        return "not_configured"
+    if proven >= expected:
+        return "proven"
+    if proven > 0:
+        return "partial"
+    return "missing"
+
+
+def _has_runtime_provenance(sample: dict[str, Any]) -> bool:
+    return any(
+        sample.get(key) not in (None, "", [])
+        for key in [
+            "engineVersion",
+            "modelRevision",
+            "imageDigest",
+            "serverArgsSha256",
+            "processId",
+            "containerId",
+            "podName",
+            "nodeName",
+            "hostName",
+        ]
+    )
+
+
+def _coverage_row(
+    *,
+    request: dict[str, Any],
+    workload: dict[str, Any],
+    engine_id: str,
+    engine_label: str,
+    captured_at_utc: str,
+    category: str,
+    proven: int,
+    expected: int,
+    missing: list[str],
+    all_proven: bool,
+) -> dict[str, Any]:
+    return {
+        "surface": "serving_telemetry_coverage",
+        "model": request["model"],
+        "hardware": workload.get("hardware"),
+        "runtimeFramework": engine_label,
+        "runtimeEngine": engine_id,
+        "coverageSource": "producer-submit",
+        "coverageCategory": category,
+        "coverageStatus": _coverage_status(proven, expected),
+        "provenCount": proven,
+        "expectedCount": expected,
+        "missingJson": json.dumps(missing, sort_keys=True, separators=(",", ":")),
+        "description": PRODUCER_COVERAGE_DESCRIPTIONS[category],
+        "allProven": all_proven,
+        "latestCapturedAtUtc": captured_at_utc,
+    }
+
+
+def _build_producer_coverage_rows(
+    engine: dict[str, Any],
+    request: dict[str, Any],
+    workload: dict[str, Any],
+    samples: list[dict[str, Any]],
+    aggregate_row: dict[str, Any],
+    raw_artifact_path: str,
+    captured_at_utc: str,
+) -> list[dict[str, Any]]:
+    engine_id = str(engine["engine"])
+    engine_label = serving_engine_label(engine_id)
+    successful = [sample for sample in samples if sample.get("ok")]
+    expected_samples = len(successful) or len(samples) or 1
+    token_required = bool(_request_payload(request, stream=bool(request.get("stream", True))).get("logprobs"))
+    prompt_required = bool(aggregate_row.get("promptTokenDetailsRequired"))
+    native_expected = expected_samples if aggregate_row.get("nativeTelemetryRequired") else 0
+    hardware_expected = expected_samples if aggregate_row.get("hardwareTelemetryRequired") else 0
+
+    coverage_specs: list[tuple[str, int, int, list[str]]] = []
+    stream_proven = sum(
+        1 for sample in successful
+        if sample.get("streaming") is True
+        and all(isinstance(sample.get(key), (int, float)) for key in ["e2eLatencyMs", "timeToFirstByteMs", "ttftMs", "ttfotMs", "tpotMs"])
+        and any(isinstance(row, dict) and row.get("tokenPhase", "output") == "output" for row in (sample.get("tokenTimeline") or []))
+    )
+    coverage_specs.append((
+        "clientStreamTiming",
+        stream_proven,
+        expected_samples,
+        [] if stream_proven == expected_samples else ["stream timing or output token timeline rows missing"],
+    ))
+
+    native_proven = sum(
+        1 for sample in successful
+        if sample.get("nativeTelemetryAvailable") is True
+        and all(isinstance(sample.get(key), (int, float)) for key in ["nativeTtftMs", "nativeTpotMs", "nativeE2eLatencyMs", "queueWaitMs", "prefillMs", "decodeMs"])
+    )
+    coverage_specs.append((
+        "nativeRuntimeTelemetry",
+        native_proven,
+        native_expected,
+        [] if native_expected == 0 or native_proven == native_expected else ["native runtime metrics missing"],
+    ))
+
+    hardware_proven = sum(
+        1 for sample in successful
+        if sample.get("hardwareTelemetryAvailable") is True
+        and all(isinstance(sample.get(key), (int, float)) for key in ["avgPowerWatts", "gpuUtilizationPct", "gpuTemperatureC", "energyJoules"])
+    )
+    coverage_specs.append((
+        "dcgmHardwareTelemetry",
+        hardware_proven,
+        hardware_expected,
+        [] if hardware_expected == 0 or hardware_proven == hardware_expected else ["DCGM hardware counters missing"],
+    ))
+
+    prompt_proven = sum(
+        1 for sample in successful
+        if sample.get("promptTokenIdsAvailable") is True
+        and isinstance(sample.get("promptTokenIdsSha256"), str)
+        and isinstance(sample.get("promptTokenIdSource"), str)
+    )
+    coverage_specs.append((
+        "promptTokenIds",
+        prompt_proven,
+        expected_samples if prompt_required else 0,
+        [] if not prompt_required or prompt_proven == expected_samples else ["prompt token IDs missing"],
+    ))
+
+    output_proven = sum(
+        1 for sample in successful
+        if sample.get("tokenDetailsAvailable") is True
+        and sample.get("tokenIdsAvailable") is True
+        and sample.get("logprobsAvailable") is True
+        and isinstance(sample.get("tokenIdSource"), str)
+    )
+    coverage_specs.append((
+        "outputTokenIdsLogprobs",
+        output_proven,
+        expected_samples if token_required else 0,
+        [] if not token_required or output_proven == expected_samples else ["output token IDs/logprobs missing"],
+    ))
+
+    raw_present = 1 if raw_artifact_path and os.path.exists(raw_artifact_path) else 0
+    coverage_specs.append((
+        "operatorFullArtifacts",
+        raw_present,
+        1,
+        [] if raw_present else ["operator-full raw artifact missing"],
+    ))
+
+    runtime_proven = sum(1 for sample in successful if _has_runtime_provenance(sample))
+    coverage_specs.append((
+        "runtimeProvenance",
+        runtime_proven,
+        expected_samples,
+        [] if runtime_proven == expected_samples else ["runtime provenance missing or partial"],
+    ))
+
+    all_proven = all(_coverage_status(proven, expected) in {"proven", "not_configured"} for _, proven, expected, _ in coverage_specs)
+    return [
+        _coverage_row(
+            request=request,
+            workload=workload,
+            engine_id=engine_id,
+            engine_label=engine_label,
+            captured_at_utc=captured_at_utc,
+            category=category,
+            proven=proven,
+            expected=expected,
+            missing=missing,
+            all_proven=all_proven,
+        )
+        for category, proven, expected, missing in coverage_specs
+    ]
 
 
 def _sanitized_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2120,6 +2367,15 @@ def run_serving_producer(
     measurements = _build_measurements(engine, request, workload, pricing, samples, captured_at_utc)
     artifact_root = artifact_dir or os.path.join(os.getcwd(), ".performance-iq", "serving-producers")
     raw_artifact_path = _write_raw_artifact(engine, request, artifact_root, captured_at_utc, raw_captures)
+    measurements.extend(_build_producer_coverage_rows(
+        engine,
+        request,
+        workload,
+        samples,
+        measurements[0],
+        raw_artifact_path,
+        captured_at_utc,
+    ))
     artifact_path = _write_summary_artifact(
         engine,
         request,

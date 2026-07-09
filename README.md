@@ -201,11 +201,14 @@ export PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS=kafka-1:9092,kafka-2:9092
 export PIQ_SERVING_KAFKA_TOPIC=performance-iq.serving.telemetry.v1
 ```
 
-The finest-grain dashboard surfaces are `serving_request_samples` and
-`serving_token_timeline`. The former is one row per request with latency,
-native/DCGM, token-summary, provenance, and artifact fields. The latter is
+The finest-grain dashboard surfaces are `serving_request_samples`,
+`serving_token_timeline`, and `serving_telemetry_coverage`.
+`serving_request_samples` is one row per request with latency, native/DCGM,
+token-summary, provenance, and artifact fields. `serving_token_timeline` is
 prompt and output token/chunk detail with `tokenPhase`, token IDs, logprobs,
-hashes, timing, and provenance.
+hashes, timing, and provenance. `serving_telemetry_coverage` is one row per
+engine/category showing whether producer-local telemetry categories were
+proven, missing, partial, or not configured.
 
 To exercise the full telemetry contract without real serving runtimes, use the
 deterministic fake strict path:
@@ -295,7 +298,8 @@ bundle has the full product telemetry set across all required engines. Coverage
 categories include client stream timing, request receipts, dashboard fine-grain
 rows, native runtime telemetry, DCGM hardware telemetry, prompt token IDs,
 output token IDs/logprobs, operator-full artifacts, runtime provenance, and
-Kafka-ready event rows.
+Kafka-ready event rows. `--dump-proof-rows` also emits
+`telemetryCoverageRows`, one row per engine/category from the verifier.
 It fails fast unless all three URLs are configured and the configured endpoints
 pass the model-aware `/v1/models` preflight. Use `--allow-missing-engines` only
 for partial local debugging and `--skip-preflight` only when debugging a

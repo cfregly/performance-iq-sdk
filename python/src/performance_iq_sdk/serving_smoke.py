@@ -67,12 +67,14 @@ QUERY_NAMES = (
     "run_details",
     "serving_request_samples",
     "serving_token_timeline",
+    "serving_telemetry_coverage",
 )
 CAMPAIGN_ID_QUERY_COLUMN = {
     "campaign_provenance": 0,
     "run_details": 0,
     "serving_request_samples": 0,
     "serving_token_timeline": 0,
+    "serving_telemetry_coverage": 0,
 }
 ENGINE_DEFAULT_PORT = {
     "vllm": 8000,
@@ -662,6 +664,7 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
             "requestSurfaces": [
                 "serving_request_samples",
                 "serving_token_timeline",
+                "serving_telemetry_coverage",
             ],
             "strictTelemetry": [
                 "client stream timing",
@@ -1043,7 +1046,13 @@ def _validate_measurement_row(
     for key in ["promptTokens", "completionTokens", "totalTokens", "outputTpm", "totalTpm"]:
         if not _is_positive_number(row.get(key)):
             errors.append(f"{engine} measurement {key} must be a positive number.")
-    for key in ["avgLatencyMs", "p95LatencyMs", "p50LatencyMs", "p99LatencyMs", "avgTtftMs", "avgTpotMs", "avgTtfotMs"]:
+    for key in [
+        "avgLatencyMs", "p50LatencyMs", "p95LatencyMs", "p99LatencyMs",
+        "avgTimeToFirstByteMs", "p50TimeToFirstByteMs", "p95TimeToFirstByteMs", "p99TimeToFirstByteMs",
+        "avgTtftMs", "p50TtftMs", "p95TtftMs", "p99TtftMs",
+        "avgTpotMs", "p50TpotMs", "p95TpotMs", "p99TpotMs",
+        "avgTtfotMs", "p50TtfotMs", "p95TtfotMs", "p99TtfotMs",
+    ]:
         if not _is_number(row.get(key)) or row.get(key) < 0:
             errors.append(f"{engine} measurement {key} must be a non-negative number.")
     if not _is_number(row.get("metricCompleteness")) or not 0 <= row.get("metricCompleteness") <= 1:
@@ -1442,9 +1451,22 @@ def build_evidence_index(summary: dict[str, Any]) -> dict[str, Any]:
                     "p50LatencyMs",
                     "p95LatencyMs",
                     "p99LatencyMs",
+                    "avgTimeToFirstByteMs",
+                    "p50TimeToFirstByteMs",
+                    "p95TimeToFirstByteMs",
+                    "p99TimeToFirstByteMs",
                     "avgTtftMs",
+                    "p50TtftMs",
+                    "p95TtftMs",
+                    "p99TtftMs",
                     "avgTpotMs",
+                    "p50TpotMs",
+                    "p95TpotMs",
+                    "p99TpotMs",
                     "avgTtfotMs",
+                    "p50TtfotMs",
+                    "p95TtfotMs",
+                    "p99TtfotMs",
                     "metricCompleteness",
                     "tags",
                 ]
@@ -1906,7 +1928,15 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                                 errors.append(f"{engine} prompt tokenTimeline[{token_index}].tokenIdSource must describe tokenizer provenance.")
                     if evidence:
                         evidence_measurement = evidence.get("measurement") if isinstance(evidence.get("measurement"), dict) else {}
-                        for key in ["outputTpm", "totalTpm", "avgLatencyMs", "avgTtftMs", "avgTpotMs", "avgTtfotMs", "p95LatencyMs", "metricCompleteness"]:
+                        for key in [
+                            "outputTpm", "totalTpm", "avgLatencyMs",
+                            "p50LatencyMs", "p95LatencyMs", "p99LatencyMs",
+                            "avgTimeToFirstByteMs", "p50TimeToFirstByteMs", "p95TimeToFirstByteMs", "p99TimeToFirstByteMs",
+                            "avgTtftMs", "p50TtftMs", "p95TtftMs", "p99TtftMs",
+                            "avgTpotMs", "p50TpotMs", "p95TpotMs", "p99TpotMs",
+                            "avgTtfotMs", "p50TtfotMs", "p95TtfotMs", "p99TtfotMs",
+                            "metricCompleteness",
+                        ]:
                             if evidence_measurement.get(key) != first_measurement.get(key):
                                 errors.append(f"{engine} evidenceIndex measurement {key} must match summary artifact.")
 
@@ -2025,6 +2055,49 @@ def _enrich_artifact_rows(rows: Any, context: dict[str, Any]) -> list[dict[str, 
     return enriched
 
 
+def _telemetry_coverage_rows_from_verification(
+    proof: dict[str, Any],
+    verification: dict[str, Any],
+    proof_path: str,
+) -> list[dict[str, Any]]:
+    coverage = verification.get("telemetryCoverage") if isinstance(verification, dict) else None
+    if not isinstance(coverage, dict):
+        return []
+    categories = coverage.get("categories") if isinstance(coverage.get("categories"), dict) else {}
+    engines = coverage.get("engines") if isinstance(coverage.get("engines"), dict) else {}
+    submissions = {
+        item.get("engine"): item
+        for item in proof.get("submissions", [])
+        if isinstance(item, dict) and isinstance(item.get("engine"), str)
+    }
+    rows: list[dict[str, Any]] = []
+    for engine, engine_coverage in engines.items():
+        if not isinstance(engine, str) or not isinstance(engine_coverage, dict):
+            continue
+        submission = submissions.get(engine) if isinstance(submissions.get(engine), dict) else {}
+        for category, item in engine_coverage.items():
+            if not isinstance(category, str) or not isinstance(item, dict):
+                continue
+            category_meta = categories.get(category) if isinstance(categories.get(category), dict) else {}
+            rows.append({
+                "engine": engine,
+                "runtimeFramework": submission.get("runtimeFramework") or serving_engine_label(engine),
+                "campaignId": submission.get("campaignId"),
+                "runId": submission.get("runId"),
+                "model": coverage.get("model") or proof.get("model"),
+                "coverageSource": "proof-verifier",
+                "coverageCategory": category,
+                "coverageStatus": item.get("status"),
+                "provenCount": item.get("provenCount"),
+                "expectedCount": item.get("expectedCount"),
+                "missingJson": json.dumps(item.get("missing") or [], sort_keys=True, separators=(",", ":")),
+                "description": category_meta.get("description"),
+                "allProven": coverage.get("allProven"),
+                "proofPath": proof_path,
+            })
+    return rows
+
+
 def extract_proof_rows(
     proof_path: str,
     *,
@@ -2052,6 +2125,7 @@ def extract_proof_rows(
         "requestReceipts": [],
         "eventLogRows": [],
         "telemetryCoverage": verification.get("telemetryCoverage") if isinstance(verification, dict) else None,
+        "telemetryCoverageRows": _telemetry_coverage_rows_from_verification(proof, verification, proof_abs),
     }
 
     submissions = proof.get("submissions")
@@ -2512,12 +2586,27 @@ def _fake_dashboard(summary: dict[str, Any]) -> dict[str, Any]:
     })
     request_sample_count = 0
     token_timeline_count = 0
+    telemetry_coverage_rows = []
     run_detail_rows = []
     for item in submissions:
         artifact = _read_json_object(str(item.get("artifactPath") or ""))
         measurements = artifact.get("measurements") if isinstance(artifact.get("measurements"), list) else []
         request_sample_count += sum(1 for row in measurements if isinstance(row, dict) and row.get("surface") == "serving_request_sample")
         token_timeline_count += sum(1 for row in measurements if isinstance(row, dict) and row.get("surface") == "serving_token_timeline")
+        telemetry_coverage_rows.extend([
+            [
+                item.get("campaignId"),
+                item.get("runId"),
+                item.get("runtimeFramework"),
+                row.get("coverageCategory"),
+                row.get("coverageStatus"),
+                row.get("provenCount"),
+                row.get("expectedCount"),
+                row.get("allProven"),
+            ]
+            for row in measurements
+            if isinstance(row, dict) and row.get("surface") == "serving_telemetry_coverage"
+        ])
         first = measurements[0] if measurements and isinstance(measurements[0], dict) else {}
         run_detail_rows.append([
             item.get("campaignId"),
@@ -2540,6 +2629,7 @@ def _fake_dashboard(summary: dict[str, Any]) -> dict[str, Any]:
             "run_details": engine_count,
             "serving_request_samples": request_sample_count,
             "serving_token_timeline": token_timeline_count,
+            "serving_telemetry_coverage": len(telemetry_coverage_rows),
         },
         "rows": {
             "price_performance": [
@@ -2554,6 +2644,7 @@ def _fake_dashboard(summary: dict[str, Any]) -> dict[str, Any]:
             "run_details": run_detail_rows,
             "serving_request_samples": campaign_rows,
             "serving_token_timeline": campaign_rows,
+            "serving_telemetry_coverage": telemetry_coverage_rows,
         },
         "campaignIds": campaign_ids,
         "surfaceCampaignIds": {
@@ -2561,12 +2652,14 @@ def _fake_dashboard(summary: dict[str, Any]) -> dict[str, Any]:
             "run_details": campaign_ids,
             "serving_request_samples": campaign_ids,
             "serving_token_timeline": campaign_ids,
+            "serving_telemetry_coverage": campaign_ids if telemetry_coverage_rows else [],
         },
         "submittedCampaignRows": {
             "campaign_provenance": campaign_rows,
             "run_details": campaign_rows,
             "serving_request_samples": campaign_rows,
             "serving_token_timeline": campaign_rows,
+            "serving_telemetry_coverage": telemetry_coverage_rows,
         },
         "runtimeFrameworks": runtime_frameworks,
     }

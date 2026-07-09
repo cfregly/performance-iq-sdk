@@ -41,8 +41,9 @@ Each JSONL record is a self-contained event with `schemaVersion`, `topic`,
 `eventType`, `partitionKey`, `eventId`, campaign/run/request identifiers,
 artifact and manifest paths, and a payload. Events include submissions,
 artifact pointers, aggregate measurements, `serving_request_sample` rows,
-`serving_token_timeline` rows, native telemetry, DCGM telemetry, token-detail
-summaries, request receipts, and the dashboard snapshot. This is the right
+`serving_token_timeline` rows, `serving_telemetry_coverage` rows, native
+telemetry, DCGM telemetry, token-detail summaries, request receipts, and the
+dashboard snapshot. This is the right
 Kafka boundary: publish these already-timestamped events downstream, not the
 live request stream used to measure TTFT/TPOT.
 
@@ -280,9 +281,10 @@ Read two fields in the verifier output separately:
 
 To inspect every generated row, add a proof-row dump. The output includes
 submitted runs, dashboard row snapshots, request samples, token timeline rows,
-native telemetry, DCGM telemetry, request trace rows, measurement rows, request
-receipts, and Kafka-ready event rows, with campaign/run/engine provenance
-attached to artifact-local rows:
+producer measurement rows, producer telemetry coverage rows, verifier
+telemetry coverage rows, native telemetry, DCGM telemetry, request trace rows,
+request receipts, and Kafka-ready event rows, with campaign/run/engine
+provenance attached to artifact-local rows:
 
 ```bash
 bash ops/serving-producers/run-smoke.sh verify-proof \
@@ -309,11 +311,13 @@ Success requires:
 - each request ID has a matching receipt in `PIQ_SERVING_RECEIPT_LOG`;
 - Performance IQ accepts all three producer runs;
 - `price_performance`, `capacity_best`, `campaign_provenance`, `run_details`,
-  `serving_request_samples`, and `serving_token_timeline` row counts increase;
+  `serving_request_samples`, `serving_token_timeline`, and
+  `serving_telemetry_coverage` row counts increase;
 - the proof summary preserves row snapshots for those dashboard surfaces;
 - submitted campaign IDs appear in both `campaign_provenance` and
-  `run_details`, and request IDs appear in `serving_request_samples` and
-  `serving_token_timeline`.
+  `run_details`, request IDs appear in `serving_request_samples` and
+  `serving_token_timeline`, and coverage rows appear in
+  `serving_telemetry_coverage`.
 - `serving-smoke-proof-<suffix>.json` exists under `PIQ_ARTIFACT_DIR` and
   preserves preflight, per-engine artifact and manifest paths, submissions,
   and dashboard row proof.

@@ -301,6 +301,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
                 "run_details": 3,
                 "serving_request_samples": 3,
                 "serving_token_timeline": 6,
+                "serving_telemetry_coverage": 3,
             },
             "rows": {
                 "price_performance": [
@@ -317,6 +318,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
                 "run_details": [[campaign_id] for campaign_id in campaign_ids],
                 "serving_request_samples": [[campaign_id] for campaign_id in campaign_ids],
                 "serving_token_timeline": [[campaign_id] for campaign_id in campaign_ids],
+                "serving_telemetry_coverage": [[campaign_id] for campaign_id in campaign_ids],
             },
             "campaignIds": campaign_ids,
             "surfaceCampaignIds": {
@@ -324,12 +326,14 @@ class PerformanceIQSdkTest(unittest.TestCase):
                 "run_details": campaign_ids,
                 "serving_request_samples": campaign_ids,
                 "serving_token_timeline": campaign_ids,
+                "serving_telemetry_coverage": campaign_ids,
             },
             "submittedCampaignRows": {
                 "campaign_provenance": [[campaign_id] for campaign_id in campaign_ids],
                 "run_details": [[campaign_id] for campaign_id in campaign_ids],
                 "serving_request_samples": [[campaign_id] for campaign_id in campaign_ids],
                 "serving_token_timeline": [[campaign_id] for campaign_id in campaign_ids],
+                "serving_telemetry_coverage": [[campaign_id] for campaign_id in campaign_ids],
             },
             "runtimeFrameworks": ["SGLang", "TensorRT-LLM", "vLLM"],
         }
@@ -580,8 +584,11 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(aggregate["metricCompleteness"], 1)
         sample_rows = [row for row in result["measurements"] if row.get("surface") == "serving_request_sample"]
         token_rows = [row for row in result["measurements"] if row.get("surface") == "serving_token_timeline"]
+        coverage_rows = [row for row in result["measurements"] if row.get("surface") == "serving_telemetry_coverage"]
         self.assertEqual(len(sample_rows), 1)
         self.assertEqual(len(token_rows), 2)
+        self.assertEqual(len(coverage_rows), 7)
+        self.assertIn("clientStreamTiming", {row["coverageCategory"] for row in coverage_rows})
         with open(result["artifactPath"], encoding="utf-8") as handle:
             artifact = json.load(handle)
         with open(result["manifestPath"], encoding="utf-8") as handle:
@@ -1356,7 +1363,9 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertEqual(rows["rowCounts"]["servingRequestSamples"], 3)
         self.assertEqual(rows["rowCounts"]["servingTokenTimeline"], 6)
         self.assertEqual(rows["rowCounts"]["requestReceipts"], 3)
+        self.assertEqual(rows["rowCounts"]["telemetryCoverageRows"], 30)
         self.assertEqual({row["engine"] for row in rows["servingRequestSamples"]}, {"vllm", "sglang", "tensorrt-llm"})
+        self.assertEqual({row["coverageSource"] for row in rows["telemetryCoverageRows"]}, {"proof-verifier"})
         self.assertTrue(all(row.get("campaignId") for row in rows["servingTokenTimeline"]))
         rows_path = os.path.join(self.tmp_dir, "proof-rows.json")
         with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
@@ -1365,6 +1374,7 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
             persisted_rows = json.load(handle)
         self.assertEqual(persisted_rows["schemaVersion"], "performance-iq.serving-proof-rows.v1")
         self.assertEqual(persisted_rows["telemetryCoverage"]["schemaVersion"], "performance-iq.serving-telemetry-coverage.v1")
+        self.assertEqual(persisted_rows["rowCounts"]["telemetryCoverageRows"], 30)
         self.assertEqual(persisted_rows["rowCounts"]["servingTokenTimeline"], 6)
         self.assertEqual(write_proof_rows(proof_path, rows_path)["rowCounts"]["servingRequestSamples"], 3)
 
@@ -1382,6 +1392,7 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertIn("serving.measurement.result", event_types)
         self.assertIn("serving.measurement.serving_request_sample", event_types)
         self.assertIn("serving.measurement.serving_token_timeline", event_types)
+        self.assertIn("serving.measurement.serving_telemetry_coverage", event_types)
         self.assertIn("serving.native_telemetry", event_types)
         self.assertIn("serving.hardware_telemetry", event_types)
         self.assertIn("serving.request_receipt", event_types)
@@ -1827,9 +1838,11 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertIn("PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true", plan["strictProof"]["command"])
         self.assertIn("serving_request_samples", plan["strictProof"]["dashboardSurfaces"])
         self.assertIn("serving_token_timeline", plan["strictProof"]["dashboardSurfaces"])
+        self.assertIn("serving_telemetry_coverage", plan["strictProof"]["dashboardSurfaces"])
         self.assertIn("stream=true", plan["telemetryModel"]["streamingCollection"])
         self.assertIn("post-capture", plan["telemetryModel"]["kafkaBoundary"])
         self.assertIn("serving_token_timeline", plan["telemetryModel"]["requestSurfaces"])
+        self.assertIn("serving_telemetry_coverage", plan["telemetryModel"]["requestSurfaces"])
         self.assertIn("DCGM hardware counters", plan["telemetryModel"]["strictTelemetry"])
         self.assertIn("tokenizer-exact prompt token IDs", plan["telemetryModel"]["strictTelemetry"])
 
@@ -2274,6 +2287,10 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
                             "rowCount": 6,
                             "rows": [[campaign] for campaign in submitted_campaigns],
                         },
+                        "serving_telemetry_coverage": {
+                            "rowCount": 3,
+                            "rows": [[campaign] for campaign in submitted_campaigns],
+                        },
                     }
                 else:
                     self.send_response(404)
@@ -2345,6 +2362,7 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
                     "run_details": {"rowCount": 1, "rows": [["campaign-a"]]},
                     "serving_request_samples": {"rowCount": 1, "rows": [["campaign-a"]]},
                     "serving_token_timeline": {"rowCount": 1, "rows": [["campaign-a"]]},
+                    "serving_telemetry_coverage": {"rowCount": 1, "rows": [["campaign-a"]]},
                 }).encode("utf-8")
                 self.send_response(200)
                 self.send_header("content-type", "application/json")
@@ -2371,6 +2389,7 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
             "run_details": ["campaign-a"],
             "serving_request_samples": ["campaign-a"],
             "serving_token_timeline": ["campaign-a"],
+            "serving_telemetry_coverage": ["campaign-a"],
         })
         self.assertEqual(result["submittedCampaignRows"], {})
         self.assertEqual(result["runtimeFrameworks"], ["vLLM"])
@@ -2394,6 +2413,7 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
                     "run_details": {"rowCount": 2, "rows": [["campaign-a"], ["other"]]},
                     "serving_request_samples": {"rowCount": 2, "rows": [["campaign-a"], ["other"]]},
                     "serving_token_timeline": {"rowCount": 2, "rows": [["campaign-a"], ["other"]]},
+                    "serving_telemetry_coverage": {"rowCount": 2, "rows": [["campaign-a"], ["other"]]},
                 }).encode("utf-8")
                 self.send_response(200)
                 self.send_header("content-type", "application/json")
@@ -2420,6 +2440,7 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
             "run_details": [["campaign-a"]],
             "serving_request_samples": [["campaign-a"]],
             "serving_token_timeline": [["campaign-a"]],
+            "serving_telemetry_coverage": [["campaign-a"]],
         })
 
 
