@@ -818,7 +818,9 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertTrue(sample["tokenIdsAvailable"])
         self.assertTrue(sample["logprobsAvailable"])
         self.assertEqual(sample["tokenDetailCount"], 2)
+        self.assertEqual(sample["tokenIdSource"], "response-logprobs")
         self.assertEqual(sample["tokenTimeline"][0]["tokenId"], 101)
+        self.assertEqual(sample["tokenTimeline"][0]["tokenIdSource"], "response-logprobs")
         self.assertAlmostEqual(sample["tokenTimeline"][0]["tokenLogprob"], -0.1)
         self.assertIn("topLogprobsJson", sample["tokenTimeline"][0])
         self.assertAlmostEqual(sample["avgPowerWatts"], 120)
@@ -840,11 +842,86 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertEqual(aggregate["powerSource"], "dcgm")
         token_rows = [row for row in result["measurements"] if row.get("surface") == "serving_token_timeline"]
         self.assertEqual(token_rows[0]["tokenId"], 101)
+        self.assertEqual(token_rows[0]["tokenIdSource"], "response-logprobs")
         self.assertAlmostEqual(token_rows[1]["tokenLogprob"], -0.2)
         sample_rows = [row for row in result["measurements"] if row.get("surface") == "serving_request_sample"]
+        self.assertEqual(sample_rows[0]["tokenIdSource"], "response-logprobs")
         self.assertAlmostEqual(sample_rows[0]["gpuTemperatureC"], 61)
         self.assertAlmostEqual(sample_rows[0]["smClockMHz"], 1801)
         self.assertAlmostEqual(sample_rows[0]["fbUsedMiB"], 4097)
+
+    def test_serving_producer_resolves_missing_token_ids_with_configured_token_map(self):
+        def http_stream_json(url, headers, payload):
+            return {
+                "status": 200,
+                "events": [
+                    {
+                        "receivedMs": 10,
+                        "receivedAtUtc": "2026-07-09T12:00:00.010Z",
+                        "body": {
+                            "id": "chatcmpl-stream",
+                            "model": laptop_smoke_model(),
+                            "choices": [{
+                                "delta": {"content": "o"},
+                                "logprobs": {
+                                    "content": [{
+                                        "token": "o",
+                                        "logprob": -0.1,
+                                        "top_logprobs": [
+                                            {"token": "o", "logprob": -0.1},
+                                            {"token": "O", "logprob": -2.0},
+                                        ],
+                                    }],
+                                },
+                            }],
+                        },
+                    },
+                    {
+                        "receivedMs": 20,
+                        "receivedAtUtc": "2026-07-09T12:00:00.020Z",
+                        "body": {
+                            "id": "chatcmpl-stream",
+                            "model": laptop_smoke_model(),
+                            "choices": [{
+                                "delta": {"content": "k"},
+                                "finish_reason": "stop",
+                                "logprobs": {"content": [{"token": "k", "logprob": -0.2}]},
+                            }],
+                            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+                        },
+                    },
+                ],
+            }
+
+        result = run_serving_producer(
+            engine={
+                "engine": "vllm",
+                "baseUrl": "http://127.0.0.1:8000",
+                "tokenIdMap": {"o": 101, "O": 102, "k": 202},
+            },
+            request={
+                "model": laptop_smoke_model(),
+                "messages": [{"role": "user", "content": "Say ok."}],
+                "captureTokenDetails": True,
+                "topLogprobs": 2,
+            },
+            artifact_dir=self.tmp_dir,
+            workload={"hardware": "local token map engine", "operatingPoint": "laptop-smoke"},
+            pricing={"usdPerGpuHour": 1, "gpuCount": 1, "powerWattsPerGpu": 100},
+            http_stream_json=http_stream_json,
+        )
+
+        sample = result["samples"][0]
+        self.assertTrue(sample["tokenIdsAvailable"])
+        self.assertEqual(sample["tokenIdSource"], "configured-token-id-map")
+        self.assertEqual(sample["tokenTimeline"][0]["tokenId"], 101)
+        self.assertEqual(sample["tokenTimeline"][0]["tokenIdSource"], "configured-token-id-map")
+        top_logprobs = json.loads(sample["tokenTimeline"][0]["topLogprobsJson"])
+        self.assertEqual(top_logprobs[1]["tokenId"], 102)
+        self.assertEqual(top_logprobs[1]["tokenIdSource"], "configured-token-id-map")
+        token_rows = [row for row in result["measurements"] if row.get("surface") == "serving_token_timeline"]
+        self.assertEqual(token_rows[1]["tokenId"], 202)
+        self.assertEqual(token_rows[1]["tokenIdSource"], "configured-token-id-map")
 
     def test_serving_smoke_runs_all_configured_engines(self):
         calls = []
