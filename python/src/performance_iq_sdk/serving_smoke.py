@@ -833,6 +833,26 @@ def _validate_measurement_row(
             errors.append(f"{engine} measurement {key} must be a non-negative number.")
     if not _is_number(row.get("metricCompleteness")) or not 0 <= row.get("metricCompleteness") <= 1:
         errors.append(f"{engine} measurement metricCompleteness must be between 0 and 1.")
+    if (
+        row.get("nativeTelemetryRequired") is True
+        and isinstance(success_count, int)
+        and row.get("nativeTelemetryAvailableCount") != success_count
+    ):
+        errors.append(f"{engine} measurement nativeTelemetryAvailableCount must equal successCount when native telemetry is required.")
+    if row.get("hardwareTelemetryRequired") is True and isinstance(success_count, int):
+        if row.get("hardwareTelemetryAvailableCount") != success_count:
+            errors.append(f"{engine} measurement hardwareTelemetryAvailableCount must equal successCount when hardware telemetry is required.")
+        if row.get("dcgmGrounded") is not True:
+            errors.append(f"{engine} measurement dcgmGrounded must be true when hardware telemetry is required.")
+    if row.get("tokenDetailsRequired") is True and isinstance(success_count, int):
+        for key in ["tokenDetailsAvailableCount", "tokenIdsAvailableCount", "logprobsAvailableCount"]:
+            if row.get(key) != success_count:
+                errors.append(f"{engine} measurement {key} must equal successCount when token details are required.")
+    if (
+        (row.get("nativeTelemetryRequired") is True or row.get("hardwareTelemetryRequired") is True or row.get("tokenDetailsRequired") is True)
+        and row.get("metricCompleteness") != 1
+    ):
+        errors.append(f"{engine} measurement metricCompleteness must be 1 when required telemetry is missing-sensitive.")
 
     for key in ["operatingPoint", "latestCapturedAtUtc", "solRigor", "tags"]:
         if not isinstance(row.get(key), str) or not row.get(key):
@@ -1275,6 +1295,33 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                         success_count=success_count if isinstance(success_count, int) else None,
                         errors=errors,
                     )
+                    if first_measurement.get("hardwareTelemetryRequired") is True:
+                        for index, sample in enumerate(samples):
+                            if isinstance(sample, dict) and sample.get("hardwareTelemetryAvailable") is not True:
+                                errors.append(f"{engine} samples[{index}].hardwareTelemetryAvailable must be true when hardware telemetry is required.")
+                        for index, telemetry in enumerate(hardware_telemetry if isinstance(hardware_telemetry, list) else []):
+                            if isinstance(telemetry, dict) and telemetry.get("available") is not True:
+                                errors.append(f"{engine} hardwareTelemetry[{index}].available must be true when hardware telemetry is required.")
+                    if first_measurement.get("tokenDetailsRequired") is True:
+                        for index, sample in enumerate(samples):
+                            if not isinstance(sample, dict):
+                                continue
+                            for key in ["tokenDetailsAvailable", "tokenIdsAvailable", "logprobsAvailable"]:
+                                if sample.get(key) is not True:
+                                    errors.append(f"{engine} samples[{index}].{key} must be true when token details are required.")
+                            if sample.get("tokenDetailSource") != "response-logprobs":
+                                errors.append(f"{engine} samples[{index}].tokenDetailSource must be response-logprobs when token details are required.")
+                        for token_index, token_row in enumerate(token_timeline if isinstance(token_timeline, list) else []):
+                            if not isinstance(token_row, dict):
+                                continue
+                            if not isinstance(token_row.get("tokenIndex"), int):
+                                errors.append(f"{engine} tokenTimeline[{token_index}].tokenIndex must be an integer when token details are required.")
+                            if not isinstance(token_row.get("tokenId"), int):
+                                errors.append(f"{engine} tokenTimeline[{token_index}].tokenId must be an integer when token details are required.")
+                            if not _is_number(token_row.get("tokenLogprob")):
+                                errors.append(f"{engine} tokenTimeline[{token_index}].tokenLogprob must be numeric when token details are required.")
+                            if token_row.get("tokenDetailSource") != "response-logprobs":
+                                errors.append(f"{engine} tokenTimeline[{token_index}].tokenDetailSource must be response-logprobs when token details are required.")
                     if evidence:
                         evidence_measurement = evidence.get("measurement") if isinstance(evidence.get("measurement"), dict) else {}
                         for key in ["outputTpm", "totalTpm", "avgLatencyMs", "avgTtftMs", "avgTpotMs", "avgTtfotMs", "p95LatencyMs", "metricCompleteness"]:
