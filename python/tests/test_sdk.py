@@ -1184,6 +1184,27 @@ DCGM_FI_DEV_MEM_CLOCK{gpu="0"} 5000
 DCGM_FI_DEV_FB_USED{gpu="0"} 4096
 DCGM_FI_DEV_FB_FREE{gpu="0"} 8192
 DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 1000
+DCGM_FI_PROF_SM_ACTIVE{gpu="0"} 0.40
+DCGM_FI_PROF_DRAM_ACTIVE{gpu="0"} 0.20
+DCGM_FI_PROF_PIPE_TENSOR_ACTIVE{gpu="0"} 0.60
+DCGM_FI_PROF_PIPE_FP64_ACTIVE{gpu="0"} 0.01
+DCGM_FI_PROF_PIPE_FP32_ACTIVE{gpu="0"} 0.30
+DCGM_FI_PROF_PIPE_FP16_ACTIVE{gpu="0"} 0.50
+DCGM_FI_DEV_PCIE_TX_THROUGHPUT{gpu="0"} 2000
+DCGM_FI_DEV_PCIE_RX_THROUGHPUT{gpu="0"} 3000
+DCGM_FI_PROF_PCIE_TX_BYTES{gpu="0"} 10000
+DCGM_FI_PROF_PCIE_RX_BYTES{gpu="0"} 20000
+DCGM_FI_DEV_PCIE_REPLAY_COUNTER{gpu="0"} 3
+DCGM_FI_PROF_NVLINK_TX_BYTES{gpu="0"} 50000
+DCGM_FI_PROF_NVLINK_RX_BYTES{gpu="0"} 70000
+DCGM_FI_DEV_NVLINK_BANDWIDTH_TOTAL{gpu="0"} 900
+DCGM_FI_DEV_ENC_UTIL{gpu="0"} 7
+DCGM_FI_DEV_DEC_UTIL{gpu="0"} 9
+DCGM_FI_DEV_XID_ERRORS{gpu="0"} 0
+DCGM_FI_DEV_ECC_SBE_VOL_TOTAL{gpu="0"} 10
+DCGM_FI_DEV_ECC_DBE_VOL_TOTAL{gpu="0"} 0
+DCGM_FI_DEV_POWER_VIOLATION{gpu="0"} 100
+DCGM_FI_DEV_THERMAL_VIOLATION{gpu="0"} 200
 """,
             """
 DCGM_FI_DEV_POWER_USAGE{gpu="0"} 120
@@ -1195,6 +1216,27 @@ DCGM_FI_DEV_MEM_CLOCK{gpu="0"} 5001
 DCGM_FI_DEV_FB_USED{gpu="0"} 4097
 DCGM_FI_DEV_FB_FREE{gpu="0"} 8191
 DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
+DCGM_FI_PROF_SM_ACTIVE{gpu="0"} 0.50
+DCGM_FI_PROF_DRAM_ACTIVE{gpu="0"} 0.25
+DCGM_FI_PROF_PIPE_TENSOR_ACTIVE{gpu="0"} 0.70
+DCGM_FI_PROF_PIPE_FP64_ACTIVE{gpu="0"} 0.02
+DCGM_FI_PROF_PIPE_FP32_ACTIVE{gpu="0"} 0.35
+DCGM_FI_PROF_PIPE_FP16_ACTIVE{gpu="0"} 0.55
+DCGM_FI_DEV_PCIE_TX_THROUGHPUT{gpu="0"} 2100
+DCGM_FI_DEV_PCIE_RX_THROUGHPUT{gpu="0"} 3200
+DCGM_FI_PROF_PCIE_TX_BYTES{gpu="0"} 16000
+DCGM_FI_PROF_PCIE_RX_BYTES{gpu="0"} 28000
+DCGM_FI_DEV_PCIE_REPLAY_COUNTER{gpu="0"} 5
+DCGM_FI_PROF_NVLINK_TX_BYTES{gpu="0"} 62000
+DCGM_FI_PROF_NVLINK_RX_BYTES{gpu="0"} 83000
+DCGM_FI_DEV_NVLINK_BANDWIDTH_TOTAL{gpu="0"} 950
+DCGM_FI_DEV_ENC_UTIL{gpu="0"} 8
+DCGM_FI_DEV_DEC_UTIL{gpu="0"} 11
+DCGM_FI_DEV_XID_ERRORS{gpu="0"} 1
+DCGM_FI_DEV_ECC_SBE_VOL_TOTAL{gpu="0"} 12
+DCGM_FI_DEV_ECC_DBE_VOL_TOTAL{gpu="0"} 1
+DCGM_FI_DEV_POWER_VIOLATION{gpu="0"} 130
+DCGM_FI_DEV_THERMAL_VIOLATION{gpu="0"} 240
 """,
         ]
 
@@ -1285,12 +1327,36 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertAlmostEqual(sample["avgPowerWattsPerGpu"], 120)
         self.assertAlmostEqual(sample["gpuUtilizationPct"], 50)
         self.assertAlmostEqual(sample["memoryCopyUtilizationPct"], 20)
+        self.assertAlmostEqual(sample["smActivePct"], 50)
+        self.assertAlmostEqual(sample["dramActivePct"], 25)
+        self.assertAlmostEqual(sample["tensorActivePct"], 70)
+        self.assertAlmostEqual(sample["fp64ActivePct"], 2)
+        self.assertAlmostEqual(sample["fp32ActivePct"], 35)
+        self.assertAlmostEqual(sample["fp16ActivePct"], 55)
+        self.assertAlmostEqual(sample["pcieTxThroughputKiBps"], 2100)
+        self.assertAlmostEqual(sample["pcieRxThroughputKiBps"], 3200)
+        self.assertAlmostEqual(sample["pcieTxBytesDelta"], 6000)
+        self.assertAlmostEqual(sample["pcieRxBytesDelta"], 8000)
+        self.assertAlmostEqual(sample["pcieReplayDelta"], 2)
+        self.assertAlmostEqual(sample["nvlinkTxBytesDelta"], 12000)
+        self.assertAlmostEqual(sample["nvlinkRxBytesDelta"], 13000)
+        self.assertAlmostEqual(sample["nvlinkBandwidthTotalMBps"], 950)
+        self.assertAlmostEqual(sample["encoderUtilizationPct"], 8)
+        self.assertAlmostEqual(sample["decoderUtilizationPct"], 11)
         self.assertAlmostEqual(sample["gpuTemperatureC"], 61)
         self.assertAlmostEqual(sample["smClockMHz"], 1801)
         self.assertAlmostEqual(sample["memoryClockMHz"], 5001)
         self.assertAlmostEqual(sample["fbUsedMiB"], 4097)
         self.assertAlmostEqual(sample["fbFreeMiB"], 8191)
         self.assertAlmostEqual(sample["energyJoules"], 1.5)
+        self.assertAlmostEqual(sample["xidErrors"], 1)
+        self.assertAlmostEqual(sample["xidErrorsDelta"], 1)
+        self.assertAlmostEqual(sample["eccSbeVolatileTotalDelta"], 2)
+        self.assertAlmostEqual(sample["eccDbeVolatileTotalDelta"], 1)
+        self.assertAlmostEqual(sample["powerViolationTimeUsDelta"], 30)
+        self.assertAlmostEqual(sample["thermalViolationTimeUsDelta"], 40)
+        self.assertEqual(sample["hardwareRawMetricCount"], 30)
+        self.assertEqual(len(sample["hardwareRawMetricNamesSha256"]), 64)
         aggregate = result["measurements"][0]
         self.assertTrue(aggregate["dcgmGrounded"])
         self.assertEqual(aggregate["hardwareTelemetryAvailableCount"], 1)
@@ -1307,6 +1373,12 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertAlmostEqual(sample_rows[0]["gpuTemperatureC"], 61)
         self.assertAlmostEqual(sample_rows[0]["smClockMHz"], 1801)
         self.assertAlmostEqual(sample_rows[0]["fbUsedMiB"], 4097)
+        self.assertAlmostEqual(sample_rows[0]["tensorActivePct"], 70)
+        self.assertAlmostEqual(sample_rows[0]["pcieTxBytesDelta"], 6000)
+        self.assertAlmostEqual(sample_rows[0]["nvlinkRxBytesDelta"], 13000)
+        self.assertAlmostEqual(sample_rows[0]["eccDbeVolatileTotalDelta"], 1)
+        self.assertEqual(sample_rows[0]["hardwareRawMetricCount"], 30)
+        self.assertEqual(sample_rows[0]["hardwareRawMetricNamesSha256"], sample["hardwareRawMetricNamesSha256"])
 
     def test_serving_producer_resolves_missing_token_ids_with_configured_token_map(self):
         def http_stream_json(url, headers, payload):
@@ -2597,8 +2669,17 @@ else:
             diagnostics = runtime_diagnostics([], ["vllm (PIQ_VLLM_URL)"], model=laptop_smoke_model())
 
         blockers = " ".join(diagnostics["blockers"])
+        import_status = diagnostics["preflight"]["localRuntime"]["servingRuntimeImportStatus"]
         self.assertTrue(diagnostics["preflight"]["localRuntime"]["runtimeCandidates"]["vllm"]["usable"])
         self.assertTrue(diagnostics["preflight"]["localRuntime"]["runtimeCandidates"]["sglang"]["usable"])
+        self.assertTrue(import_status["vllm"]["usable"])
+        self.assertEqual(import_status["vllm"]["source"], "runtime-candidate")
+        self.assertFalse(import_status["vllm"]["globalModuleImportRequired"])
+        self.assertEqual(import_status["vllm"]["preferredPython"], "/tmp/vllm/bin/python")
+        self.assertTrue(import_status["sglang"]["usable"])
+        self.assertEqual(import_status["sglang"]["source"], "runtime-candidate")
+        self.assertFalse(import_status["sglang"]["globalModuleImportRequired"])
+        self.assertEqual(import_status["sglang"]["preferredPython"], "/tmp/sglang/bin/python")
         self.assertIn("Missing configured endpoint URL for vllm (PIQ_VLLM_URL).", blockers)
         self.assertNotIn("Python module 'vllm' is not importable", blockers)
         self.assertNotIn("Python module 'sglang' is not importable", blockers)

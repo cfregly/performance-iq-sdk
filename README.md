@@ -204,14 +204,17 @@ export PIQ_SERVING_KAFKA_TOPIC=performance-iq.serving.telemetry.v1
 The finest-grain dashboard surfaces are `serving_request_samples`,
 `serving_token_timeline`, and `serving_telemetry_coverage`.
 `serving_request_samples` is one row per request with latency, native/DCGM,
-token-summary, provenance, and artifact fields. `serving_token_timeline` is
-prompt and output token/chunk detail with `tokenPhase`, token IDs, logprobs,
-hashes, timing, and provenance. `serving_telemetry_coverage` is one row per
+token-summary, provenance, and artifact fields. The request row exposes core
+DCGM power/utilization/temperature/clock/memory/energy fields plus PCIe,
+NVLink, encoder/decoder, SM/DRAM/tensor/FP pipe activity, XID/ECC, violation
+time, and raw-metric-name provenance fields. `serving_token_timeline` is prompt
+and output token/chunk detail with `tokenPhase`, token IDs, logprobs, hashes,
+timing, and provenance. `serving_telemetry_coverage` is one row per
 engine/category showing whether producer-local telemetry categories were
 proven, missing, partial, or not configured. Restricted operator-full artifacts
 also retain the full before/after native metrics and DCGM Prometheus snapshots;
-dashboard rows expose bounded derived fields and artifact links rather than raw
-metric maps.
+dashboard rows expose bounded derived fields, raw metric counts/name hashes, and
+artifact links rather than raw metric maps.
 
 To exercise the full telemetry contract without real serving runtimes, use the
 deterministic fake strict path:

@@ -789,6 +789,53 @@ def real_engine_blockers(preflight: dict[str, Any], diagnostics: dict[str, Any])
     return blockers
 
 
+def serving_runtime_import_status(local_runtime: dict[str, Any]) -> dict[str, Any]:
+    runtime_candidates = local_runtime.get("runtimeCandidates", {})
+    if not isinstance(runtime_candidates, dict):
+        runtime_candidates = {}
+
+    def candidate_status(engine: str, module_key: str) -> dict[str, Any]:
+        module = local_runtime.get(module_key, {})
+        if not isinstance(module, dict):
+            module = {}
+        candidate = runtime_candidates.get(engine, {})
+        if not isinstance(candidate, dict):
+            candidate = {}
+        preferred = candidate.get("preferred", {})
+        if not isinstance(preferred, dict):
+            preferred = {}
+        candidate_usable = bool(candidate.get("usable"))
+        current_python_available = bool(module.get("available"))
+        return {
+            "usable": candidate_usable or current_python_available,
+            "source": "runtime-candidate" if candidate_usable else ("current-python" if current_python_available else "missing"),
+            "globalModuleImportRequired": False,
+            "currentPythonModuleAvailable": current_python_available,
+            "preferredPython": preferred.get("python") if candidate_usable else None,
+            "pythonEnv": candidate.get("pythonEnv"),
+            "note": (
+                "The smoke runner Python does not need to import this module when a dedicated runtime candidate is usable."
+            ),
+        }
+
+    tensorrt_command = local_runtime.get("tensorrtLlmServeCommand", {})
+    if not isinstance(tensorrt_command, dict):
+        tensorrt_command = {}
+    return {
+        "vllm": candidate_status("vllm", "vllmModule"),
+        "sglang": candidate_status("sglang", "sglangModule"),
+        "tensorrt-llm": {
+            "usable": bool(tensorrt_command.get("available")),
+            "source": "trtllm-serve" if tensorrt_command.get("available") else "missing",
+            "globalModuleImportRequired": False,
+            "currentPythonModuleAvailable": False,
+            "preferredPython": None,
+            "pythonEnv": ENGINE_RUNTIME_PYTHON_ENV["tensorrt-llm"],
+            "note": "TensorRT-LLM local proof requires trtllm-serve plus NVIDIA hardware; Python module import in the smoke runner is not the gate.",
+        },
+    }
+
+
 def runtime_diagnostics(engines: list[dict[str, Any]], missing_urls: list[str], model: str) -> dict[str, Any]:
     preflight = runtime_preflight(engines, missing_urls, model=model)
     diagnostics = {
@@ -1159,6 +1206,17 @@ def runtime_launch_plan(model: str, runtime_candidates: dict[str, Any] | None = 
 def runtime_preflight(engines: list[dict[str, Any]], missing_urls: list[str], model: str | None = None) -> dict[str, Any]:
     endpoint_results = [endpoint_probe(engine, model=model) for engine in engines]
     runtime_candidates = local_runtime_discovery()
+    local_runtime = {
+        "commandProbeTimeoutSeconds": command_probe_timeout_seconds(),
+        "vllmCommand": command_probe("vllm", "--version"),
+        "vllmModule": module_probe("vllm"),
+        "vllmExtension": vllm_extension_probe(),
+        "sglangModule": module_probe("sglang"),
+        "runtimeCandidates": runtime_candidates,
+        "tensorrtLlmServeCommand": command_probe("trtllm-serve", "--help"),
+        "nvidiaSmiCommand": command_probe("nvidia-smi"),
+    }
+    local_runtime["servingRuntimeImportStatus"] = serving_runtime_import_status(local_runtime)
     return {
         "host": {
             "system": platform.system(),
@@ -1166,16 +1224,7 @@ def runtime_preflight(engines: list[dict[str, Any]], missing_urls: list[str], mo
             "platform": platform.platform(),
             "python": sys.executable,
         },
-        "localRuntime": {
-            "commandProbeTimeoutSeconds": command_probe_timeout_seconds(),
-            "vllmCommand": command_probe("vllm", "--version"),
-            "vllmModule": module_probe("vllm"),
-            "vllmExtension": vllm_extension_probe(),
-            "sglangModule": module_probe("sglang"),
-            "runtimeCandidates": runtime_candidates,
-            "tensorrtLlmServeCommand": command_probe("trtllm-serve", "--help"),
-            "nvidiaSmiCommand": command_probe("nvidia-smi"),
-        },
+        "localRuntime": local_runtime,
         "storage": storage_probe(),
         "missingEngineUrls": missing_urls,
         "endpoints": endpoint_results,
