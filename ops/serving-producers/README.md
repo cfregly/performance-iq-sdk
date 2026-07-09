@@ -288,6 +288,9 @@ Read two fields in the verifier output separately:
   Dashboard and event-log coverage is evaluated per required engine campaign,
   so global row totals cannot prove vLLM, SGLang, or TensorRT-LLM coverage by
   themselves.
+  Native runtime telemetry, DCGM hardware telemetry, token timeline rows, and
+  operator-full raw metric snapshots are also matched by request ID so duplicate
+  rows for one request cannot prove another request.
 
 For a fail-closed product gate on an existing proof file, require full telemetry
 coverage explicitly:
