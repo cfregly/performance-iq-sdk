@@ -8,7 +8,7 @@ export const LATEST_PRODUCER_SOURCE_TABLES = [
   "platform_store.iceberg.intake_store.producer_runner_results",
 ]
 
-export type SourceType = "preserved-snapshot" | "fresh-run" | "other-measured-producer"
+export type SourceType = "fresh-run" | "other-measured-producer"
 export type RunClass = "measured" | "rehearsal" | "simulated"
 export type Confidentiality = "operator-full" | "customer-safe" | "public-safe" | "redacted"
 export type RunStatus = "accepted" | "rejected" | "processing" | "quote-ready"
@@ -312,7 +312,7 @@ export function validateManifest(manifest: ProducerRunManifest): ValidationResul
   if (manifest.runClass !== "measured") {
     warnings.push("manifest is accepted as non-live results only; live proof requires runClass=measured")
   }
-  if (!["preserved-snapshot", "fresh-run", "other-measured-producer"].includes(manifest.sourceType)) {
+  if (!["fresh-run", "other-measured-producer"].includes(manifest.sourceType)) {
     errors.push("sourceType is not supported")
   }
   if (manifest.confidentiality !== "operator-full") {
@@ -374,7 +374,7 @@ export function validateManifest(manifest: ProducerRunManifest): ValidationResul
     ok: errors.length === 0,
     liveProofReady,
     sourceType: manifest.sourceType,
-    snapshotBacked: manifest.sourceType === "preserved-snapshot",
+    snapshotBacked: false,
     freshRun: manifest.sourceType === "fresh-run",
     errors,
     warnings,
@@ -399,7 +399,7 @@ export async function validateRun(input: PerformanceIQRunInput): Promise<Validat
       ok: false,
       liveProofReady: false,
       sourceType: input.sourceType,
-      snapshotBacked: input.sourceType === "preserved-snapshot",
+      snapshotBacked: false,
       freshRun: input.sourceType === "fresh-run",
       errors,
       warnings: [],

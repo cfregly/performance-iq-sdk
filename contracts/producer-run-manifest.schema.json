@@ -28,7 +28,7 @@
       "enum": ["measured", "rehearsal", "simulated"]
     },
     "sourceType": {
-      "enum": ["preserved-snapshot", "fresh-run", "other-measured-producer"]
+      "enum": ["fresh-run", "other-measured-producer"]
     },
     "generatedAtUtc": {
       "type": "string",

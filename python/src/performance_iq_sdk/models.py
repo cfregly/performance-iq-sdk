@@ -13,7 +13,7 @@ LATEST_PRODUCER_SOURCE_TABLES = [
     "platform_store.iceberg.intake_store.producer_runner_results",
 ]
 
-SourceType = Literal["preserved-snapshot", "fresh-run", "other-measured-producer"]
+SourceType = Literal["fresh-run", "other-measured-producer"]
 RunClass = Literal["measured", "rehearsal", "simulated"]
 Confidentiality = Literal["operator-full", "customer-safe", "public-safe", "redacted"]
 
@@ -250,7 +250,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         errors.append("runClass must be measured, rehearsal, or simulated")
     if manifest.get("runClass") != "measured":
         warnings.append("manifest is accepted as non-live results only; live proof requires runClass=measured")
-    if manifest.get("sourceType") not in {"preserved-snapshot", "fresh-run", "other-measured-producer"}:
+    if manifest.get("sourceType") not in {"fresh-run", "other-measured-producer"}:
         errors.append("sourceType is not supported")
     if manifest.get("confidentiality") != "operator-full":
         errors.append("only operator-full submissions are enabled; customer-safe, public-safe, and redacted remain fail-closed")
@@ -335,7 +335,7 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "ok": not errors,
         "liveProofReady": live_proof_ready,
         "sourceType": source_kind,
-        "snapshotBacked": source_kind == "preserved-snapshot",
+        "snapshotBacked": False,
         "freshRun": source_kind == "fresh-run",
         "errors": errors,
         "warnings": warnings,
@@ -355,7 +355,7 @@ def validate_run(input: PerformanceIQRunInput) -> dict[str, Any]:
             "ok": False,
             "liveProofReady": False,
             "sourceType": input.get("sourceType"),
-            "snapshotBacked": input.get("sourceType") == "preserved-snapshot",
+            "snapshotBacked": False,
             "freshRun": input.get("sourceType") == "fresh-run",
             "errors": [*errors, str(exc)],
             "warnings": [],

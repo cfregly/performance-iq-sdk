@@ -141,6 +141,6 @@ Example endpoints:
 
 - SDKs never accept or forward caller-provided SQL, query names, or query lists.
 - `customer-safe`, `public-safe`, and `redacted` writes fail closed until server-side governance is implemented.
-- `preserved-snapshot`, `fresh-run`, and `other-measured-producer` are distinct source kinds and must not be collapsed into one proof label.
+- `fresh-run` and `other-measured-producer` are distinct source kinds and must not be collapsed into one proof label.
 - `fresh-run` is reserved for Runner-owned proof; most customer integrations should start with `other-measured-producer`.
 - Rehearsal packets can validate and submit, but cannot be promoted to live proof.
