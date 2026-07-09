@@ -188,8 +188,8 @@ export interface ServingTokenTimelineChunk {
   chunkIndex: number | null
   receivedAtUtc: string
   relativeMs: number
-  contentBytes: number
-  contentSha256: string
+  contentBytes: number | null
+  contentSha256: string | null
   isFirstOutput: boolean
   tokenIndex?: number | null
   tokenId?: number | null
@@ -198,6 +198,21 @@ export interface ServingTokenTimelineChunk {
   tokenTextSha256?: string | null
   topLogprobsJson?: string | null
   tokenDetailSource?: string
+}
+
+type PromptTokenSummary = Pick<
+  ServingRequestSample,
+  | "promptTokenIdsAvailable"
+  | "promptTokenDetailCount"
+  | "promptTokenIdSource"
+  | "promptTokenIdsSha256"
+  | "promptTokenizationSource"
+  | "promptTokenizerModel"
+>
+
+type PromptTokenCaptureResult = {
+  summary: PromptTokenSummary
+  details: Array<Record<string, unknown>>
 }
 
 export interface ServingProducerResult {
@@ -313,6 +328,9 @@ function metricCompleteness(row: Record<string, unknown>): number {
   }
   if (row.tokenDetailsRequired) {
     required.push(row.logprobsAvailableCount === row.successCount ? row.logprobsAvailableCount : null)
+  }
+  if (row.promptTokenDetailsRequired) {
+    required.push(row.promptTokenIdsAvailableCount === row.successCount ? row.promptTokenIdsAvailableCount : null)
   }
   return required.filter((value) => typeof value === "number" && finite(value)).length / required.length
 }
@@ -1050,6 +1068,101 @@ function tokenDetailSummary(details: Array<Record<string, any>>, requested: bool
   }
 }
 
+function coerceTokenIds(value: unknown): number[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (Number.isInteger(item)) return [Number(item)]
+    if (typeof item === "string" && /^\d+$/.test(item)) return [Number(item)]
+    return []
+  })
+}
+
+function promptTokenizerModel(config: ServingProducerConfig): string | null {
+  const engineExtras = config.engine as unknown as Record<string, unknown>
+  const model = config.request.tokenizerModel ?? engineExtras.tokenizerModel ?? engineExtras.tokenizer_model
+  return typeof model === "string" && model.trim() ? model.trim() : null
+}
+
+function promptTokenDetailsRequired(config: ServingProducerConfig): boolean {
+  const engineExtras = config.engine as unknown as Record<string, unknown>
+  const requestExtras = config.request as unknown as Record<string, unknown>
+  return Boolean(
+    (config.request.promptTokenIds?.length ?? 0) > 0
+      || (config.engine.promptTokenIds?.length ?? 0) > 0
+      || promptTokenizerModel(config)
+      || requestExtras.resolveTokenIdsWithTokenizer
+      || engineExtras.resolveTokenIdsWithTokenizer
+  )
+}
+
+function promptTokenCapture(config: ServingProducerConfig, payload: Record<string, unknown>): PromptTokenCaptureResult {
+  const explicitTokenIds = coerceTokenIds(
+    (config.request.promptTokenIds?.length ? config.request.promptTokenIds : undefined)
+      ?? (config.engine.promptTokenIds?.length ? config.engine.promptTokenIds : undefined),
+  )
+  const tokenizerModel = promptTokenizerModel(config)
+  const promptDigest = sha256Text(promptText(payload))
+  if (!explicitTokenIds.length) {
+    return {
+      summary: {
+        promptTokenIdsAvailable: false,
+        promptTokenDetailCount: 0,
+        promptTokenIdSource: null,
+        promptTokenIdsSha256: null,
+        promptTokenizationSource: promptTokenDetailsRequired(config) ? "js-tokenizer-not-configured" : "tokenizer-not-configured",
+        promptTokenizerModel: tokenizerModel,
+      },
+      details: [],
+    }
+  }
+  const source = "configured-prompt-token-ids"
+  return {
+    summary: {
+      promptTokenIdsAvailable: true,
+      promptTokenDetailCount: explicitTokenIds.length,
+      promptTokenIdSource: source,
+      promptTokenIdsSha256: sha256Json(explicitTokenIds),
+      promptTokenizationSource: source,
+      promptTokenizerModel: tokenizerModel,
+    },
+    details: explicitTokenIds.map((tokenId, tokenIndex) => ({
+      tokenPhase: "prompt",
+      tokenIndex,
+      tokenId,
+      tokenIdSource: source,
+      tokenDetailSource: source,
+      promptSha256: promptDigest,
+      tokenLogprob: null,
+      tokenTextSha256: null,
+      topLogprobsJson: null,
+    })),
+  }
+}
+
+function promptTokenTimeline(
+  requestId: string,
+  details: Array<Record<string, unknown>>,
+  receivedAtUtc: string,
+): ServingTokenTimelineChunk[] {
+  return details.map((detail, index) => ({
+    requestId,
+    tokenPhase: "prompt",
+    chunkIndex: null,
+    tokenIndex: numberFrom(detail.tokenIndex) ?? index,
+    receivedAtUtc,
+    relativeMs: 0,
+    contentBytes: null,
+    contentSha256: null,
+    isFirstOutput: false,
+    tokenId: numberFrom(detail.tokenId),
+    tokenIdSource: typeof detail.tokenIdSource === "string" ? detail.tokenIdSource : null,
+    tokenLogprob: null,
+    tokenTextSha256: typeof detail.tokenTextSha256 === "string" ? detail.tokenTextSha256 : null,
+    topLogprobsJson: null,
+    tokenDetailSource: typeof detail.tokenDetailSource === "string" ? detail.tokenDetailSource : "configured-prompt-token-ids",
+  }))
+}
+
 async function readSseEvents(response: Response, started: number): Promise<Array<Record<string, any>>> {
   const events: Array<Record<string, any>> = []
   const decoder = new TextDecoder()
@@ -1112,6 +1225,7 @@ async function sendChatCompletion(
   const requestId = requestTraceId(config.engine, runId, requestIndex)
   const stream = config.request.stream !== false
   const payload = requestPayload(config.request, stream)
+  const promptTokens = promptTokenCapture(config, payload)
   const nativeBefore = await readNativeMetrics(config)
   const hardwareBefore = await readHardwareMetrics(config)
   const tokenDetailsRequested = Boolean((payload as Record<string, unknown>).logprobs)
@@ -1178,16 +1292,16 @@ async function sendChatCompletion(
       const lastOutput = outputChunks[outputChunks.length - 1]
       const outputText = outputChunks.map((chunk) => chunk.content).join("")
       const tokenCountSource = Object.keys(usage).length ? "response-usage" : "client-estimate"
-      const promptTokens = Number(usage.prompt_tokens ?? usage.promptTokens ?? 0) || estimatedTokenCount(promptText(payload))
+      const inputTokens = Number(usage.prompt_tokens ?? usage.promptTokens ?? 0) || estimatedTokenCount(promptText(payload))
       const completionTokens = Number(usage.completion_tokens ?? usage.completionTokens ?? 0) || outputChunks.length
-      const totalTokens = Number(usage.total_tokens ?? usage.totalTokens ?? 0) || (promptTokens + completionTokens)
+      const totalTokens = Number(usage.total_tokens ?? usage.totalTokens ?? 0) || (inputTokens + completionTokens)
       const outputTokenCount = completionTokens || outputChunks.length
       const tpotMs = firstOutput && lastOutput
         ? (lastOutput.receivedMs - firstOutput.receivedMs) / Math.max(outputTokenCount - 1, 1)
         : null
       const gaps = outputChunks.slice(1).map((chunk, index) => chunk.receivedMs - outputChunks[index].receivedMs)
       const tokenSummary = tokenDetailSummary(rawTokenDetails, tokenDetailsRequested)
-      const tokenTimeline: ServingTokenTimelineChunk[] = []
+      const tokenTimeline: ServingTokenTimelineChunk[] = promptTokenTimeline(requestId, promptTokens.details, requestStartedAtUtc)
       let tokenIndex = 0
       for (const chunk of outputChunks) {
         const details = Array.isArray((chunk as Record<string, any>).tokenDetails)
@@ -1198,6 +1312,7 @@ async function sendChatCompletion(
             const topLogprobs = Array.isArray(detail.topLogprobs) ? detail.topLogprobs : []
             tokenTimeline.push({
               requestId,
+              tokenPhase: "output",
               chunkIndex: chunk.chunkIndex,
               tokenIndex,
               receivedAtUtc: chunk.receivedAtUtc,
@@ -1217,6 +1332,7 @@ async function sendChatCompletion(
         } else {
           tokenTimeline.push({
             requestId,
+            tokenPhase: "output",
             chunkIndex: chunk.chunkIndex,
             tokenIndex: null,
             receivedAtUtc: chunk.receivedAtUtc,
@@ -1255,7 +1371,7 @@ async function sendChatCompletion(
         lastOutputAtUtc: lastOutput?.receivedAtUtc ?? null,
         streamChunkCount: events.length,
         outputTokenCount,
-        promptTokens,
+        promptTokens: inputTokens,
         completionTokens,
         totalTokens,
         tokenCountSource,
@@ -1307,6 +1423,7 @@ async function sendChatCompletion(
           tokenDetailSource: string
           tokenIdSource: string | null
         }),
+        ...promptTokens.summary,
         queueWaitMs: numberFrom(telemetry.queueWaitMs),
         prefillMs: numberFrom(telemetry.prefillMs),
         decodeMs: numberFrom(telemetry.decodeMs),
@@ -1320,6 +1437,7 @@ async function sendChatCompletion(
           responseEvents: events,
           outputText,
           tokenDetails: rawTokenDetails,
+          promptTokenDetails: promptTokens.details,
           nativeTelemetry: telemetry,
           hardwareTelemetry: hwTelemetry,
           runtimeProvenance: provenance,
@@ -1341,8 +1459,11 @@ async function sendChatCompletion(
     const hwTelemetry = hardwareMetricsDelta(config, hardwareBefore, hardwareAfter)
     const rawTokenDetails = choiceTokenDetails(body, config)
     const tokenSummary = tokenDetailSummary(rawTokenDetails, tokenDetailsRequested)
-    const tokenTimeline = rawTokenDetails.map((detail, index): ServingTokenTimelineChunk => ({
+    const tokenTimeline: ServingTokenTimelineChunk[] = [
+      ...promptTokenTimeline(requestId, promptTokens.details, requestStartedAtUtc),
+      ...rawTokenDetails.map((detail, index): ServingTokenTimelineChunk => ({
       requestId,
+      tokenPhase: "output",
       chunkIndex: 0,
       tokenIndex: index,
       receivedAtUtc: requestCompletedAtUtc,
@@ -1356,7 +1477,8 @@ async function sendChatCompletion(
       tokenTextSha256: typeof detail.tokenSha256 === "string" ? detail.tokenSha256 : null,
       topLogprobsJson: Array.isArray(detail.topLogprobs) && detail.topLogprobs.length ? JSON.stringify(detail.topLogprobs) : null,
       tokenDetailSource: String(tokenSummary.tokenDetailSource),
-    }))
+    })),
+    ]
     const redacted = redactedRequest(payload)
     const provenance = runtimeProvenance(config, telemetry)
     return {
@@ -1428,6 +1550,7 @@ async function sendChatCompletion(
         tokenDetailSource: string
         tokenIdSource: string | null
       }),
+      ...promptTokens.summary,
       queueWaitMs: numberFrom(telemetry.queueWaitMs),
       prefillMs: numberFrom(telemetry.prefillMs),
       decodeMs: numberFrom(telemetry.decodeMs),
@@ -1441,6 +1564,7 @@ async function sendChatCompletion(
         responseBody: body,
         outputText,
         tokenDetails: rawTokenDetails,
+        promptTokenDetails: promptTokens.details,
         nativeTelemetry: telemetry,
         hardwareTelemetry: hwTelemetry,
         runtimeProvenance: provenance,
@@ -1486,6 +1610,12 @@ async function sendChatCompletion(
       tokenDetailCount: 0,
       tokenDetailSource: "error",
       tokenIdSource: null,
+      promptTokenIdsAvailable: false,
+      promptTokenDetailCount: 0,
+      promptTokenIdSource: null,
+      promptTokenIdsSha256: null,
+      promptTokenizationSource: "error",
+      promptTokenizerModel: promptTokenizerModel(config),
       error: error instanceof Error ? error.message : String(error),
     }
   }
@@ -1585,6 +1715,8 @@ function buildMeasurements(
     tokenIdsAvailableCount: successful.filter((sample) => sample.tokenIdsAvailable).length,
     logprobsAvailableCount: successful.filter((sample) => sample.logprobsAvailable).length,
     tokenDetailsRequired: Boolean(requestPayload(config.request, config.request.stream !== false).logprobs),
+    promptTokenIdsAvailableCount: successful.filter((sample) => sample.promptTokenIdsAvailable).length,
+    promptTokenDetailsRequired: promptTokenDetailsRequired(config),
     hardwareProvenance: config.workload?.hardware && config.workload.hardware !== "unknown" ? "configured" : "unknown",
     tags: [
       "serving-producer",
@@ -1664,6 +1796,12 @@ function buildMeasurements(
     tokenDetailCount: sample.tokenDetailCount,
     tokenDetailSource: sample.tokenDetailSource,
     tokenIdSource: sample.tokenIdSource,
+    promptTokenIdsAvailable: sample.promptTokenIdsAvailable,
+    promptTokenDetailCount: sample.promptTokenDetailCount,
+    promptTokenIdSource: sample.promptTokenIdSource,
+    promptTokenIdsSha256: sample.promptTokenIdsSha256,
+    promptTokenizationSource: sample.promptTokenizationSource,
+    promptTokenizerModel: sample.promptTokenizerModel,
     queueWaitMs: sample.queueWaitMs,
     prefillMs: sample.prefillMs,
     decodeMs: sample.decodeMs,
@@ -1685,6 +1823,7 @@ function buildMeasurements(
     runtimeFramework: engineLabel,
     runtimeEngine: config.engine.engine,
     requestId: sample.requestId,
+    tokenPhase: chunk.tokenPhase ?? "output",
     chunkIndex: chunk.chunkIndex,
     receivedAtUtc: chunk.receivedAtUtc,
     relativeMs: chunk.relativeMs,
@@ -1762,6 +1901,15 @@ async function writeSummaryArtifact(
       tokenDetailCount: sample.tokenDetailCount,
       tokenDetailSource: sample.tokenDetailSource,
       tokenIdSource: sample.tokenIdSource,
+    })),
+    promptTokenDetails: samples.map((sample) => ({
+      requestId: sample.requestId,
+      promptTokenIdsAvailable: sample.promptTokenIdsAvailable,
+      promptTokenDetailCount: sample.promptTokenDetailCount,
+      promptTokenIdSource: sample.promptTokenIdSource,
+      promptTokenIdsSha256: sample.promptTokenIdsSha256,
+      promptTokenizationSource: sample.promptTokenizationSource,
+      promptTokenizerModel: sample.promptTokenizerModel,
     })),
     measurements,
   }, null, 2) + "\n")

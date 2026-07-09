@@ -1757,6 +1757,7 @@ def _build_measurements(
             or request.get("tokenizerModel")
             or engine.get("tokenizerModel")
             or engine.get("tokenizer_model")
+            or engine.get("tokenizer")
             or request.get("resolveTokenIdsWithTokenizer")
             or engine.get("resolveTokenIdsWithTokenizer")
         ),
