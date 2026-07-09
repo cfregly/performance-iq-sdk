@@ -247,7 +247,8 @@ counters, dashboard rows, request receipts, and configured GPU cost. Use
 `strict-smoke` when another gateway/proxy writes receipts to
 `PIQ_SERVING_RECEIPT_LOG`; use `strict-recorded-smoke` to start managed
 in-process receipt proxies. These strict wrapper modes also run the saved-proof
-verifier after capture and fail unless `strictTelemetryGate.ok` is true.
+verifier after capture and fail unless both `strictTelemetryGate.ok` and
+`realRuntimeProofGate.ok` are true.
 
 For CI and local contract checks without real runtimes, use deterministic fake
 engines:
@@ -265,8 +266,9 @@ stream timing, token IDs/logprobs, prompt token IDs, native metrics, DCGM
 counters, operator-full artifacts, raw native/DCGM metric snapshots,
 Kafka-ready event rows, and a synthetic dashboard row snapshot. The command
 fails unless `verify-proof` is `ok` and `strictTelemetryGate.ok` is true.
-This is local contract proof only; it does not replace `strict-recorded-smoke`
-against real serving engines.
+This is local contract proof only. It intentionally fails
+`realRuntimeProofGate.ok` when that gate is required, so it does not replace
+`strict-recorded-smoke` against real serving engines.
 
 Verify the saved proof bundle offline:
 
@@ -275,7 +277,7 @@ bash ops/serving-producers/run-smoke.sh verify-proof \
   "$PIQ_ARTIFACT_DIR/serving-smoke-proof-<suffix>.json"
 ```
 
-Read two fields in the verifier output separately:
+Read these fields in the verifier output separately:
 
 - `ok` proves the proof bundle is internally valid: artifacts hash, manifests
   match, receipts line up, preflight passed, and dashboard rows are queryable.
@@ -287,6 +289,10 @@ Read two fields in the verifier output separately:
   IDs/logprobs, operator-full raw artifacts, request receipts, runtime
   provenance, dashboard fine-grain rows, raw native/DCGM metric snapshots, and
   Kafka-ready event rows.
+- `realRuntimeProofGate.ok` proves the proof-boundary fields do not declare a
+  fake, synthetic, fixture, or mock runtime proof. This is separate from
+  telemetry shape: fake CI proof can pass `strictTelemetryGate.ok` while failing
+  `realRuntimeProofGate.ok`.
   Dashboard and event-log coverage is evaluated per required engine campaign,
   so global row totals cannot prove vLLM, SGLang, or TensorRT-LLM coverage by
   themselves.
@@ -295,12 +301,13 @@ Read two fields in the verifier output separately:
   rows for one request cannot prove another request.
 
 For a fail-closed product gate on an existing proof file, require full telemetry
-coverage explicitly:
+coverage and real-runtime proof explicitly:
 
 ```bash
 bash ops/serving-producers/run-smoke.sh verify-proof \
   "$PIQ_ARTIFACT_DIR/serving-smoke-proof-<suffix>.json" \
-  --require-telemetry-coverage
+  --require-telemetry-coverage \
+  --require-real-runtime-proof
 ```
 
 To inspect every generated row, add a proof-row dump. The output includes

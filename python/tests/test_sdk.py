@@ -26,6 +26,7 @@ from performance_iq_sdk.serving_smoke import (
     parser as serving_smoke_parser,
     publish_serving_event_log,
     query_dashboard,
+    real_runtime_proof_gate,
     run_serving_smoke,
     runtime_diagnostics,
     runtime_launch_plan,
@@ -1817,6 +1818,29 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertIn("dcgmHardwareTelemetry", report["strictTelemetryGate"]["missingCategories"])
         self.assertIn("nativeRuntimeTelemetry", report["strictTelemetryGate"]["missingCategories"])
 
+    def test_serving_smoke_require_real_runtime_proof_accepts_configured_endpoint_boundary(self):
+        proof_path, _summary = self.write_full_serving_proof()
+        stdout = StringIO()
+        stderr = StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = serving_smoke_main([
+                "--verify-proof", proof_path,
+                "--require-real-runtime-proof",
+            ])
+
+        self.assertEqual(code, 0, stderr.getvalue() + stdout.getvalue())
+        report = json.loads(stdout.getvalue())
+        self.assertTrue(report["ok"], json.dumps(report, indent=2))
+        self.assertEqual(
+            report["proofBoundary"],
+            "configured serving endpoint capture with measured client telemetry and dashboard snapshot when queried",
+        )
+        self.assertTrue(report["realRuntimeProofGate"]["ok"], json.dumps(report["realRuntimeProofGate"], indent=2))
+        self.assertEqual(report["realRuntimeProofGate"]["classification"], "real-runtime-declared")
+        self.assertEqual(report["realRuntimeProofGate"]["blockingMarkers"], [])
+        self.assertTrue(real_runtime_proof_gate(report)["ok"])
+
     def test_serving_smoke_require_telemetry_coverage_rejects_unconfigured_token_details(self):
         proof_path = os.path.join(self.tmp_dir, "fake-full-without-token-detail-proof.json")
         event_log_path = os.path.join(self.tmp_dir, "fake-without-token-detail-events.jsonl")
@@ -1895,6 +1919,54 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertIn("outputTokenIdsLogprobs", report["strictTelemetryGate"]["notConfiguredCategories"])
         self.assertIn("promptTokenIds", report["strictTelemetryGate"]["missingCategories"])
         self.assertIn("outputTokenIdsLogprobs", report["strictTelemetryGate"]["missingCategories"])
+
+    def test_serving_smoke_require_real_runtime_proof_rejects_fake_full_telemetry(self):
+        proof_path = os.path.join(self.tmp_dir, "fake-full-real-runtime-rejected-proof.json")
+        event_log_path = os.path.join(self.tmp_dir, "fake-real-runtime-rejected-events.jsonl")
+        receipt_log_path = os.path.join(self.tmp_dir, "fake-real-runtime-rejected-receipts.jsonl")
+        stdout = StringIO()
+        stderr = StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = serving_smoke_main([
+                "--fake-full-telemetry",
+                "--model", laptop_smoke_model(),
+                "--repetitions", "1",
+                "--max-tokens", "8",
+                "--artifact-dir", self.tmp_dir,
+                "--run-suffix", "fake-real-runtime-rejected",
+                "--summary-out", proof_path,
+                "--event-log", event_log_path,
+                "--receipt-log", receipt_log_path,
+                "--require-real-runtime-proof",
+            ])
+
+        self.assertEqual(code, 1, stderr.getvalue() + stdout.getvalue())
+        report = json.loads(stdout.getvalue())
+        self.assertTrue(report["verification"]["ok"], json.dumps(report["verification"], indent=2))
+        self.assertTrue(report["strictTelemetryGate"]["ok"], json.dumps(report["strictTelemetryGate"], indent=2))
+        gate = report["realRuntimeProofGate"]
+        self.assertFalse(gate["ok"], json.dumps(gate, indent=2))
+        self.assertTrue(gate["syntheticProof"])
+        markers = {item["marker"] for item in gate["blockingMarkers"]}
+        self.assertIn("fake", markers)
+        self.assertIn("synthetic", markers)
+        self.assertTrue(os.path.exists(proof_path))
+
+        stdout = StringIO()
+        stderr = StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            verify_code = serving_smoke_main([
+                "--verify-proof", proof_path,
+                "--require-telemetry-coverage",
+                "--require-real-runtime-proof",
+            ])
+
+        self.assertEqual(verify_code, 1, stderr.getvalue() + stdout.getvalue())
+        verify_report = json.loads(stdout.getvalue())
+        self.assertTrue(verify_report["strictTelemetryGate"]["ok"], json.dumps(verify_report["strictTelemetryGate"], indent=2))
+        self.assertFalse(verify_report["realRuntimeProofGate"]["ok"], json.dumps(verify_report["realRuntimeProofGate"], indent=2))
+        self.assertEqual(verify_report["realRuntimeProofGate"]["classification"], "synthetic-or-fixture")
 
     def test_serving_smoke_fake_full_telemetry_proves_all_coverage(self):
         proof_path = os.path.join(self.tmp_dir, "fake-full-proof.json")
@@ -2396,7 +2468,9 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertIn("PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true", plan["strictProof"]["command"])
         self.assertIn("PIQ_SERVING_VERIFY_AFTER_CAPTURE=true", plan["strictProof"]["command"])
         self.assertIn("PIQ_SERVING_REQUIRE_TELEMETRY_COVERAGE=true", plan["strictProof"]["command"])
+        self.assertIn("PIQ_SERVING_REQUIRE_REAL_RUNTIME_PROOF=true", plan["strictProof"]["command"])
         self.assertIn("--require-telemetry-coverage", plan["strictProof"]["verify"])
+        self.assertIn("--require-real-runtime-proof", plan["strictProof"]["verify"])
         self.assertIn("serving_request_samples", plan["strictProof"]["dashboardSurfaces"])
         self.assertIn("serving_token_timeline", plan["strictProof"]["dashboardSurfaces"])
         self.assertIn("serving_telemetry_coverage", plan["strictProof"]["dashboardSurfaces"])

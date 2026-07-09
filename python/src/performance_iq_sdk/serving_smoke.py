@@ -136,6 +136,15 @@ STRICT_PRODUCT_TELEMETRY_CATEGORIES = (
     "runtimeProvenance",
     "kafkaEventLog",
 )
+REAL_RUNTIME_PROOF_BLOCKING_MARKERS = (
+    "fake",
+    "synthetic",
+    "fixture",
+    "mock",
+    "not real runtime",
+    "not real-runtime",
+    "contract proof only",
+)
 
 
 def default_native_metrics_url(engine: str, base_url: str) -> str:
@@ -938,12 +947,13 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
                 "PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true "
                 "PIQ_SERVING_VERIFY_AFTER_CAPTURE=true "
                 "PIQ_SERVING_REQUIRE_TELEMETRY_COVERAGE=true "
+                "PIQ_SERVING_REQUIRE_REAL_RUNTIME_PROOF=true "
                 "bash ops/serving-producers/run-smoke.sh strict-recorded-smoke"
             ),
             "verify": (
                 "bash ops/serving-producers/run-smoke.sh verify-proof "
                 "$PIQ_ARTIFACT_DIR/serving-smoke-proof-<suffix>.json "
-                "--require-telemetry-coverage"
+                "--require-telemetry-coverage --require-real-runtime-proof"
             ),
         },
         "engines": {
@@ -2486,6 +2496,7 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
         "warnings": warnings,
         "engineCount": len(submissions_by_engine),
         "requiredEngines": expected_engines,
+        "proofBoundary": proof.get("proofBoundary") if isinstance(proof.get("proofBoundary"), str) else None,
         "campaignIds": sorted(campaign_ids),
         "artifactHashes": artifact_hashes,
         "receiptLogPath": receipt_log_path or None,
@@ -2778,6 +2789,52 @@ def strict_telemetry_gate(verification: dict[str, Any]) -> dict[str, Any]:
         "strictRequiredCategories": list(STRICT_PRODUCT_TELEMETRY_CATEGORIES),
         "notConfiguredCategories": sorted(not_configured),
         "missingCategories": missing_categories,
+    }
+
+
+def real_runtime_proof_gate(verification: dict[str, Any]) -> dict[str, Any]:
+    dashboard = verification.get("dashboard") if isinstance(verification.get("dashboard"), dict) else {}
+    checked_fields: dict[str, str] = {}
+    for field, value in [
+        ("proofBoundary", verification.get("proofBoundary")),
+        ("dashboard.proofBoundary", dashboard.get("proofBoundary")),
+        ("dashboard.storeProvider", dashboard.get("storeProvider")),
+    ]:
+        if isinstance(value, str) and value.strip():
+            checked_fields[field] = value.strip()
+
+    blocking: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for field, value in checked_fields.items():
+        lower_value = value.lower()
+        for marker in REAL_RUNTIME_PROOF_BLOCKING_MARKERS:
+            if marker in lower_value and (field, marker) not in seen:
+                seen.add((field, marker))
+                blocking.append({
+                    "field": field,
+                    "marker": marker,
+                    "value": value,
+                })
+
+    if blocking:
+        classification = "synthetic-or-fixture"
+    elif checked_fields:
+        classification = "real-runtime-declared"
+    else:
+        classification = "real-runtime-unmarked"
+
+    return {
+        "ok": verification.get("ok") is True and not blocking,
+        "proofOk": verification.get("ok") is True,
+        "notSyntheticProof": not blocking,
+        "syntheticProof": bool(blocking),
+        "classification": classification,
+        "checkedFields": sorted(checked_fields),
+        "proofBoundary": checked_fields.get("proofBoundary"),
+        "dashboardProofBoundary": checked_fields.get("dashboard.proofBoundary"),
+        "dashboardStoreProvider": checked_fields.get("dashboard.storeProvider"),
+        "blockingMarkers": blocking,
+        "requirement": "Proof-boundary fields must not declare fake, synthetic, fixture, or mock runtime proof.",
     }
 
 
@@ -3080,6 +3137,7 @@ def run_serving_smoke(
         "model": model,
         "runSuffix": suffix,
         "artifactDir": artifact_dir,
+        "proofBoundary": "configured serving endpoint capture with measured client telemetry and dashboard snapshot when queried",
         "submissions": submissions,
     }
 
@@ -3338,6 +3396,7 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--receipt-proxy-host", default=_env("PIQ_SERVING_RECEIPT_PROXY_HOST", "127.0.0.1"))
     parser.add_argument("--verify-after-capture", action="store_true", default=_env("PIQ_SERVING_VERIFY_AFTER_CAPTURE", "false").lower() == "true", help="Run the saved-proof verifier after capture/submission completes.")
     parser.add_argument("--require-telemetry-coverage", action="store_true", default=_env("PIQ_SERVING_REQUIRE_TELEMETRY_COVERAGE", "false").lower() == "true", help="Fail verification unless strictTelemetryGate.ok is true for every full-product telemetry category.")
+    parser.add_argument("--require-real-runtime-proof", action="store_true", default=_env("PIQ_SERVING_REQUIRE_REAL_RUNTIME_PROOF", "false").lower() == "true", help="Fail verification when proof-boundary fields declare fake, synthetic, fixture, or mock runtime proof.")
     parser.add_argument("--no-submit", action="store_true", help="Capture artifacts and manifests without submitting to Performance IQ.")
     parser.add_argument("--query-dashboard", action="store_true", help="Query fixed dashboard surfaces after submission.")
     parser.add_argument("--allow-missing-engines", action="store_true", help="Run configured engines only instead of requiring all three URLs.")
@@ -3365,10 +3424,14 @@ def main(argv: list[str] | None = None) -> int:
             report["proofRowsPath"] = os.path.abspath(args.dump_proof_rows)
         if args.require_telemetry_coverage:
             report["strictTelemetryGate"] = strict_telemetry_gate(report)
+        if args.require_real_runtime_proof:
+            report["realRuntimeProofGate"] = real_runtime_proof_gate(report)
         print(json.dumps(report, indent=2))
         if not report["ok"]:
             return 1
         if args.require_telemetry_coverage and not report["strictTelemetryGate"]["ok"]:
+            return 1
+        if args.require_real_runtime_proof and not report["realRuntimeProofGate"]["ok"]:
             return 1
         return 0
     engines, missing = engine_configs_from_env(args)
@@ -3386,7 +3449,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         verification = report.get("verification") if isinstance(report.get("verification"), dict) else {}
         report["strictTelemetryGate"] = strict_telemetry_gate(verification)
+        report["realRuntimeProofGate"] = real_runtime_proof_gate(verification)
         print(json.dumps(report, indent=2))
+        if args.require_real_runtime_proof and not report["realRuntimeProofGate"]["ok"]:
+            return 1
         return 0 if report["strictTelemetryGate"]["ok"] else 1
     if args.preflight_only:
         preflight = runtime_preflight(
@@ -3486,14 +3552,17 @@ def main(argv: list[str] | None = None) -> int:
                 client_id=args.kafka_client_id,
             )
             proof_path = write_proof_summary(summary, args.artifact_dir, summary_out=args.summary_out)
-        if args.verify_after_capture or args.require_telemetry_coverage:
+        if args.verify_after_capture or args.require_telemetry_coverage or args.require_real_runtime_proof:
             verification = verify_proof_summary(proof_path, require_all_engines=not args.allow_missing_engines)
             summary["verification"] = verification
             summary["strictTelemetryGate"] = strict_telemetry_gate(verification)
+            summary["realRuntimeProofGate"] = real_runtime_proof_gate(verification)
         print(json.dumps(summary, indent=2))
         if args.verify_after_capture and not summary.get("verification", {}).get("ok"):
             return 1
         if args.require_telemetry_coverage and not summary.get("strictTelemetryGate", {}).get("ok"):
+            return 1
+        if args.require_real_runtime_proof and not summary.get("realRuntimeProofGate", {}).get("ok"):
             return 1
         failures = [
             item for item in summary["submissions"]

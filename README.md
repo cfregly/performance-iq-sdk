@@ -228,8 +228,9 @@ endpoints, routes them through receipt proxies, captures stream timings,
 token IDs/logprobs, native metrics, DCGM counters, prompt token IDs, raw
 operator artifacts, raw native/DCGM metric snapshots, Kafka-ready events, and
 proof rows, then verifies `strictTelemetryGate.ok`. It is CI/local
-contract proof only; real product proof still requires `strict-recorded-smoke`
-against actual serving engines.
+contract proof only and fails `realRuntimeProofGate.ok` when that gate is
+required; real product proof still requires `strict-recorded-smoke` against
+actual serving engines.
 
 ### Three-engine smoke
 
@@ -312,6 +313,10 @@ Add `--require-telemetry-coverage` to make `verify-proof` exit nonzero unless
 `strictTelemetryGate.ok` is true. That gate requires every full-product category
 to be configured and proven for every required engine, including prompt token
 IDs and output token IDs/logprobs.
+Add `--require-real-runtime-proof` for product proof. That separate gate fails
+when proof-boundary fields declare fake, synthetic, fixture, or mock runtime
+evidence. Fake strict smoke can pass `strictTelemetryGate.ok` while failing
+`realRuntimeProofGate.ok`; real product proof should require both flags.
 It fails fast unless all three URLs are configured and the configured endpoints
 pass the model-aware `/v1/models` preflight. Use `--allow-missing-engines` only
 for partial local debugging and `--skip-preflight` only when debugging a

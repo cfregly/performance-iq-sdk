@@ -101,6 +101,7 @@ strict_common=(
 strict_proof_gate=(
   --verify-after-capture
   --require-telemetry-coverage
+  --require-real-runtime-proof
 )
 
 allow_partial_defaults=false
