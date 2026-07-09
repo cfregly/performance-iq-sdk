@@ -575,7 +575,11 @@ class PerformanceIQSdkTest(unittest.TestCase):
             }
 
         result = run_serving_producer(
-            engine={"engine": "vllm", "baseUrl": "http://127.0.0.1:8000"},
+            engine={
+                "engine": "vllm",
+                "baseUrl": "http://127.0.0.1:8000",
+                "frameworkVersion": "unit-test-runtime",
+            },
             request={
                 "model": laptop_smoke_model(),
                 "messages": [{"role": "user", "content": "Say ok."}],
@@ -711,6 +715,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
                 "baseUrl": "http://127.0.0.1:8000",
                 "tokenizer": tokenizer,
                 "tokenizerModel": "unit-tokenizer",
+                "frameworkVersion": "unit-test-runtime",
             },
             request={
                 "model": laptop_smoke_model(),
@@ -891,8 +896,8 @@ vllm:request_prefill_kv_computed_tokens_sum{model_name="qwen"} 16
             """
 sglang:time_to_first_token_seconds_count{model_name="qwen"} 10
 sglang:time_to_first_token_seconds_sum{model_name="qwen"} 1.0
-sglang:time_per_output_token_seconds_count{model_name="qwen"} 10
-sglang:time_per_output_token_seconds_sum{model_name="qwen"} 0.2
+sglang:inter_token_latency_seconds_count 10
+sglang:inter_token_latency_seconds_sum 0.2
 sglang:e2e_request_latency_seconds_count{model_name="qwen"} 10
 sglang:e2e_request_latency_seconds_sum{model_name="qwen"} 4.0
 sglang:request_queue_time_seconds_count{model_name="qwen"} 10
@@ -905,12 +910,14 @@ sglang:num_running_reqs{model_name="qwen"} 0
 sglang:num_queue_reqs{model_name="qwen"} 0
 sglang:token_usage{model_name="qwen"} 0.4
 sglang:cache_hit_rate{model_name="qwen"} 0.25
+sglang:cached_tokens_total 0
+sglang:uncached_prompt_tokens_histogram_sum 40
 """,
             """
 sglang:time_to_first_token_seconds_count{model_name="qwen"} 11
 sglang:time_to_first_token_seconds_sum{model_name="qwen"} 1.15
-sglang:time_per_output_token_seconds_count{model_name="qwen"} 11
-sglang:time_per_output_token_seconds_sum{model_name="qwen"} 0.23
+sglang:inter_token_latency_seconds_count 11
+sglang:inter_token_latency_seconds_sum 0.23
 sglang:e2e_request_latency_seconds_count{model_name="qwen"} 11
 sglang:e2e_request_latency_seconds_sum{model_name="qwen"} 4.5
 sglang:request_queue_time_seconds_count{model_name="qwen"} 11
@@ -923,6 +930,8 @@ sglang:num_running_reqs{model_name="qwen"} 0
 sglang:num_queue_reqs{model_name="qwen"} 0
 sglang:token_usage{model_name="qwen"} 0.5
 sglang:cache_hit_rate{model_name="qwen"} 0.3
+sglang:cached_tokens_total 33
+sglang:uncached_prompt_tokens_histogram_sum 41
 """,
         ]
 
@@ -983,6 +992,8 @@ sglang:cache_hit_rate{model_name="qwen"} 0.3
         self.assertEqual(sample["waitingRequests"], 0)
         self.assertAlmostEqual(sample["kvCacheUsagePct"], 0.5)
         self.assertAlmostEqual(sample["cacheHitRate"], 0.3)
+        self.assertEqual(sample["promptTokensCachedDelta"], 33)
+        self.assertEqual(sample["promptTokensComputedDelta"], 1)
 
     def test_serving_producer_derives_tensorrt_prometheus_and_json_metrics(self):
         prometheus_snapshots = [
@@ -1414,11 +1425,14 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertEqual(coverage["categorySummary"]["requestReceipts"]["status"], "proven")
         self.assertEqual(coverage["categorySummary"]["dashboardFineGrainRows"]["status"], "proven")
         self.assertEqual(coverage["categorySummary"]["operatorFullArtifacts"]["status"], "proven")
-        self.assertEqual(coverage["categorySummary"]["rawMetricSnapshots"]["status"], "missing")
+        self.assertEqual(coverage["categorySummary"]["rawMetricSnapshots"]["status"], "proven")
+        self.assertEqual(coverage["categorySummary"]["rawMetricSnapshots"]["expectedEngines"], 0)
         self.assertEqual(coverage["categorySummary"]["nativeRuntimeTelemetry"]["status"], "missing")
         self.assertEqual(coverage["categorySummary"]["dcgmHardwareTelemetry"]["status"], "missing")
-        self.assertEqual(coverage["categorySummary"]["promptTokenIds"]["status"], "missing")
-        self.assertEqual(coverage["categorySummary"]["outputTokenIdsLogprobs"]["status"], "missing")
+        self.assertEqual(coverage["categorySummary"]["promptTokenIds"]["status"], "proven")
+        self.assertEqual(coverage["categorySummary"]["promptTokenIds"]["expectedEngines"], 0)
+        self.assertEqual(coverage["categorySummary"]["outputTokenIdsLogprobs"]["status"], "proven")
+        self.assertEqual(coverage["categorySummary"]["outputTokenIdsLogprobs"]["expectedEngines"], 0)
         self.assertEqual(coverage["engines"]["vllm"]["clientStreamTiming"]["status"], "proven")
         with open(proof_path, encoding="utf-8") as handle:
             proof = json.load(handle)

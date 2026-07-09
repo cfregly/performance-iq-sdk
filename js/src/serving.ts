@@ -334,6 +334,11 @@ function metricCompleteness(row: Record<string, unknown>): number {
     row.requestCount === row.successCount ? row.requestCount : null,
     row.streamingRequestCount === row.successCount ? row.streamingRequestCount : null,
     row.hardwareProvenance === "configured" ? 1 : null,
+    typeof row.successCount === "number" &&
+    row.successCount > 0 &&
+    row.runtimeProvenanceAvailableCount === row.successCount
+      ? row.runtimeProvenanceAvailableCount
+      : null,
   ]
   if (row.nativeTelemetryRequired) {
     required.push(row.nativeTelemetryAvailableCount === row.successCount ? row.nativeTelemetryAvailableCount : null)
@@ -1792,6 +1797,7 @@ function buildMeasurements(
     tokenDetailsRequired: Boolean(requestPayload(config.request, config.request.stream !== false).logprobs),
     promptTokenIdsAvailableCount: successful.filter((sample) => sample.promptTokenIdsAvailable).length,
     promptTokenDetailsRequired: promptTokenDetailsRequired(config),
+    runtimeProvenanceAvailableCount: successful.filter(hasRuntimeProvenance).length,
     hardwareProvenance: config.workload?.hardware && config.workload.hardware !== "unknown" ? "configured" : "unknown",
     tags: [
       "serving-producer",
@@ -1828,6 +1834,9 @@ function buildMeasurements(
     tokenCountSource: sample.tokenCountSource,
     outputTokenCount: sample.outputTokenCount,
     streamChunkCount: sample.streamChunkCount,
+    firstChunkAtUtc: sample.firstChunkAtUtc,
+    firstOutputAtUtc: sample.firstOutputAtUtc,
+    lastOutputAtUtc: sample.lastOutputAtUtc,
     finishReason: sample.finishReason,
     ttftSource: sample.ttftSource,
     promptSha256: sample.promptSha256,

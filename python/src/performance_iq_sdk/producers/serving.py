@@ -581,6 +581,8 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         "trtllm:inter_token_latency_seconds",
         "trtllm_inter_token_latency_seconds",
     ])
+    if native_tpot_ms is None:
+        native_tpot_ms = native_inter_token_ms
     native_e2e_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
         "vllm:e2e_request_latency_seconds",
         "sglang:e2e_request_latency_seconds",
@@ -687,6 +689,10 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
             "vllm:prompt_tokens_cached_total",
             "sglang:prompt_tokens_cached_total",
             "sglang_prompt_tokens_cached_total",
+            "sglang:cached_tokens_total",
+            "sglang_cached_tokens_total",
+            "sglang:realtime_tokens_total{mode=prefill_cache}",
+            "sglang_realtime_tokens_total{mode=prefill_cache}",
             "trtllm:prompt_tokens_cached_total",
             "trtllm_prompt_tokens_cached_total",
         ]),
@@ -694,6 +700,12 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
             "vllm:request_prefill_kv_computed_tokens_sum",
             "sglang:request_prefill_kv_computed_tokens_sum",
             "sglang_request_prefill_kv_computed_tokens_sum",
+            "sglang:uncached_prompt_tokens_total",
+            "sglang_uncached_prompt_tokens_total",
+            "sglang:uncached_prompt_tokens_histogram_sum",
+            "sglang_uncached_prompt_tokens_histogram_sum",
+            "sglang:realtime_tokens_total{mode=prefill_compute}",
+            "sglang_realtime_tokens_total{mode=prefill_compute}",
             "trtllm:request_prefill_kv_computed_tokens_sum",
             "trtllm_request_prefill_kv_computed_tokens_sum",
         ]),
@@ -1804,6 +1816,7 @@ def _build_measurements(
             or request.get("resolveTokenIdsWithTokenizer")
             or engine.get("resolveTokenIdsWithTokenizer")
         ),
+        "runtimeProvenanceAvailableCount": sum(1 for sample in successful if _has_runtime_provenance(sample)),
         "hardwareProvenance": "configured" if workload.get("hardware") and workload.get("hardware") != "unknown" else "unknown",
         "tags": ",".join(["serving-producer", engine_id, engine_label, request["model"]]),
     }
@@ -1832,6 +1845,9 @@ def _build_measurements(
         row["requestCount"] if row["requestCount"] == row["successCount"] else None,
         row["streamingRequestCount"] if row["streamingRequestCount"] == row["successCount"] else None,
         1 if row["hardwareProvenance"] == "configured" else None,
+        row["runtimeProvenanceAvailableCount"]
+        if row["successCount"] > 0 and row["runtimeProvenanceAvailableCount"] == row["successCount"]
+        else None,
     ]
     if row["nativeTelemetryRequired"]:
         required.append(
@@ -1907,6 +1923,9 @@ def _build_measurements(
             "outputTokenCount": sample.get("outputTokenCount"),
             "tokenCountSource": sample.get("tokenCountSource"),
             "streamChunkCount": sample.get("streamChunkCount"),
+            "firstChunkAtUtc": sample.get("firstChunkAtUtc"),
+            "firstOutputAtUtc": sample.get("firstOutputAtUtc"),
+            "lastOutputAtUtc": sample.get("lastOutputAtUtc"),
             "finishReason": sample.get("finishReason"),
             "ttftSource": sample.get("ttftSource"),
             "promptSha256": sample.get("promptSha256"),
