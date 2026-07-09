@@ -878,6 +878,167 @@ def _token_id_from_tokenizer(tokenizer: Any, token: str) -> int | None:
     return None
 
 
+def _token_text_from_id(tokenizer: Any, token_id: int) -> str | None:
+    try:
+        if hasattr(tokenizer, "convert_ids_to_tokens"):
+            value = tokenizer.convert_ids_to_tokens(token_id)
+            if isinstance(value, str):
+                return value
+    except Exception:
+        pass
+    try:
+        if hasattr(tokenizer, "decode"):
+            value = tokenizer.decode([token_id], skip_special_tokens=False)
+            if isinstance(value, str):
+                return value
+    except Exception:
+        pass
+    return None
+
+
+def _coerce_token_ids(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    token_ids: list[int] = []
+    for item in value:
+        if isinstance(item, int) and not isinstance(item, bool):
+            token_ids.append(item)
+        elif isinstance(item, str) and item.isdigit():
+            token_ids.append(int(item))
+    return token_ids
+
+
+def _prompt_tokenizer(engine: dict[str, Any], request: dict[str, Any]) -> tuple[Any | None, str | None, str | None]:
+    tokenizer = engine.get("tokenizer")
+    if tokenizer is not None:
+        model = engine.get("tokenizerModel") or engine.get("tokenizer_model") or request.get("tokenizerModel") or request.get("model")
+        return tokenizer, "configured-tokenizer", str(model) if model else None
+    tokenizer_model = engine.get("tokenizerModel") or engine.get("tokenizer_model") or request.get("tokenizerModel")
+    if not tokenizer_model and (engine.get("resolveTokenIdsWithTokenizer") or request.get("resolveTokenIdsWithTokenizer")):
+        tokenizer_model = request.get("model")
+    if isinstance(tokenizer_model, str) and tokenizer_model:
+        tokenizer = _load_hf_tokenizer(tokenizer_model, engine)
+        if tokenizer is not None:
+            return tokenizer, "hf-tokenizer", tokenizer_model
+    return None, None, None
+
+
+def _encode_prompt_token_ids(tokenizer: Any, payload: dict[str, Any]) -> tuple[list[int], str]:
+    messages = payload.get("messages")
+    if isinstance(messages, list) and hasattr(tokenizer, "apply_chat_template"):
+        for kwargs in (
+            {"tokenize": True, "add_generation_prompt": True},
+            {"tokenize": True},
+        ):
+            try:
+                encoded = tokenizer.apply_chat_template(messages, **kwargs)
+                token_ids = _coerce_token_ids(encoded)
+                if token_ids:
+                    return token_ids, "chat-template"
+            except Exception:
+                pass
+    prompt_text = _prompt_text(payload)
+    if not prompt_text:
+        return [], "prompt-text-empty"
+    try:
+        encoded = tokenizer.encode(prompt_text, add_special_tokens=False)
+        token_ids = _coerce_token_ids(encoded)
+        if token_ids:
+            return token_ids, "prompt-text"
+    except Exception:
+        pass
+    try:
+        encoded = tokenizer(prompt_text, add_special_tokens=False)
+        input_ids = encoded.get("input_ids") if isinstance(encoded, dict) else None
+        token_ids = _coerce_token_ids(input_ids)
+        if token_ids:
+            return token_ids, "prompt-text"
+    except Exception:
+        pass
+    return [], "tokenizer-empty"
+
+
+def _prompt_token_details(engine: dict[str, Any], request: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    explicit_token_ids = _coerce_token_ids(request.get("promptTokenIds") or engine.get("promptTokenIds"))
+    tokenizer = None
+    tokenizer_model = request.get("tokenizerModel") or engine.get("tokenizerModel") or engine.get("tokenizer_model")
+    if explicit_token_ids:
+        token_ids = explicit_token_ids
+        source = "configured-prompt-token-ids"
+        tokenization_source = "configured-prompt-token-ids"
+    else:
+        tokenizer, source, tokenizer_model = _prompt_tokenizer(engine, request)
+        if tokenizer is None or source is None:
+            return {
+                "summary": {
+                    "promptTokenIdsAvailable": False,
+                    "promptTokenDetailCount": 0,
+                    "promptTokenIdSource": None,
+                    "promptTokenIdsSha256": None,
+                    "promptTokenizationSource": "tokenizer-not-configured",
+                    "promptTokenizerModel": tokenizer_model,
+                },
+                "details": [],
+            }
+        token_ids, tokenization_mode = _encode_prompt_token_ids(tokenizer, payload)
+        tokenization_source = f"{source}-{tokenization_mode}"
+    details = []
+    for index, token_id in enumerate(token_ids):
+        token_text = _token_text_from_id(tokenizer, token_id) if tokenizer is not None else None
+        details.append({
+            "tokenPhase": "prompt",
+            "tokenIndex": index,
+            "tokenId": token_id,
+            "tokenIdSource": source,
+            "tokenText": token_text,
+            "tokenTextSha256": _sha256_text(token_text) if token_text else None,
+            "tokenBytes": len(token_text.encode("utf-8")) if token_text else None,
+            "tokenLogprob": None,
+            "tokenDetailSource": tokenization_source,
+        })
+    return {
+        "summary": {
+            "promptTokenIdsAvailable": bool(details),
+            "promptTokenDetailCount": len(details),
+            "promptTokenIdSource": source if details else None,
+            "promptTokenIdsSha256": _sha256_json(token_ids) if details else None,
+            "promptTokenizationSource": tokenization_source,
+            "promptTokenizerModel": tokenizer_model,
+        },
+        "details": details,
+    }
+
+
+def _redacted_prompt_token_details(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {key: value for key, value in detail.items() if key != "tokenText"}
+        for detail in details
+    ]
+
+
+def _prompt_token_timeline(request_id: str, details: list[dict[str, Any]], received_at_utc: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "requestId": request_id,
+            "tokenPhase": "prompt",
+            "chunkIndex": None,
+            "tokenIndex": detail.get("tokenIndex"),
+            "receivedAtUtc": received_at_utc,
+            "relativeMs": 0,
+            "contentBytes": detail.get("tokenBytes"),
+            "contentSha256": detail.get("tokenTextSha256"),
+            "isFirstOutput": False,
+            "tokenId": detail.get("tokenId"),
+            "tokenIdSource": detail.get("tokenIdSource"),
+            "tokenLogprob": None,
+            "tokenTextSha256": detail.get("tokenTextSha256"),
+            "topLogprobsJson": None,
+            "tokenDetailSource": detail.get("tokenDetailSource"),
+        }
+        for detail in details
+    ]
+
+
 def _sanitize_top_logprobs(value: Any, engine: dict[str, Any], request: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -1000,6 +1161,9 @@ def _send_streaming_chat_completion(
     if engine.get("apiKey"):
         headers["authorization"] = f"Bearer {engine['apiKey']}"
     payload = _request_payload(request, stream=True)
+    prompt_tokens_capture = _prompt_token_details(engine, request, payload)
+    prompt_token_summary = prompt_tokens_capture["summary"]
+    prompt_token_details = prompt_tokens_capture["details"]
     native_before = _read_native_metrics(engine, http_get_text)
     hardware_before = _read_hardware_metrics(engine, http_get_text)
     token_details_requested = bool(payload.get("logprobs"))
@@ -1080,7 +1244,7 @@ def _send_streaming_chat_completion(
             for detail in (chunk.get("tokenDetails") or [])
         ]
         token_summary = _token_detail_summary(raw_token_details, token_details_requested)
-        token_timeline = []
+        token_timeline = _prompt_token_timeline(request_id, prompt_token_details, request_started_at_utc)
         token_index = 0
         for chunk in output_chunks:
             chunk_details = chunk.get("tokenDetails") or []
@@ -1089,6 +1253,7 @@ def _send_streaming_chat_completion(
                     top_logprobs = detail.get("topLogprobs") if isinstance(detail.get("topLogprobs"), list) else []
                     token_timeline.append({
                         "requestId": request_id,
+                        "tokenPhase": "output",
                         "chunkIndex": chunk["chunkIndex"],
                         "tokenIndex": token_index,
                         "receivedAtUtc": chunk["receivedAtUtc"],
@@ -1107,6 +1272,7 @@ def _send_streaming_chat_completion(
             else:
                 token_timeline.append({
                     "requestId": request_id,
+                    "tokenPhase": "output",
                     "chunkIndex": chunk["chunkIndex"],
                     "tokenIndex": None,
                     "receivedAtUtc": chunk["receivedAtUtc"],
@@ -1189,6 +1355,7 @@ def _send_streaming_chat_completion(
             "prefillMs": native_telemetry.get("prefillMs"),
             "decodeMs": native_telemetry.get("decodeMs"),
             **runtime_provenance,
+            **prompt_token_summary,
             **token_summary,
             "tokenTimeline": token_timeline,
             "error": None if 200 <= status < 300 else json.dumps(last_body),
@@ -1198,6 +1365,7 @@ def _send_streaming_chat_completion(
                 "requestPayload": payload,
                 "responseEvents": events,
                 "outputText": output_text,
+                "promptTokenDetails": prompt_token_details,
                 "tokenDetails": raw_token_details,
                 "nativeTelemetry": native_telemetry,
                 "hardwareTelemetry": hardware_telemetry,
@@ -1243,6 +1411,12 @@ def _send_streaming_chat_completion(
             "tokenDetailCount": 0,
             "tokenDetailSource": "error",
             "tokenIdSource": None,
+            "promptTokenIdsAvailable": False,
+            "promptTokenDetailCount": 0,
+            "promptTokenIdSource": None,
+            "promptTokenIdsSha256": None,
+            "promptTokenizationSource": "error",
+            "promptTokenizerModel": None,
             "error": str(exc),
         }
 
@@ -1265,6 +1439,9 @@ def _send_non_streaming_chat_completion(
     if engine.get("apiKey"):
         headers["authorization"] = f"Bearer {engine['apiKey']}"
     payload = _request_payload(request, stream=False)
+    prompt_tokens_capture = _prompt_token_details(engine, request, payload)
+    prompt_token_summary = prompt_tokens_capture["summary"]
+    prompt_token_details = prompt_tokens_capture["details"]
     native_before = _read_native_metrics(engine, http_get_text)
     hardware_before = _read_hardware_metrics(engine, http_get_text)
     token_details_requested = bool(payload.get("logprobs"))
@@ -1289,9 +1466,10 @@ def _send_non_streaming_chat_completion(
         runtime_provenance = _runtime_provenance(engine, native_telemetry)
         raw_token_details = _choice_token_details(body, engine, request)
         token_summary = _token_detail_summary(raw_token_details, token_details_requested)
-        token_timeline = [
+        token_timeline = _prompt_token_timeline(request_id, prompt_token_details, request_started_at_utc) + [
             {
                 "requestId": request_id,
+                "tokenPhase": "output",
                 "chunkIndex": 0,
                 "tokenIndex": index,
                 "receivedAtUtc": request_completed_at_utc,
@@ -1373,6 +1551,7 @@ def _send_non_streaming_chat_completion(
             "prefillMs": native_telemetry.get("prefillMs"),
             "decodeMs": native_telemetry.get("decodeMs"),
             **runtime_provenance,
+            **prompt_token_summary,
             **token_summary,
             "tokenTimeline": token_timeline,
             "error": None if 200 <= status < 300 else json.dumps(body),
@@ -1382,6 +1561,7 @@ def _send_non_streaming_chat_completion(
                 "requestPayload": payload,
                 "responseBody": body,
                 "outputText": output_text,
+                "promptTokenDetails": prompt_token_details,
                 "tokenDetails": raw_token_details,
                 "nativeTelemetry": native_telemetry,
                 "hardwareTelemetry": hardware_telemetry,
@@ -1428,6 +1608,12 @@ def _send_non_streaming_chat_completion(
             "tokenDetailCount": 0,
             "tokenDetailSource": "error",
             "tokenIdSource": None,
+            "promptTokenIdsAvailable": False,
+            "promptTokenDetailCount": 0,
+            "promptTokenIdSource": None,
+            "promptTokenIdsSha256": None,
+            "promptTokenizationSource": "error",
+            "promptTokenizerModel": None,
             "error": str(exc),
         }
 
@@ -1564,6 +1750,16 @@ def _build_measurements(
         "tokenIdsAvailableCount": sum(1 for sample in successful if sample.get("tokenIdsAvailable")),
         "logprobsAvailableCount": sum(1 for sample in successful if sample.get("logprobsAvailable")),
         "tokenDetailsRequired": bool(_request_payload(request, stream=bool(request.get("stream", True))).get("logprobs")),
+        "promptTokenIdsAvailableCount": sum(1 for sample in successful if sample.get("promptTokenIdsAvailable")),
+        "promptTokenDetailsRequired": bool(
+            request.get("promptTokenIds")
+            or engine.get("promptTokenIds")
+            or request.get("tokenizerModel")
+            or engine.get("tokenizerModel")
+            or engine.get("tokenizer_model")
+            or request.get("resolveTokenIdsWithTokenizer")
+            or engine.get("resolveTokenIdsWithTokenizer")
+        ),
         "hardwareProvenance": "configured" if workload.get("hardware") and workload.get("hardware") != "unknown" else "unknown",
         "tags": ",".join(["serving-producer", engine_id, engine_label, request["model"]]),
     }
@@ -1595,6 +1791,12 @@ def _build_measurements(
         required.append(
             row["logprobsAvailableCount"]
             if row["logprobsAvailableCount"] == row["successCount"]
+            else None
+        )
+    if row["promptTokenDetailsRequired"]:
+        required.append(
+            row["promptTokenIdsAvailableCount"]
+            if row["promptTokenIdsAvailableCount"] == row["successCount"]
             else None
         )
     row["metricCompleteness"] = sum(isinstance(value, (int, float)) for value in required) / len(required)
@@ -1669,6 +1871,12 @@ def _build_measurements(
             "tokenDetailCount": sample.get("tokenDetailCount"),
             "tokenDetailSource": sample.get("tokenDetailSource"),
             "tokenIdSource": sample.get("tokenIdSource"),
+            "promptTokenIdsAvailable": sample.get("promptTokenIdsAvailable"),
+            "promptTokenDetailCount": sample.get("promptTokenDetailCount"),
+            "promptTokenIdSource": sample.get("promptTokenIdSource"),
+            "promptTokenIdsSha256": sample.get("promptTokenIdsSha256"),
+            "promptTokenizationSource": sample.get("promptTokenizationSource"),
+            "promptTokenizerModel": sample.get("promptTokenizerModel"),
             "queueWaitMs": sample.get("queueWaitMs"),
             "prefillMs": sample.get("prefillMs"),
             "decodeMs": sample.get("decodeMs"),
@@ -1693,6 +1901,7 @@ def _build_measurements(
                 "runtimeFramework": engine_label,
                 "runtimeEngine": engine_id,
                 "requestId": sample.get("requestId"),
+                "tokenPhase": chunk.get("tokenPhase", "output"),
                 "chunkIndex": chunk.get("chunkIndex"),
                 "receivedAtUtc": chunk.get("receivedAtUtc"),
                 "relativeMs": chunk.get("relativeMs"),
@@ -1792,6 +2001,18 @@ def _write_summary_artifact(
                         "tokenDetailCount": sample.get("tokenDetailCount"),
                         "tokenDetailSource": sample.get("tokenDetailSource"),
                         "tokenIdSource": sample.get("tokenIdSource"),
+                    }
+                    for sample in samples
+                ],
+                "promptTokenDetails": [
+                    {
+                        "requestId": sample.get("requestId"),
+                        "promptTokenIdsAvailable": sample.get("promptTokenIdsAvailable"),
+                        "promptTokenDetailCount": sample.get("promptTokenDetailCount"),
+                        "promptTokenIdSource": sample.get("promptTokenIdSource"),
+                        "promptTokenIdsSha256": sample.get("promptTokenIdsSha256"),
+                        "promptTokenizationSource": sample.get("promptTokenizationSource"),
+                        "promptTokenizerModel": sample.get("promptTokenizerModel"),
                     }
                     for sample in samples
                 ],

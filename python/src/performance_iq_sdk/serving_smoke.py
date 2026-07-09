@@ -1037,8 +1037,16 @@ def _validate_measurement_row(
         for key in ["tokenDetailsAvailableCount", "tokenIdsAvailableCount", "logprobsAvailableCount"]:
             if row.get(key) != success_count:
                 errors.append(f"{engine} measurement {key} must equal successCount when token details are required.")
+    if row.get("promptTokenDetailsRequired") is True and isinstance(success_count, int):
+        if row.get("promptTokenIdsAvailableCount") != success_count:
+            errors.append(f"{engine} measurement promptTokenIdsAvailableCount must equal successCount when prompt token details are required.")
     if (
-        (row.get("nativeTelemetryRequired") is True or row.get("hardwareTelemetryRequired") is True or row.get("tokenDetailsRequired") is True)
+        (
+            row.get("nativeTelemetryRequired") is True
+            or row.get("hardwareTelemetryRequired") is True
+            or row.get("tokenDetailsRequired") is True
+            or row.get("promptTokenDetailsRequired") is True
+        )
         and row.get("metricCompleteness") != 1
     ):
         errors.append(f"{engine} measurement metricCompleteness must be 1 when required telemetry is missing-sensitive.")
@@ -1464,6 +1472,8 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                         continue
                     if not isinstance(token_row.get("tokenDetailSource"), str) or not token_row.get("tokenDetailSource"):
                         errors.append(f"{engine} tokenTimeline[{token_index}].tokenDetailSource is required.")
+                    if token_row.get("tokenPhase") not in (None, "prompt", "output"):
+                        errors.append(f"{engine} tokenTimeline[{token_index}].tokenPhase must be prompt or output when present.")
                     if token_row.get("tokenLogprob") is not None and not _is_number(token_row.get("tokenLogprob")):
                         errors.append(f"{engine} tokenTimeline[{token_index}].tokenLogprob must be numeric when present.")
                     if token_row.get("tokenId") is not None and not isinstance(token_row.get("tokenId"), int):
@@ -1542,6 +1552,8 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                         for token_index, token_row in enumerate(token_timeline if isinstance(token_timeline, list) else []):
                             if not isinstance(token_row, dict):
                                 continue
+                            if token_row.get("tokenPhase", "output") != "output":
+                                continue
                             if not isinstance(token_row.get("tokenIndex"), int):
                                 errors.append(f"{engine} tokenTimeline[{token_index}].tokenIndex must be an integer when token details are required.")
                             if not isinstance(token_row.get("tokenId"), int):
@@ -1552,6 +1564,29 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                                 errors.append(f"{engine} tokenTimeline[{token_index}].tokenLogprob must be numeric when token details are required.")
                             if token_row.get("tokenDetailSource") != "response-logprobs":
                                 errors.append(f"{engine} tokenTimeline[{token_index}].tokenDetailSource must be response-logprobs when token details are required.")
+                    if first_measurement.get("promptTokenDetailsRequired") is True:
+                        for index, sample in enumerate(samples):
+                            if not isinstance(sample, dict):
+                                continue
+                            if sample.get("promptTokenIdsAvailable") is not True:
+                                errors.append(f"{engine} samples[{index}].promptTokenIdsAvailable must be true when prompt token details are required.")
+                            if not isinstance(sample.get("promptTokenIdSource"), str):
+                                errors.append(f"{engine} samples[{index}].promptTokenIdSource must describe prompt token provenance when prompt token details are required.")
+                            if not isinstance(sample.get("promptTokenIdsSha256"), str) or len(sample.get("promptTokenIdsSha256")) != 64:
+                                errors.append(f"{engine} samples[{index}].promptTokenIdsSha256 must be a 64-character digest when prompt token details are required.")
+                        prompt_rows = [
+                            token_row for token_row in (token_timeline if isinstance(token_timeline, list) else [])
+                            if isinstance(token_row, dict) and token_row.get("tokenPhase") == "prompt"
+                        ]
+                        if not prompt_rows:
+                            errors.append(f"{engine} tokenTimeline must include prompt token rows when prompt token details are required.")
+                        for token_index, token_row in enumerate(prompt_rows):
+                            if not isinstance(token_row.get("tokenIndex"), int):
+                                errors.append(f"{engine} prompt tokenTimeline[{token_index}].tokenIndex must be an integer.")
+                            if not isinstance(token_row.get("tokenId"), int):
+                                errors.append(f"{engine} prompt tokenTimeline[{token_index}].tokenId must be an integer.")
+                            if not isinstance(token_row.get("tokenIdSource"), str):
+                                errors.append(f"{engine} prompt tokenTimeline[{token_index}].tokenIdSource must describe tokenizer provenance.")
                     if evidence:
                         evidence_measurement = evidence.get("measurement") if isinstance(evidence.get("measurement"), dict) else {}
                         for key in ["outputTpm", "totalTpm", "avgLatencyMs", "avgTtftMs", "avgTpotMs", "avgTtfotMs", "p95LatencyMs", "metricCompleteness"]:
