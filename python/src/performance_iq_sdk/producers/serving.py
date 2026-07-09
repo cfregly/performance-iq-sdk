@@ -2243,12 +2243,14 @@ def _build_producer_coverage_rows(
     ))
 
     raw_snapshot_expected = expected_samples if native_expected > 0 or hardware_expected > 0 else 0
-    raw_snapshot_proven = sum(
-        1 for capture in raw_captures
+    raw_snapshot_request_ids = {
+        capture.get("requestId") for capture in raw_captures
         if isinstance(capture, dict)
+        and isinstance(capture.get("requestId"), str)
         and (native_expected == 0 or _raw_snapshot_available(capture, "nativeMetricsRaw"))
         and (hardware_expected == 0 or _raw_snapshot_available(capture, "hardwareMetricsRaw"))
-    )
+    }
+    raw_snapshot_proven = sum(1 for request_id in sample_request_ids if request_id in raw_snapshot_request_ids)
     coverage_specs.append((
         "rawMetricSnapshots",
         raw_snapshot_proven,

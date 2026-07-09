@@ -412,6 +412,32 @@ class PerformanceIQSdkTest(unittest.TestCase):
             json.dump(proof, handle, indent=2)
             handle.write("\n")
 
+    def refresh_proof_artifact_hashes(self, proof_path, engine):
+        with open(proof_path, encoding="utf-8") as handle:
+            proof = json.load(handle)
+        submission = next(item for item in proof["submissions"] if item["engine"] == engine)
+        artifact_path = submission["artifactPath"]
+        manifest_path = submission["manifestPath"]
+        artifact_sha = sha256_file(artifact_path)
+        submission["artifactSha256"] = artifact_sha
+        proof["evidenceIndex"]["engines"][engine]["artifact"]["sha256"] = artifact_sha
+        with open(manifest_path, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        for manifest_artifact in manifest["artifacts"]:
+            if not isinstance(manifest_artifact, dict):
+                continue
+            path = manifest_artifact.get("path")
+            if path == artifact_path:
+                manifest_artifact["sha256"] = artifact_sha
+            elif isinstance(path, str) and os.path.exists(path):
+                manifest_artifact["sha256"] = sha256_file(path)
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2)
+            handle.write("\n")
+        with open(proof_path, "w", encoding="utf-8") as handle:
+            json.dump(proof, handle, indent=2)
+            handle.write("\n")
+
     def test_build_manifest_hashes_artifacts(self):
         manifest = build_manifest(self.input())
 
@@ -1682,6 +1708,93 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
             coverage["engines"]["vllm"]["clientStreamTiming"]["missing"],
         )
         self.assertEqual(coverage["categorySummary"]["clientStreamTiming"]["status"], "partial")
+
+    def test_serving_smoke_verifier_requires_request_level_native_rows(self):
+        proof_path, summary = self.write_full_serving_proof(repetitions=2)
+        submission = next(item for item in summary["submissions"] if item["engine"] == "vllm")
+        artifact_path = submission["artifactPath"]
+
+        with open(artifact_path, encoding="utf-8") as handle:
+            artifact = json.load(handle)
+        missing_request_id = artifact["samples"][1]["requestId"]
+        artifact["nativeTelemetry"][1]["requestId"] = artifact["samples"][0]["requestId"]
+        with open(artifact_path, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2)
+            handle.write("\n")
+        self.refresh_proof_artifact_hashes(proof_path, "vllm")
+
+        verification = verify_proof_summary(proof_path)
+
+        self.assertFalse(verification["ok"], json.dumps(verification, indent=2))
+        self.assertTrue(any(
+            "vllm nativeTelemetry is missing rows for requestIds" in error
+            and missing_request_id in error
+            for error in verification["errors"]
+        ))
+
+    def test_serving_smoke_coverage_requires_request_level_dcgm_and_raw_snapshots(self):
+        proof_path = os.path.join(self.tmp_dir, "fake-full-dcgm-request-proof.json")
+        event_log_path = os.path.join(self.tmp_dir, "fake-dcgm-request-events.jsonl")
+        receipt_log_path = os.path.join(self.tmp_dir, "fake-dcgm-request-receipts.jsonl")
+        stdout = StringIO()
+        stderr = StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = serving_smoke_main([
+                "--fake-full-telemetry",
+                "--model", laptop_smoke_model(),
+                "--repetitions", "2",
+                "--max-tokens", "8",
+                "--artifact-dir", self.tmp_dir,
+                "--run-suffix", "fake-dcgm-request",
+                "--summary-out", proof_path,
+                "--event-log", event_log_path,
+                "--receipt-log", receipt_log_path,
+            ])
+
+        self.assertEqual(code, 0, stderr.getvalue() + stdout.getvalue())
+        with open(proof_path, encoding="utf-8") as handle:
+            proof = json.load(handle)
+        submission = next(item for item in proof["submissions"] if item["engine"] == "vllm")
+        artifact_path = submission["artifactPath"]
+        with open(artifact_path, encoding="utf-8") as handle:
+            artifact = json.load(handle)
+        missing_request_id = artifact["samples"][1]["requestId"]
+        artifact["hardwareTelemetry"][1]["requestId"] = artifact["samples"][0]["requestId"]
+        raw_artifact_path = artifact["capturePolicy"]["rawArtifactPath"]
+        with open(raw_artifact_path, encoding="utf-8") as handle:
+            raw_artifact = json.load(handle)
+        raw_artifact["captures"][1]["requestId"] = raw_artifact["captures"][0]["requestId"]
+        with open(raw_artifact_path, "w", encoding="utf-8") as handle:
+            json.dump(raw_artifact, handle, indent=2)
+            handle.write("\n")
+        with open(artifact_path, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2)
+            handle.write("\n")
+        self.refresh_proof_artifact_hashes(proof_path, "vllm")
+
+        verification = verify_proof_summary(proof_path)
+
+        self.assertFalse(verification["ok"], json.dumps(verification, indent=2))
+        self.assertTrue(any(
+            "vllm hardwareTelemetry is missing rows for requestIds" in error
+            and missing_request_id in error
+            for error in verification["errors"]
+        ))
+        self.assertTrue(any(
+            "vllm operator-full raw artifact captures are missing requestIds" in error
+            and missing_request_id in error
+            for error in verification["errors"]
+        ))
+        coverage = verification["telemetryCoverage"]
+        self.assertEqual(coverage["engines"]["vllm"]["dcgmHardwareTelemetry"]["status"], "partial")
+        self.assertEqual(coverage["engines"]["vllm"]["dcgmHardwareTelemetry"]["provenCount"], 1)
+        self.assertEqual(coverage["engines"]["vllm"]["dcgmHardwareTelemetry"]["expectedCount"], 2)
+        self.assertEqual(coverage["engines"]["vllm"]["rawMetricSnapshots"]["status"], "partial")
+        self.assertEqual(coverage["engines"]["vllm"]["rawMetricSnapshots"]["provenCount"], 1)
+        self.assertEqual(coverage["engines"]["vllm"]["rawMetricSnapshots"]["expectedCount"], 2)
+        self.assertEqual(coverage["categorySummary"]["dcgmHardwareTelemetry"]["status"], "partial")
+        self.assertEqual(coverage["categorySummary"]["rawMetricSnapshots"]["status"], "partial")
 
     def test_serving_smoke_verify_proof_requires_all_telemetry_when_requested(self):
         proof_path, _summary = self.write_full_serving_proof()

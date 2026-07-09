@@ -1449,6 +1449,7 @@ def _telemetry_coverage_from_proof(
         measurements = artifact.get("measurements") if isinstance(artifact.get("measurements"), list) else []
         first_measurement = measurements[0] if measurements and isinstance(measurements[0], dict) else {}
         token_timeline = artifact.get("tokenTimeline") if isinstance(artifact.get("tokenTimeline"), list) else []
+        native_telemetry = artifact.get("nativeTelemetry") if isinstance(artifact.get("nativeTelemetry"), list) else []
         hardware_telemetry = artifact.get("hardwareTelemetry") if isinstance(artifact.get("hardwareTelemetry"), list) else []
         capture_policy = artifact.get("capturePolicy") if isinstance(artifact.get("capturePolicy"), dict) else {}
         expected_samples = len(samples) or int(submission.get("requestCount") or 0) or 1
@@ -1507,11 +1508,23 @@ def _telemetry_coverage_from_proof(
             fine_grain_missing,
         )
 
-        native_proven = sum(
-            1 for sample in samples
+        native_sample_request_ids = {
+            sample.get("requestId") for sample in samples
             if isinstance(sample, dict)
             and sample.get("nativeTelemetryAvailable") is True
+            and isinstance(sample.get("requestId"), str)
             and all(_is_number(sample.get(key)) for key in REQUIRED_NATIVE_SAMPLE_FIELDS)
+        }
+        native_row_request_ids = {
+            row.get("requestId") for row in native_telemetry
+            if isinstance(row, dict)
+            and row.get("available") is True
+            and isinstance(row.get("requestId"), str)
+            and all(_is_number(row.get(key)) for key in REQUIRED_NATIVE_SAMPLE_FIELDS)
+        }
+        native_proven = sum(
+            1 for request_id in sample_request_ids
+            if request_id in native_sample_request_ids and request_id in native_row_request_ids
         )
         native_required = first_measurement.get("nativeTelemetryRequired") is True
         engine_coverage["nativeRuntimeTelemetry"] = _coverage_item(
@@ -1524,20 +1537,25 @@ def _telemetry_coverage_from_proof(
             ],
         )
 
-        hardware_proven = sum(
-            1 for sample in samples
+        hardware_sample_request_ids = {
+            sample.get("requestId") for sample in samples
             if isinstance(sample, dict)
             and sample.get("hardwareTelemetryAvailable") is True
+            and isinstance(sample.get("requestId"), str)
             and all(_is_number(sample.get(key)) for key in REQUIRED_HARDWARE_SAMPLE_COUNTERS)
-        )
-        hardware_rows_proven = sum(
-            1 for row in hardware_telemetry
+        }
+        hardware_row_request_ids = {
+            row.get("requestId") for row in hardware_telemetry
             if isinstance(row, dict)
             and row.get("available") is True
+            and isinstance(row.get("requestId"), str)
             and all(_is_number(row.get(key)) for key in ["powerWatts", "powerWattsPerGpu", "gpuUtilizationPct", "memoryCopyUtilizationPct", "gpuTemperatureC", "smClockMHz", "memoryClockMHz", "fbUsedMiB", "fbFreeMiB", "energyJoules"])
-        )
+        }
         hardware_required = first_measurement.get("hardwareTelemetryRequired") is True
-        hardware_ok_count = min(hardware_proven, hardware_rows_proven)
+        hardware_ok_count = sum(
+            1 for request_id in sample_request_ids
+            if request_id in hardware_sample_request_ids and request_id in hardware_row_request_ids
+        )
         engine_coverage["dcgmHardwareTelemetry"] = _coverage_item(
             _coverage_status(hardware_ok_count, expected_samples),
             hardware_ok_count,
@@ -1641,12 +1659,14 @@ def _telemetry_coverage_from_proof(
             )
             return before_has_metrics and after_has_metrics
 
-        raw_metric_proven = sum(
-            1 for capture in raw_captures
+        raw_metric_request_ids = {
+            capture.get("requestId") for capture in raw_captures
             if isinstance(capture, dict)
+            and isinstance(capture.get("requestId"), str)
             and (not native_required or raw_snapshot_available(capture, "nativeMetricsRaw"))
             and (not hardware_required or raw_snapshot_available(capture, "hardwareMetricsRaw"))
-        )
+        }
+        raw_metric_proven = sum(1 for request_id in sample_request_ids if request_id in raw_metric_request_ids)
         raw_metric_expected = expected_samples if native_required or hardware_required else 0
         engine_coverage["rawMetricSnapshots"] = _coverage_item(
             _coverage_status(raw_metric_proven, raw_metric_expected),
@@ -2156,15 +2176,51 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                 missing_output_timeline = sorted(set(sample_trace_ids) - output_timeline_request_ids)
                 if missing_output_timeline:
                     errors.append(f"{engine} tokenTimeline is missing output rows for requestIds: {', '.join(missing_output_timeline)}.")
+            native_telemetry = artifact.get("nativeTelemetry")
+            if not isinstance(native_telemetry, list) or len(native_telemetry) != request_count:
+                errors.append(f"{engine} summary artifact nativeTelemetry must match requestCount.")
+            elif sample_trace_ids:
+                native_telemetry_request_ids = {
+                    row.get("requestId")
+                    for row in native_telemetry
+                    if isinstance(row, dict) and isinstance(row.get("requestId"), str)
+                }
+                missing_native_telemetry = sorted(set(sample_trace_ids) - native_telemetry_request_ids)
+                if missing_native_telemetry:
+                    errors.append(f"{engine} nativeTelemetry is missing rows for requestIds: {', '.join(missing_native_telemetry)}.")
             hardware_telemetry = artifact.get("hardwareTelemetry")
             if not isinstance(hardware_telemetry, list) or len(hardware_telemetry) != request_count:
                 errors.append(f"{engine} summary artifact hardwareTelemetry must match requestCount.")
+            elif sample_trace_ids:
+                hardware_telemetry_request_ids = {
+                    row.get("requestId")
+                    for row in hardware_telemetry
+                    if isinstance(row, dict) and isinstance(row.get("requestId"), str)
+                }
+                missing_hardware_telemetry = sorted(set(sample_trace_ids) - hardware_telemetry_request_ids)
+                if missing_hardware_telemetry:
+                    errors.append(f"{engine} hardwareTelemetry is missing rows for requestIds: {', '.join(missing_hardware_telemetry)}.")
             capture_policy = artifact.get("capturePolicy") if isinstance(artifact.get("capturePolicy"), dict) else {}
             if capture_policy.get("mode") != "operator-full":
                 errors.append(f"{engine} summary artifact capturePolicy.mode must be operator-full.")
             raw_artifact_path = _resolve_proof_member_path(capture_policy.get("rawArtifactPath"), proof_dir)
+            raw_captures: list[Any] = []
             if not raw_artifact_path or not os.path.exists(raw_artifact_path):
                 errors.append(f"{engine} operator-full raw artifact is required.")
+            else:
+                raw_artifact = _load_json_file(raw_artifact_path, errors, f"{engine} operator-full raw artifact")
+                raw_captures = raw_artifact.get("captures") if isinstance(raw_artifact, dict) and isinstance(raw_artifact.get("captures"), list) else []
+                if not raw_captures or len(raw_captures) != request_count:
+                    errors.append(f"{engine} operator-full raw artifact captures must match requestCount.")
+                elif sample_trace_ids:
+                    raw_capture_request_ids = {
+                        capture.get("requestId")
+                        for capture in raw_captures
+                        if isinstance(capture, dict) and isinstance(capture.get("requestId"), str)
+                    }
+                    missing_raw_captures = sorted(set(sample_trace_ids) - raw_capture_request_ids)
+                    if missing_raw_captures:
+                        errors.append(f"{engine} operator-full raw artifact captures are missing requestIds: {', '.join(missing_raw_captures)}.")
             raw_manifest_artifacts = [
                 item for item in manifest_artifacts
                 if isinstance(item, dict) and item.get("kind") == "operator-full-serving-raw"
@@ -2199,6 +2255,13 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                             for key in REQUIRED_NATIVE_SAMPLE_FIELDS:
                                 if not _is_number(sample.get(key)):
                                     errors.append(f"{engine} samples[{index}].{key} must be numeric when native telemetry is required.")
+                        for index, telemetry in enumerate(native_telemetry if isinstance(native_telemetry, list) else []):
+                            if isinstance(telemetry, dict) and telemetry.get("available") is not True:
+                                errors.append(f"{engine} nativeTelemetry[{index}].available must be true when native telemetry is required.")
+                            if isinstance(telemetry, dict):
+                                for key in REQUIRED_NATIVE_SAMPLE_FIELDS:
+                                    if not _is_number(telemetry.get(key)):
+                                        errors.append(f"{engine} nativeTelemetry[{index}].{key} must be numeric when native telemetry is required.")
                     if first_measurement.get("hardwareTelemetryRequired") is True:
                         for index, sample in enumerate(samples):
                             if isinstance(sample, dict) and sample.get("hardwareTelemetryAvailable") is not True:
@@ -2214,6 +2277,31 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                                 for key in ["powerWatts", "powerWattsPerGpu", "gpuUtilizationPct", "memoryCopyUtilizationPct", "gpuTemperatureC", "smClockMHz", "memoryClockMHz", "fbUsedMiB", "fbFreeMiB", "energyJoules"]:
                                     if not _is_number(telemetry.get(key)):
                                         errors.append(f"{engine} hardwareTelemetry[{index}].{key} must be numeric when hardware telemetry is required.")
+                    if first_measurement.get("nativeTelemetryRequired") is True or first_measurement.get("hardwareTelemetryRequired") is True:
+                        def raw_snapshot_available_for_validation(capture: dict[str, Any], key: str) -> bool:
+                            snapshot = capture.get(key)
+                            if not isinstance(snapshot, dict):
+                                return False
+                            before = snapshot.get("before")
+                            after = snapshot.get("after")
+                            if not isinstance(before, dict) or not isinstance(after, dict):
+                                return False
+                            before_has_metrics = bool(before.get("available")) and (
+                                isinstance(before.get("metrics"), dict) or isinstance(before.get("jsonMetrics"), dict)
+                            )
+                            after_has_metrics = bool(after.get("available")) and (
+                                isinstance(after.get("metrics"), dict) or isinstance(after.get("jsonMetrics"), dict)
+                            )
+                            return before_has_metrics and after_has_metrics
+
+                        for index, capture in enumerate(raw_captures):
+                            if not isinstance(capture, dict):
+                                errors.append(f"{engine} operator-full raw captures[{index}] must be an object.")
+                                continue
+                            if first_measurement.get("nativeTelemetryRequired") is True and not raw_snapshot_available_for_validation(capture, "nativeMetricsRaw"):
+                                errors.append(f"{engine} operator-full raw captures[{index}].nativeMetricsRaw must include before/after native metrics when native telemetry is required.")
+                            if first_measurement.get("hardwareTelemetryRequired") is True and not raw_snapshot_available_for_validation(capture, "hardwareMetricsRaw"):
+                                errors.append(f"{engine} operator-full raw captures[{index}].hardwareMetricsRaw must include before/after DCGM metrics when hardware telemetry is required.")
                     if first_measurement.get("tokenDetailsRequired") is True:
                         for index, sample in enumerate(samples):
                             if not isinstance(sample, dict):
