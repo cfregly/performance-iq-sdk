@@ -3,6 +3,10 @@ import { readFile, stat } from "node:fs/promises"
 
 export const PRODUCER_MANIFEST_VERSION = "performance-iq.producer-manifest.v1"
 export const INGESTION_REQUEST_VERSION = "performance-iq.ingestion-request.v1"
+export const LATEST_PRODUCER_SOURCE_TABLES = [
+  "platform_store.object_store.producer_runner_result_bundles",
+  "platform_store.iceberg.intake_store.producer_runner_results",
+]
 
 export type SourceType = "preserved-snapshot" | "fresh-run" | "other-measured-producer"
 export type RunClass = "measured" | "rehearsal" | "simulated"
@@ -160,6 +164,12 @@ export interface PerformanceStatusRequest {
 const IMAGE_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/i
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i
 const PLACEHOLDER_PATTERN = /\b(replace-with|example-only|do-not-quote|template only)\b/i
+const LEGACY_SOURCE_TABLE_PATTERNS = [
+  new RegExp(`^intake_${"am"}ps\\.`, "i"),
+  /^intake_store\.perf_report_.*_v1$/i,
+  /^sample-data:/i,
+  /^performance_iq\.sdk_submission$/i,
+]
 const DISALLOWED_REQUEST_KEYS = new Set(["sql", "queryName", "queries"])
 
 function normalizeBaseUrl(value: string): string {
@@ -220,7 +230,7 @@ function defaultStoreProof(input: PerformanceIQRunInput): StoreProof {
   const rowCount = Math.max(input.measurements?.length ?? 0, 1)
   const table = "model_store.sdk_pending_ingest"
   return {
-    sourceTables: ["performance_iq.sdk_submission"],
+    sourceTables: [...LATEST_PRODUCER_SOURCE_TABLES],
     modelTables: [table],
     rowProof: [
       {
@@ -332,7 +342,15 @@ export function validateManifest(manifest: ProducerRunManifest): ValidationResul
       errors.push(`artifacts[${index}].sizeBytes must be >= 0`)
     }
   }
-  if (!manifest.store?.sourceTables?.length) errors.push("store.sourceTables must contain at least one table")
+  const sourceTables = manifest.store?.sourceTables ?? []
+  if (!sourceTables.length) errors.push("store.sourceTables must contain at least one table")
+  const legacySourceTables = sourceTables.filter((table) => LEGACY_SOURCE_TABLE_PATTERNS.some((pattern) => pattern.test(table)))
+  if (legacySourceTables.length > 0) {
+    errors.push(`store.sourceTables must not use legacy or mock source table names: ${legacySourceTables.join(", ")}`)
+  }
+  if (sourceTables.length > 0 && !sourceTables.some((table) => LATEST_PRODUCER_SOURCE_TABLES.includes(table))) {
+    errors.push(`store.sourceTables must include a latest Producer Runner source table: ${LATEST_PRODUCER_SOURCE_TABLES.join(", ")}`)
+  }
   if (!manifest.store?.modelTables?.length) errors.push("store.modelTables must contain at least one table")
   const modelTables = new Set(manifest.store?.modelTables ?? [])
   for (const [index, proof] of (manifest.store?.rowProof ?? []).entries()) {
@@ -399,9 +417,19 @@ export async function validateRun(input: PerformanceIQRunInput): Promise<Validat
 async function readError(response: Response): Promise<string> {
   const contentType = response.headers.get("content-type") ?? ""
   if (contentType.includes("application/json")) {
-    const body = (await response.json().catch(() => null)) as { detail?: unknown; error?: unknown; message?: unknown } | null
+    const body = (await response.json().catch(() => null)) as {
+      detail?: unknown
+      error?: unknown
+      message?: unknown
+      validation?: { errors?: unknown }
+    } | null
     const detail = body?.detail ?? body?.error ?? body?.message
-    if (typeof detail === "string") return detail
+    const validationErrors = Array.isArray(body?.validation?.errors)
+      ? body.validation.errors.filter((item): item is string => typeof item === "string")
+      : []
+    if (typeof detail === "string") {
+      return validationErrors.length ? `${detail}: ${validationErrors.join("; ")}` : detail
+    }
     if (detail) return JSON.stringify(detail)
   }
   const text = await response.text().catch(() => "")

@@ -147,6 +147,7 @@ def _build_measurements(
     total_tokens = _sum(successful, "totalTokens")
     prompt_tokens = _sum(successful, "promptTokens")
     usd_per_gpu_hour = (pricing or {}).get("usdPerGpuHour")
+    power_watts_per_gpu = (pricing or {}).get("powerWattsPerGpu")
     gpu_count = float((pricing or {}).get("gpuCount") or workload.get("parallelism") or 1)
     cost_usd = (
         (duration_seconds / 3600) * float(usd_per_gpu_hour) * gpu_count
@@ -172,9 +173,13 @@ def _build_measurements(
         "p95LatencyMs": _percentile([float(sample["latencyMs"]) for sample in successful], 95),
         "usdPer1mOutputTokens": cost_usd / (output_tokens / 1_000_000) if cost_usd and output_tokens else None,
         "usdPer1mTotalTokens": cost_usd / (total_tokens / 1_000_000) if cost_usd and total_tokens else None,
-        "avgPowerWattsPerGpu": 0 if "mock" in str(workload.get("hardware", "")).lower() else None,
-        "tokensPerWatt": None,
-        "campaignCount": 1,
+        "avgPowerWattsPerGpu": power_watts_per_gpu if isinstance(power_watts_per_gpu, (int, float)) else None,
+        "tokensPerWatt": (
+            (total_tokens / duration_seconds) / (float(power_watts_per_gpu) * gpu_count)
+            if isinstance(power_watts_per_gpu, (int, float)) and power_watts_per_gpu > 0
+            else None
+        ),
+        "campaignCount": max(len(successful), 1),
         "latestCapturedAtUtc": captured_at_utc,
         "experimentFamily": "serving-producer",
         "experimentStatus": "accepted" if len(successful) == len(samples) else "partial",

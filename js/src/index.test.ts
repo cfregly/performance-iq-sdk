@@ -70,7 +70,10 @@ describe("performance-iq-sdk js", () => {
       sizeBytes: 12,
     })
     expect(manifest.store).toMatchObject({
-      sourceTables: ["performance_iq.sdk_submission"],
+      sourceTables: [
+        "platform_store.object_store.producer_runner_result_bundles",
+        "platform_store.iceberg.intake_store.producer_runner_results",
+      ],
       modelTables: ["model_store.sdk_pending_ingest"],
       rowProof: [{ campaignId: "campaign-sdk-test", rowCount: 1 }],
     })
@@ -83,6 +86,19 @@ describe("performance-iq-sdk js", () => {
     expect(result.liveProofReady).toBe(true)
     expect(result.freshRun).toBe(true)
     expect(result.snapshotBacked).toBe(false)
+  })
+
+  it("rejects stale SDK source table names", async () => {
+    const result = await validateRun(runInput({
+      store: {
+        sourceTables: ["performance_iq.sdk_submission"],
+        modelTables: ["model_store.sdk_pending_ingest"],
+        rowProof: [{ table: "model_store.sdk_pending_ingest", rowCount: 1 }],
+      },
+    }))
+
+    expect(result.ok).toBe(false)
+    expect(result.errors.join(" ")).toContain("legacy or mock source table")
   })
 
   it("fails closed for customer-safe submissions until governance is implemented", async () => {
@@ -162,7 +178,7 @@ describe("performance-iq-sdk js", () => {
         hardware: "local mock engine",
         operatingPoint: "laptop-smoke",
       },
-      pricing: { usdPerGpuHour: 1, gpuCount: 1 },
+      pricing: { usdPerGpuHour: 1, gpuCount: 1, powerWattsPerGpu: 100 },
       fetchImpl: fetchImpl as unknown as typeof fetch,
       now: () => new Date("2026-07-09T12:00:00Z"),
     })

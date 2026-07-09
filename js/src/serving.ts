@@ -222,7 +222,7 @@ function buildMeasurements(
     usdPer1mTotalTokens,
     avgPowerWattsPerGpu: powerWattsPerGpu ?? null,
     tokensPerWatt,
-    campaignCount: 1,
+    campaignCount: Math.max(successful.length, 1),
     latestCapturedAtUtc: capturedAtUtc,
     experimentFamily: "serving-producer",
     experimentStatus: successful.length === samples.length ? "accepted" : "partial",

@@ -54,6 +54,10 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(manifest["sourceType"], "fresh-run")
         self.assertEqual(manifest["artifacts"][0]["kind"], "normalized-summary")
         self.assertEqual(manifest["artifacts"][0]["sha256"], "e5f1eb4d806641698a35efe20e098efd20d7d57a9b90ee69079d5bb650920726")
+        self.assertEqual(manifest["store"]["sourceTables"], [
+            "platform_store.object_store.producer_runner_result_bundles",
+            "platform_store.iceberg.intake_store.producer_runner_results",
+        ])
         self.assertEqual(manifest["store"]["rowProof"][0]["campaignId"], "campaign-python-test")
 
     def test_validate_run_live_proof_classification(self):
@@ -63,6 +67,16 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertTrue(result["liveProofReady"])
         self.assertTrue(result["freshRun"])
         self.assertFalse(result["snapshotBacked"])
+
+    def test_rejects_stale_sdk_source_table(self):
+        result = validate_run(self.input(store={
+            "sourceTables": ["performance_iq.sdk_submission"],
+            "modelTables": ["model_store.sdk_pending_ingest"],
+            "rowProof": [{"table": "model_store.sdk_pending_ingest", "rowCount": 1}],
+        }))
+
+        self.assertFalse(result["ok"])
+        self.assertIn("legacy or mock source table", " ".join(result["errors"]))
 
     def test_customer_safe_fails_closed(self):
         result = validate_run(self.input(confidentiality="customer-safe"))
@@ -122,7 +136,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
             },
             artifact_dir=self.tmp_dir,
             workload={"hardware": "local mock engine", "operatingPoint": "laptop-smoke"},
-            pricing={"usdPerGpuHour": 1, "gpuCount": 1},
+            pricing={"usdPerGpuHour": 1, "gpuCount": 1, "powerWattsPerGpu": 100},
             http_post_json=http_post_json,
         )
 
