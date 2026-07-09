@@ -81,6 +81,11 @@ ENGINE_DEFAULT_PORT = {
     "sglang": 30000,
     "tensorrt-llm": 8001,
 }
+ENGINE_RUNTIME_PYTHON_ENV = {
+    "vllm": "PIQ_VLLM_PYTHON_BIN",
+    "sglang": "PIQ_SGLANG_PYTHON_BIN",
+    "tensorrt-llm": "PIQ_TENSORRT_LLM_PYTHON_BIN",
+}
 PROOF_SCHEMA_VERSION = "performance-iq.serving-smoke-proof.v1"
 PROOF_VERIFICATION_SCHEMA_VERSION = "performance-iq.serving-smoke-proof-verification.v1"
 EVIDENCE_INDEX_SCHEMA_VERSION = "performance-iq.serving-evidence-index.v1"
@@ -176,6 +181,23 @@ def _float_env(name: str, fallback: float | None = None) -> float | None:
         return fallback
 
 
+def _int_env(name: str, fallback: int | None = None) -> int | None:
+    value = _env(name)
+    if value is None:
+        return fallback
+    try:
+        return int(value)
+    except ValueError:
+        return fallback
+
+
+def _bool_env(name: str, fallback: bool | None = None) -> bool | None:
+    value = _env(name)
+    if value is None:
+        return fallback
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
 def command_probe_timeout_seconds() -> float:
     value = _env("PIQ_COMMAND_PROBE_TIMEOUT_SECONDS")
     if value is None:
@@ -214,6 +236,8 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
             server_args = getattr(args, "server_args", None)
         tokenizer_model = _env(_engine_env_name(engine, "TOKENIZER_MODEL"), getattr(args, "tokenizer_model", None))
         resolve_token_ids = bool(getattr(args, "resolve_token_ids_with_tokenizer", False))
+        capture_token_details = _bool_env(_engine_env_name(engine, "CAPTURE_TOKEN_DETAILS"))
+        top_logprobs = _int_env(_engine_env_name(engine, "TOP_LOGPROBS"))
         process_id = _env(_engine_env_name(engine, "PROCESS_ID"), getattr(args, "process_id", None))
         container_id = _env(_engine_env_name(engine, "CONTAINER_ID"), getattr(args, "container_id", None))
         pod_name = _env(_engine_env_name(engine, "POD_NAME"), getattr(args, "pod_name", None))
@@ -235,6 +259,8 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
             **({"serverArgs": server_args} if server_args is not None else {}),
             **({"tokenizerModel": tokenizer_model} if tokenizer_model else {}),
             **({"resolveTokenIdsWithTokenizer": True} if resolve_token_ids else {}),
+            **({"captureTokenDetails": capture_token_details} if capture_token_details is not None else {}),
+            **({"topLogprobs": top_logprobs} if top_logprobs is not None else {}),
             **({"processId": process_id} if process_id else {}),
             **({"containerId": container_id} if container_id else {}),
             **({"podName": pod_name} if pod_name else {}),
@@ -245,7 +271,12 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
 
 
 def command_probe(command: str, *args: str) -> dict[str, Any]:
-    path = shutil.which(command)
+    if os.path.sep in command:
+        path = os.path.abspath(command)
+        if not os.path.exists(path):
+            return {"command": command, "available": False, "status": "missing"}
+    else:
+        path = shutil.which(command)
     if not path:
         return {"command": command, "available": False, "status": "missing"}
     try:
@@ -313,6 +344,185 @@ def vllm_extension_probe() -> dict[str, Any]:
     except Exception as exc:
         result["torchProbeError"] = str(exc)
     return result
+
+
+def _repo_root() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+
+
+def _workspace_root() -> str:
+    return os.path.abspath(os.path.join(_repo_root(), ".."))
+
+
+def _unique_paths(paths: list[str | None]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for path in paths:
+        if not path:
+            continue
+        absolute = os.path.abspath(os.path.expanduser(path))
+        if absolute not in seen:
+            unique.append(absolute)
+            seen.add(absolute)
+    return unique
+
+
+def _source_roots(source_path: str | None) -> list[str]:
+    if not source_path:
+        return []
+    absolute = os.path.abspath(os.path.expanduser(source_path))
+    roots = [absolute]
+    if os.path.basename(absolute) == "python":
+        roots.append(os.path.dirname(absolute))
+    return _unique_paths(roots)
+
+
+def runtime_python_candidates(engine: str) -> list[str]:
+    workspace_root = _workspace_root()
+    explicit = _env(ENGINE_RUNTIME_PYTHON_ENV.get(engine, ""))
+    candidates: list[str | None] = [explicit]
+    if engine == "vllm":
+        source_roots = _source_roots(_env("PIQ_VLLM_SOURCE_PATH", "/Users/admin/vllm"))
+        for root in source_roots:
+            candidates.extend([
+                os.path.join(root, ".venv-piq/bin/python"),
+                os.path.join(root, ".venv/bin/python"),
+            ])
+        candidates.append(os.path.join(workspace_root, ".runtime/vllm-macos/bin/python"))
+    elif engine == "sglang":
+        source_roots = _source_roots(_env("PIQ_SGLANG_SOURCE_PATH", os.path.join(workspace_root, ".runtime/sglang/python")))
+        for root in source_roots:
+            candidates.extend([
+                os.path.join(root, "sglang-metal/bin/python"),
+                os.path.join(root, ".venv/bin/python"),
+                os.path.join(root, ".venv-piq/bin/python"),
+            ])
+        candidates.extend([
+            os.path.join(workspace_root, ".runtime/sglang/sglang-metal/bin/python"),
+            os.path.join(workspace_root, ".runtime/sglang/.venv/bin/python"),
+        ])
+    return _unique_paths(candidates)
+
+
+def external_python_module_probe(python_bin: str, module: str, *, import_module: bool = False) -> dict[str, Any]:
+    if not os.path.exists(python_bin):
+        return {
+            "python": python_bin,
+            "module": module,
+            "available": False,
+            "status": "missing-python",
+        }
+    code = """
+import importlib
+import importlib.util
+import json
+import sys
+
+module = sys.argv[1]
+should_import = sys.argv[2] == "1"
+result = {"python": sys.executable, "module": module}
+try:
+    spec = importlib.util.find_spec(module)
+except Exception as exc:
+    result.update({"available": False, "origin": None, "findError": str(exc)})
+else:
+    result.update({"available": spec is not None, "origin": spec.origin if spec else None})
+
+if result.get("available") and should_import:
+    try:
+        importlib.import_module(module)
+        result["imported"] = True
+    except Exception as exc:
+        result["imported"] = False
+        result["importError"] = str(exc)
+    if module == "vllm._C":
+        try:
+            import torch
+            result["torchCInitCpuMemoryEnv"] = hasattr(torch.ops._C, "init_cpu_memory_env")
+        except Exception as exc:
+            result["torchProbeError"] = str(exc)
+
+print(json.dumps(result, sort_keys=True))
+""".strip()
+    try:
+        completed = subprocess.run(
+            [python_bin, "-c", code, module, "1" if import_module else "0"],
+            text=True,
+            capture_output=True,
+            timeout=command_probe_timeout_seconds(),
+        )
+    except Exception as exc:
+        return {
+            "python": python_bin,
+            "module": module,
+            "available": False,
+            "status": "error",
+            "detail": str(exc),
+        }
+    output = (completed.stdout or "").splitlines()
+    parsed: dict[str, Any] | None = None
+    for line in reversed(output):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            parsed = value
+            break
+    if parsed is None:
+        return {
+            "python": python_bin,
+            "module": module,
+            "available": False,
+            "status": "error",
+            "returncode": completed.returncode,
+            "output": ((completed.stdout or completed.stderr).strip()).splitlines()[:8],
+        }
+    parsed["status"] = "ok" if completed.returncode == 0 else "error"
+    parsed["returncode"] = completed.returncode
+    if completed.stderr.strip():
+        parsed["stderrPreview"] = completed.stderr.strip().splitlines()[:8]
+    return parsed
+
+
+def _runtime_candidate(engine: str, python_bin: str) -> dict[str, Any]:
+    module_name = "vllm" if engine == "vllm" else "sglang"
+    candidate: dict[str, Any] = {
+        "python": python_bin,
+        "module": external_python_module_probe(python_bin, module_name),
+    }
+    if engine == "vllm":
+        vllm_command = os.path.join(os.path.dirname(python_bin), "vllm")
+        candidate["command"] = command_probe(vllm_command, "--version")
+        candidate["extension"] = external_python_module_probe(python_bin, "vllm._C", import_module=True)
+        candidate["usable"] = bool(
+            candidate["module"].get("available")
+            and candidate["extension"].get("available")
+            and candidate["extension"].get("imported") is not False
+        )
+    elif engine == "sglang":
+        candidate["launchModule"] = external_python_module_probe(python_bin, "sglang.launch_server")
+        candidate["usable"] = bool(
+            candidate["module"].get("available")
+            and candidate["launchModule"].get("available")
+        )
+    else:
+        candidate["usable"] = False
+    return candidate
+
+
+def local_runtime_discovery() -> dict[str, Any]:
+    discovered: dict[str, Any] = {}
+    for engine in ("vllm", "sglang"):
+        candidates = [_runtime_candidate(engine, path) for path in runtime_python_candidates(engine)]
+        usable_candidates = [candidate for candidate in candidates if candidate.get("usable")]
+        discovered[engine] = {
+            "pythonEnv": ENGINE_RUNTIME_PYTHON_ENV[engine],
+            "candidates": candidates,
+            "usable": bool(usable_candidates),
+            "preferred": usable_candidates[0] if usable_candidates else None,
+        }
+    return discovered
 
 
 def storage_probe(path: str | None = None) -> dict[str, Any]:
@@ -481,8 +691,17 @@ def environment_diagnostics() -> dict[str, Any]:
         "PIQ_TENSORRT_LLM_IMAGE",
         "PIQ_PYTHON_BIN",
         "PIQ_SERVING_BIN_DIR",
+        "PIQ_VLLM_PYTHON_BIN",
+        "PIQ_SGLANG_PYTHON_BIN",
+        "PIQ_TENSORRT_LLM_PYTHON_BIN",
         "PIQ_VLLM_SOURCE_PATH",
         "PIQ_SGLANG_SOURCE_PATH",
+        "PIQ_VLLM_CAPTURE_TOKEN_DETAILS",
+        "PIQ_SGLANG_CAPTURE_TOKEN_DETAILS",
+        "PIQ_TENSORRT_LLM_CAPTURE_TOKEN_DETAILS",
+        "PIQ_VLLM_TOP_LOGPROBS",
+        "PIQ_SGLANG_TOP_LOGPROBS",
+        "PIQ_TENSORRT_LLM_TOP_LOGPROBS",
         "PIQ_COMMAND_PROBE_TIMEOUT_SECONDS",
         "HF_HOME",
         "HF_TOKEN",
@@ -501,14 +720,19 @@ def real_engine_blockers(preflight: dict[str, Any], diagnostics: dict[str, Any])
         blockers.append(
             f"Only {storage.get('freeGiB')} GiB free under {storage.get('path')}; source builds and model downloads are likely to fail."
         )
+    for missing in preflight.get("missingEngineUrls", []):
+        blockers.append(f"Missing configured endpoint URL for {missing}.")
     local = preflight.get("localRuntime", {})
-    if not local.get("vllmModule", {}).get("available"):
+    runtime_candidates = local.get("runtimeCandidates", {})
+    vllm_candidate = runtime_candidates.get("vllm", {}) if isinstance(runtime_candidates, dict) else {}
+    sglang_candidate = runtime_candidates.get("sglang", {}) if isinstance(runtime_candidates, dict) else {}
+    if not local.get("vllmModule", {}).get("available") and not vllm_candidate.get("usable"):
         blockers.append("Python module 'vllm' is not importable in the smoke-runner Python environment.")
-    elif not local.get("vllmExtension", {}).get("available"):
+    elif local.get("vllmModule", {}).get("available") and not local.get("vllmExtension", {}).get("available") and not vllm_candidate.get("usable"):
         blockers.append("Python module 'vllm' is importable, but compiled extension 'vllm._C' is missing.")
-    elif local.get("vllmExtension", {}).get("imported") is False:
+    elif local.get("vllmExtension", {}).get("imported") is False and not vllm_candidate.get("usable"):
         blockers.append("Python module 'vllm._C' is present, but failed to import in the smoke-runner Python environment.")
-    if not local.get("sglangModule", {}).get("available"):
+    if not local.get("sglangModule", {}).get("available") and not sglang_candidate.get("usable"):
         blockers.append("Python module 'sglang' is not importable in the smoke-runner Python environment.")
     if not local.get("tensorrtLlmServeCommand", {}).get("available"):
         blockers.append("'trtllm-serve' is not available on PATH.")
@@ -767,6 +991,7 @@ def runtime_launch_plan(model: str) -> dict[str, Any]:
 
 def runtime_preflight(engines: list[dict[str, Any]], missing_urls: list[str], model: str | None = None) -> dict[str, Any]:
     endpoint_results = [endpoint_probe(engine, model=model) for engine in engines]
+    runtime_candidates = local_runtime_discovery()
     return {
         "host": {
             "system": platform.system(),
@@ -780,6 +1005,7 @@ def runtime_preflight(engines: list[dict[str, Any]], missing_urls: list[str], mo
             "vllmModule": module_probe("vllm"),
             "vllmExtension": vllm_extension_probe(),
             "sglangModule": module_probe("sglang"),
+            "runtimeCandidates": runtime_candidates,
             "tensorrtLlmServeCommand": command_probe("trtllm-serve", "--help"),
             "nvidiaSmiCommand": command_probe("nvidia-smi"),
         },
@@ -1307,10 +1533,11 @@ def _telemetry_coverage_from_proof(
         ]
         prompt_required = first_measurement.get("promptTokenDetailsRequired") is True
         prompt_ok = prompt_sample_proven == expected_samples and bool(prompt_rows)
+        prompt_expected = expected_samples if prompt_required else 0
         engine_coverage["promptTokenIds"] = _coverage_item(
-            "proven" if prompt_ok else _coverage_status(prompt_sample_proven, expected_samples),
+            "proven" if prompt_ok else _coverage_status(prompt_sample_proven, prompt_expected),
             prompt_sample_proven,
-            expected_samples,
+            prompt_expected,
             [] if prompt_ok else [
                 "prompt token IDs or prompt token timeline rows are missing"
                 + (" even though prompt token details are required" if prompt_required else "")
@@ -1333,10 +1560,11 @@ def _telemetry_coverage_from_proof(
         ) if output_rows else False
         token_required = first_measurement.get("tokenDetailsRequired") is True
         output_ok = output_sample_proven == expected_samples and output_rows_proven
+        output_expected = expected_samples if token_required else 0
         engine_coverage["outputTokenIdsLogprobs"] = _coverage_item(
-            "proven" if output_ok else _coverage_status(output_sample_proven, expected_samples),
+            "proven" if output_ok else _coverage_status(output_sample_proven, output_expected),
             output_sample_proven,
-            expected_samples,
+            output_expected,
             [] if output_ok else [
                 "output token IDs/logprobs or token timeline details are missing"
                 + (" even though output token details are required" if token_required else "")
@@ -2171,6 +2399,7 @@ def extract_proof_rows(
                 continue
             context = {
                 "engine": submission.get("engine"),
+                "runtimeEngine": submission.get("engine"),
                 "runtimeFramework": submission.get("runtimeFramework"),
                 "campaignId": submission.get("campaignId"),
                 "runId": submission.get("runId"),
@@ -2182,12 +2411,17 @@ def extract_proof_rows(
             if not artifact_path or not os.path.exists(artifact_path):
                 continue
             artifact = _load_json_object(artifact_path, f"{submission.get('engine', 'engine')} summary artifact")
-            rows["servingRequestSamples"].extend(_enrich_artifact_rows(artifact.get("samples"), context))
-            rows["servingTokenTimeline"].extend(_enrich_artifact_rows(artifact.get("tokenTimeline"), context))
-            rows["nativeTelemetry"].extend(_enrich_artifact_rows(artifact.get("nativeTelemetry"), context))
-            rows["hardwareTelemetry"].extend(_enrich_artifact_rows(artifact.get("hardwareTelemetry"), context))
-            rows["requestTrace"].extend(_enrich_artifact_rows(artifact.get("requestTrace"), context))
-            rows["measurements"].extend(_enrich_artifact_rows(artifact.get("measurements"), context))
+            capture_policy = artifact.get("capturePolicy") if isinstance(artifact.get("capturePolicy"), dict) else {}
+            artifact_context = {
+                **context,
+                "rawArtifactPath": capture_policy.get("rawArtifactPath"),
+            }
+            rows["servingRequestSamples"].extend(_enrich_artifact_rows(artifact.get("samples"), artifact_context))
+            rows["servingTokenTimeline"].extend(_enrich_artifact_rows(artifact.get("tokenTimeline"), artifact_context))
+            rows["nativeTelemetry"].extend(_enrich_artifact_rows(artifact.get("nativeTelemetry"), artifact_context))
+            rows["hardwareTelemetry"].extend(_enrich_artifact_rows(artifact.get("hardwareTelemetry"), artifact_context))
+            rows["requestTrace"].extend(_enrich_artifact_rows(artifact.get("requestTrace"), artifact_context))
+            rows["measurements"].extend(_enrich_artifact_rows(artifact.get("measurements"), artifact_context))
 
     receipt_log_path = _resolve_proof_member_path(proof.get("receiptLogPath"), proof_dir)
     if receipt_log_path and os.path.exists(receipt_log_path):
@@ -2559,6 +2793,12 @@ def run_serving_smoke(
     submissions: list[dict[str, Any]] = []
     for engine in engines:
         engine_id = engine["engine"]
+        engine_capture_token_details = (
+            bool(engine["captureTokenDetails"])
+            if "captureTokenDetails" in engine
+            else capture_token_details
+        )
+        engine_top_logprobs = engine.get("topLogprobs", top_logprobs)
         result = run_serving_producer(
             engine=engine,
             request={
@@ -2566,8 +2806,8 @@ def run_serving_smoke(
                 "messages": [{"role": "user", "content": prompt}],
                 "repetitions": repetitions,
                 "maxTokens": max_tokens,
-                **({"captureTokenDetails": True} if capture_token_details else {}),
-                **({"topLogprobs": top_logprobs} if top_logprobs is not None else {}),
+                **({"captureTokenDetails": True} if engine_capture_token_details else {}),
+                **({"topLogprobs": engine_top_logprobs} if engine_capture_token_details and engine_top_logprobs is not None else {}),
             },
             performance_iq=performance_iq,
             submit=submit,

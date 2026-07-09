@@ -1677,6 +1677,7 @@ function buildMeasurements(
   config: ServingProducerConfig,
   samples: ServingRequestSample[],
   capturedAtUtc: string,
+  rawArtifactPath: string | null = null,
 ): Record<string, unknown>[] {
   const engineLabel = ENGINE_LABELS[config.engine.engine]
   const successful = samples.filter((sample) => sample.ok)
@@ -1889,6 +1890,7 @@ function buildMeasurements(
     podName: sample.podName,
     nodeName: sample.nodeName,
     hostName: sample.hostName,
+    rawArtifactPath,
     latestCapturedAtUtc: capturedAtUtc,
   }))
   const timelineRows = samples.flatMap((sample) => (sample.tokenTimeline ?? []).map((chunk): Record<string, unknown> => ({
@@ -2098,6 +2100,7 @@ function producerCoverageRows(
     missingJson: JSON.stringify(missing),
     description: PRODUCER_COVERAGE_DESCRIPTIONS[category],
     allProven,
+    proofPath: rawArtifactPath,
     latestCapturedAtUtc: capturedAtUtc,
   }))
 }
@@ -2231,8 +2234,8 @@ export async function runServingProducer(config: ServingProducerConfig): Promise
     samples.push(sanitizedSample)
   }
 
-  const measurements = buildMeasurements(config, samples, capturedAtUtc)
   const rawArtifactPath = await writeRawArtifact(config, rawCaptures, capturedAtUtc)
+  const measurements = buildMeasurements(config, samples, capturedAtUtc, rawArtifactPath)
   measurements.push(...producerCoverageRows(config, samples, measurements[0], rawArtifactPath, rawCaptures, capturedAtUtc))
   const artifactPath = await writeSummaryArtifact(config, samples, measurements, capturedAtUtc, rawArtifactPath)
   const engineLabel = ENGINE_LABELS[config.engine.engine]

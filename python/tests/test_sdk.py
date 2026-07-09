@@ -18,6 +18,7 @@ from performance_iq_sdk import PerformanceIQ, build_manifest, laptop_smoke_model
 from performance_iq_sdk.serving_smoke import (
     engine_configs_from_env,
     endpoint_probe,
+    external_python_module_probe,
     extract_proof_rows,
     build_serving_event_records,
     huggingface_model_cache_name,
@@ -117,8 +118,17 @@ class PerformanceIQSdkTest(unittest.TestCase):
         "PIQ_TENSORRT_LLM_IMAGE",
         "PIQ_PYTHON_BIN",
         "PIQ_SERVING_BIN_DIR",
+        "PIQ_VLLM_PYTHON_BIN",
+        "PIQ_SGLANG_PYTHON_BIN",
+        "PIQ_TENSORRT_LLM_PYTHON_BIN",
         "PIQ_VLLM_SOURCE_PATH",
         "PIQ_SGLANG_SOURCE_PATH",
+        "PIQ_VLLM_CAPTURE_TOKEN_DETAILS",
+        "PIQ_SGLANG_CAPTURE_TOKEN_DETAILS",
+        "PIQ_TENSORRT_LLM_CAPTURE_TOKEN_DETAILS",
+        "PIQ_VLLM_TOP_LOGPROBS",
+        "PIQ_SGLANG_TOP_LOGPROBS",
+        "PIQ_TENSORRT_LLM_TOP_LOGPROBS",
         "PIQ_SERVING_ALLOW_PARTIAL",
         "PIQ_COMMAND_PROBE_TIMEOUT_SECONDS",
     ]
@@ -598,6 +608,11 @@ class PerformanceIQSdkTest(unittest.TestCase):
         raw_artifacts = [item for item in manifest["artifacts"] if item["kind"] == "operator-full-serving-raw"]
         self.assertEqual(len(raw_artifacts), 1)
         self.assertTrue(os.path.exists(raw_artifacts[0]["path"]))
+        self.assertEqual(sample_rows[0]["rawArtifactPath"], raw_artifacts[0]["path"])
+        self.assertEqual(
+            next(row for row in coverage_rows if row["coverageCategory"] == "operatorFullArtifacts")["proofPath"],
+            raw_artifacts[0]["path"],
+        )
 
     def test_serving_producer_fails_closed_on_interrupted_stream(self):
         def http_stream_json(url, headers, payload):
@@ -639,6 +654,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
         coverage_rows = [row for row in result["measurements"] if row.get("surface") == "serving_telemetry_coverage"]
         self.assertEqual(sample_rows[0]["ok"], False)
         self.assertIsNone(sample_rows[0]["ttftMs"])
+        self.assertTrue(os.path.exists(sample_rows[0]["rawArtifactPath"]))
         self.assertEqual(token_rows, [])
         self.assertEqual(
             next(row for row in coverage_rows if row["coverageCategory"] == "clientStreamTiming")["coverageStatus"],
@@ -1545,6 +1561,14 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertEqual(rows["rowCounts"]["servingRequestSamples"], 3)
         self.assertEqual(rows["rowCounts"]["telemetryCoverageRows"], 33)
         self.assertGreaterEqual(rows["rowCounts"]["servingTokenTimeline"], 18)
+        first_sample_row = rows["servingRequestSamples"][0]
+        self.assertIn(first_sample_row["runtimeEngine"], {"vllm", "sglang", "tensorrt-llm"})
+        self.assertTrue(first_sample_row["rawArtifactPath"].endswith("-operator-full.json"))
+        self.assertTrue(os.path.exists(first_sample_row["rawArtifactPath"]))
+        self.assertEqual(
+            next(row for row in rows["measurements"] if row.get("surface") == "serving_request_sample")["rawArtifactPath"],
+            first_sample_row["rawArtifactPath"],
+        )
         raw_artifact_path = rows["submissions"][0]["artifactPath"].replace(".json", "-operator-full.json")
         with open(raw_artifact_path, encoding="utf-8") as handle:
             raw_artifact = json.load(handle)
@@ -1783,6 +1807,38 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertEqual([config["engine"] for config in configs], ["vllm"])
         self.assertEqual(missing, ["sglang (PIQ_SGLANG_URL)", "tensorrt-llm (PIQ_TENSORRT_LLM_URL)"])
 
+    def test_serving_smoke_reads_per_engine_token_detail_overrides(self):
+        class Args:
+            vllm_url = "http://127.0.0.1:8000"
+            sglang_url = "http://127.0.0.1:30000"
+            tensorrt_llm_url = None
+            framework_version = None
+            model_revision = None
+            image_digest = None
+            image_tag = None
+            server_args = None
+            tokenizer_model = None
+            resolve_token_ids_with_tokenizer = False
+            collect_hardware_metrics = False
+            require_native_telemetry = False
+            require_hardware_telemetry = False
+            process_id = None
+            container_id = None
+            pod_name = None
+            node_name = None
+            host_name = None
+
+        os.environ["PIQ_VLLM_CAPTURE_TOKEN_DETAILS"] = "true"
+        os.environ["PIQ_VLLM_TOP_LOGPROBS"] = "3"
+        os.environ["PIQ_SGLANG_CAPTURE_TOKEN_DETAILS"] = "false"
+
+        configs, _missing = engine_configs_from_env(Args())
+        by_engine = {config["engine"]: config for config in configs}
+
+        self.assertTrue(by_engine["vllm"]["captureTokenDetails"])
+        self.assertEqual(by_engine["vllm"]["topLogprobs"], 3)
+        self.assertFalse(by_engine["sglang"]["captureTokenDetails"])
+
     def test_serving_smoke_preflight_reports_missing_without_requests(self):
         os.environ["PIQ_COMMAND_PROBE_TIMEOUT_SECONDS"] = "2.5"
         preflight = runtime_preflight([], ["vllm (PIQ_VLLM_URL)"], model=laptop_smoke_model())
@@ -1793,11 +1849,46 @@ DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{gpu="0"} 2500
         self.assertEqual(preflight["configuredEngineCount"], 0)
         self.assertIn("vllmCommand", preflight["localRuntime"])
         self.assertIn("vllmExtension", preflight["localRuntime"])
+        self.assertIn("runtimeCandidates", preflight["localRuntime"])
+        self.assertIn("vllm", preflight["localRuntime"]["runtimeCandidates"])
+        self.assertIn("sglang", preflight["localRuntime"]["runtimeCandidates"])
         self.assertEqual(preflight["localRuntime"]["commandProbeTimeoutSeconds"], 2.5)
         self.assertIn("python", preflight["host"])
         self.assertIn("freeGiB", preflight["storage"])
         self.assertEqual(preflight["launchPlan"]["model"], laptop_smoke_model())
         self.assertEqual(preflight["launchPlan"]["endpointEnv"]["PIQ_VLLM_URL"], "http://127.0.0.1:8000")
+
+    def test_external_python_module_probe_imports_from_selected_interpreter(self):
+        probe = external_python_module_probe(sys.executable, "json", import_module=True)
+
+        self.assertTrue(probe["available"])
+        self.assertTrue(probe["imported"])
+        self.assertEqual(probe["python"], sys.executable)
+
+    def test_serving_smoke_diagnostics_uses_local_runtime_candidates(self):
+        runtime_candidates = {
+            "vllm": {
+                "pythonEnv": "PIQ_VLLM_PYTHON_BIN",
+                "usable": True,
+                "preferred": {"python": "/tmp/vllm/bin/python", "usable": True},
+                "candidates": [{"python": "/tmp/vllm/bin/python", "usable": True}],
+            },
+            "sglang": {
+                "pythonEnv": "PIQ_SGLANG_PYTHON_BIN",
+                "usable": True,
+                "preferred": {"python": "/tmp/sglang/bin/python", "usable": True},
+                "candidates": [{"python": "/tmp/sglang/bin/python", "usable": True}],
+            },
+        }
+        with patch("performance_iq_sdk.serving_smoke.local_runtime_discovery", return_value=runtime_candidates):
+            diagnostics = runtime_diagnostics([], ["vllm (PIQ_VLLM_URL)"], model=laptop_smoke_model())
+
+        blockers = " ".join(diagnostics["blockers"])
+        self.assertTrue(diagnostics["preflight"]["localRuntime"]["runtimeCandidates"]["vllm"]["usable"])
+        self.assertTrue(diagnostics["preflight"]["localRuntime"]["runtimeCandidates"]["sglang"]["usable"])
+        self.assertIn("Missing configured endpoint URL for vllm (PIQ_VLLM_URL).", blockers)
+        self.assertNotIn("Python module 'vllm' is not importable", blockers)
+        self.assertNotIn("Python module 'sglang' is not importable", blockers)
 
     def test_serving_smoke_vllm_extension_probe_handles_missing_parent_module(self):
         with patch(

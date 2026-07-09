@@ -1676,6 +1676,7 @@ def _build_measurements(
     pricing: dict[str, Any] | None,
     samples: list[dict[str, Any]],
     captured_at_utc: str,
+    raw_artifact_path: str | None = None,
 ) -> list[dict[str, Any]]:
     engine_id = str(engine["engine"])
     engine_label = serving_engine_label(engine_id)
@@ -1968,6 +1969,7 @@ def _build_measurements(
             "podName": sample.get("podName"),
             "nodeName": sample.get("nodeName"),
             "hostName": sample.get("hostName"),
+            "rawArtifactPath": raw_artifact_path,
             "latestCapturedAtUtc": captured_at_utc,
         })
         for chunk in sample.get("tokenTimeline") or []:
@@ -2061,6 +2063,7 @@ def _coverage_row(
     engine_id: str,
     engine_label: str,
     captured_at_utc: str,
+    raw_artifact_path: str | None,
     category: str,
     proven: int,
     expected: int,
@@ -2081,6 +2084,7 @@ def _coverage_row(
         "missingJson": json.dumps(missing, sort_keys=True, separators=(",", ":")),
         "description": PRODUCER_COVERAGE_DESCRIPTIONS[category],
         "allProven": all_proven,
+        "proofPath": raw_artifact_path,
         "latestCapturedAtUtc": captured_at_utc,
     }
 
@@ -2207,6 +2211,7 @@ def _build_producer_coverage_rows(
             engine_id=engine_id,
             engine_label=engine_label,
             captured_at_utc=captured_at_utc,
+            raw_artifact_path=raw_artifact_path,
             category=category,
             proven=proven,
             expected=expected,
@@ -2413,9 +2418,9 @@ def run_serving_producer(
         "scenario": f"OpenAI-compatible chat completions through {serving_engine_label(engine['engine'])}",
         **(workload or {}),
     }
-    measurements = _build_measurements(engine, request, workload, pricing, samples, captured_at_utc)
     artifact_root = artifact_dir or os.path.join(os.getcwd(), ".performance-iq", "serving-producers")
     raw_artifact_path = _write_raw_artifact(engine, request, artifact_root, captured_at_utc, raw_captures)
+    measurements = _build_measurements(engine, request, workload, pricing, samples, captured_at_utc, raw_artifact_path)
     measurements.extend(_build_producer_coverage_rows(
         engine,
         request,

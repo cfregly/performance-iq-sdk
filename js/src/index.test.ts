@@ -256,6 +256,12 @@ describe("performance-iq-sdk js", () => {
     expect(manifestArtifact.artifacts[0].path).toBe(result.artifactPath)
     expect(manifestArtifact.artifacts[0].sha256).toBe(result.manifest.artifacts[0].sha256)
     expect(manifestArtifact.artifacts.some((entry: { kind: string }) => entry.kind === "operator-full-serving-raw")).toBe(true)
+    const rawArtifact = manifestArtifact.artifacts.find((entry: { kind: string; path: string }) => entry.kind === "operator-full-serving-raw")
+    expect(rawArtifact).toBeDefined()
+    if (!rawArtifact) throw new Error("operator-full-serving-raw artifact missing")
+    const sampleRows = result.measurements.filter((row) => row.surface === "serving_request_sample")
+    expect(sampleRows[0].rawArtifactPath).toBe(rawArtifact.path)
+    expect(coverageRows.find((row) => row.coverageCategory === "operatorFullArtifacts")?.proofPath).toBe(rawArtifact.path)
     expect(manifestArtifact.platform.requestTraceIds).toEqual(result.samples.map((sample) => sample.requestId))
     expect((await validateRun(result.runInput)).ok).toBe(true)
   })
@@ -322,6 +328,7 @@ describe("performance-iq-sdk js", () => {
     const timelineRows = result.measurements.filter((row) => row.surface === "serving_token_timeline")
     const coverageRows = result.measurements.filter((row) => row.surface === "serving_telemetry_coverage")
     expect(sampleRows[0]).toMatchObject({ ok: false, ttftMs: null, tpotMs: null, ttfotMs: null })
+    expect(fs.existsSync(String(sampleRows[0].rawArtifactPath))).toBe(true)
     expect(timelineRows).toHaveLength(0)
     expect(coverageRows.find((row) => row.coverageCategory === "clientStreamTiming")).toMatchObject({
       coverageStatus: "missing",
