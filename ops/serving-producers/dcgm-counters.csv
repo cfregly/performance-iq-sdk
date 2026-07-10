@@ -1,0 +1,56 @@
+# Performance IQ strict serving telemetry.
+# Format: DCGM field, Prometheus metric type, help message.
+
+# Clocks, temperature, power, memory, and utilization.
+DCGM_FI_DEV_SM_CLOCK, gauge, SM clock frequency in MHz.
+DCGM_FI_DEV_MEM_CLOCK, gauge, Memory clock frequency in MHz.
+DCGM_FI_DEV_MEMORY_TEMP, gauge, Memory temperature in C.
+DCGM_FI_DEV_GPU_TEMP, gauge, GPU temperature in C.
+DCGM_FI_DEV_POWER_USAGE, gauge, Power draw in W.
+DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION, counter, Total energy consumption since boot in mJ.
+DCGM_FI_DEV_GPU_UTIL, gauge, GPU utilization in percent.
+DCGM_FI_DEV_MEM_COPY_UTIL, gauge, Memory copy utilization in percent.
+DCGM_FI_DEV_ENC_UTIL, gauge, Encoder utilization in percent.
+DCGM_FI_DEV_DEC_UTIL, gauge, Decoder utilization in percent.
+DCGM_FI_DEV_FB_FREE, gauge, Framebuffer memory free in MiB.
+DCGM_FI_DEV_FB_USED, gauge, Framebuffer memory used in MiB.
+DCGM_FI_DEV_FB_RESERVED, gauge, Framebuffer memory reserved in MiB.
+
+# PCIe and NVLink.
+DCGM_FI_DEV_PCIE_TX_THROUGHPUT, gauge, PCIe transmit throughput in KiB per second.
+DCGM_FI_DEV_PCIE_RX_THROUGHPUT, gauge, PCIe receive throughput in KiB per second.
+DCGM_FI_DEV_PCIE_REPLAY_COUNTER, counter, Total PCIe retries.
+DCGM_FI_PROF_PCIE_TX_BYTES, gauge, PCIe transmit bytes per second.
+DCGM_FI_PROF_PCIE_RX_BYTES, gauge, PCIe receive bytes per second.
+DCGM_FI_PROF_NVLINK_TX_BYTES, gauge, NVLink transmit bytes per second.
+DCGM_FI_PROF_NVLINK_RX_BYTES, gauge, NVLink receive bytes per second.
+DCGM_FI_DEV_NVLINK_BANDWIDTH_TOTAL, counter, Total NVLink bandwidth counter across lanes.
+
+# Errors, ECC, health, and throttling.
+DCGM_FI_DEV_XID_ERRORS, gauge, Last XID error encountered.
+DCGM_FI_DEV_ECC_SBE_VOL_TOTAL, counter, Volatile single-bit ECC errors.
+DCGM_FI_DEV_ECC_DBE_VOL_TOTAL, counter, Volatile double-bit ECC errors.
+DCGM_FI_DEV_ECC_SBE_AGG_TOTAL, counter, Aggregate single-bit ECC errors.
+DCGM_FI_DEV_ECC_DBE_AGG_TOTAL, counter, Aggregate double-bit ECC errors.
+DCGM_FI_DEV_POWER_VIOLATION, counter, Power constraint throttling duration.
+DCGM_FI_DEV_THERMAL_VIOLATION, counter, Thermal constraint throttling duration.
+DCGM_FI_DEV_UNCORRECTABLE_REMAPPED_ROWS, counter, Uncorrectable remapped rows.
+DCGM_FI_DEV_CORRECTABLE_REMAPPED_ROWS, counter, Correctable remapped rows.
+DCGM_FI_DEV_ROW_REMAP_FAILURE, gauge, Row remapping failure status.
+DCGM_EXP_CLOCK_EVENTS_COUNT, counter, Reported clock events.
+DCGM_EXP_XID_ERRORS_COUNT, counter, Reported XIDs during the collection window.
+DCGM_EXP_GPU_HEALTH_STATUS, gauge, DCGM GPU health status.
+DCGM_EXP_P2P_STATUS, gauge, Peer-to-peer NVLink status.
+
+# Datacenter profiling counters.
+DCGM_FI_PROF_GR_ENGINE_ACTIVE, gauge, Ratio of time the graphics engine is active.
+DCGM_FI_PROF_SM_ACTIVE, gauge, Ratio of cycles with an active SM warp.
+DCGM_FI_PROF_SM_OCCUPANCY, gauge, Ratio of resident warps on an SM.
+DCGM_FI_PROF_PIPE_TENSOR_ACTIVE, gauge, Ratio of active tensor pipe cycles.
+DCGM_FI_PROF_DRAM_ACTIVE, gauge, Ratio of active device memory cycles.
+DCGM_FI_PROF_PIPE_FP64_ACTIVE, gauge, Ratio of active FP64 pipe cycles.
+DCGM_FI_PROF_PIPE_FP32_ACTIVE, gauge, Ratio of active FP32 pipe cycles.
+DCGM_FI_PROF_PIPE_FP16_ACTIVE, gauge, Ratio of active FP16 pipe cycles.
+
+# Static provenance label.
+DCGM_FI_DRIVER_VERSION, label, NVIDIA driver version.

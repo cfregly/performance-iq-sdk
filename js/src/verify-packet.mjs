@@ -376,6 +376,9 @@ function placeholderEvidenceFindings(manifest) {
   if (FAKE_ENGINE_PATTERN.test(String(manifest.runtime?.imageTag ?? ""))) {
     findings.push(`runtime.imageTag is fake-engine evidence (${manifest.runtime.imageTag})`)
   }
+  if (/uncontainerized-local/i.test(String(manifest.runtime?.imageTag ?? ""))) {
+    findings.push("runtime.imageTag identifies an uncontainerized local runtime")
+  }
   for (const [index, artifact] of (Array.isArray(manifest.artifacts) ? manifest.artifacts : []).entries()) {
     const sha = String(artifact?.sha256 ?? "")
     if (sha === "0".repeat(64)) findings.push(`artifacts[${index}].sha256 is all zeros`)

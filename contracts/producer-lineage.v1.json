@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "performance-iq.producer-lineage.v1",
+  "sourceTables": [
+    "platform_store.iceberg.intake_platform_store.hpc_perftest_raw"
+  ],
+  "modelTables": [
+    "model_store.fact_hpc_perftest_testcase_events"
+  ]
+}

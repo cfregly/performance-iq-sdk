@@ -4,8 +4,10 @@ import { readFile, stat } from "node:fs/promises"
 export const PRODUCER_MANIFEST_VERSION = "performance-iq.producer-manifest.v1"
 export const INGESTION_REQUEST_VERSION = "performance-iq.ingestion-request.v1"
 export const LATEST_PRODUCER_SOURCE_TABLES = [
-  "platform_store.object_store.producer_runner_result_bundles",
-  "platform_store.iceberg.intake_store.producer_runner_results",
+  "platform_store.iceberg.intake_platform_store.hpc_perftest_raw",
+]
+export const LATEST_PRODUCER_MODEL_TABLES = [
+  "model_store.fact_hpc_perftest_testcase_events",
 ]
 
 export type SourceType = "fresh-run" | "other-measured-producer"

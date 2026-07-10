@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto"
-import { existsSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { existsSync, readFileSync } from "node:fs"
 import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 
 import {
   buildManifest,
@@ -23,7 +25,12 @@ export interface ServingEngineConfig {
   apiKey?: string
   requestPath?: string
   metricsUrl?: string
+  metricsUrlAutoConfigured?: boolean
   nativeJsonMetricsUrl?: string
+  nativeJsonMetricsUrlAutoConfigured?: boolean
+  nativePerfMetricsUrl?: string
+  nativePerfMetricsUrlAutoConfigured?: boolean
+  perfMetricsUrl?: string
   jsonMetricsUrl?: string
   collectNativeMetrics?: boolean
   hardwareMetricsUrl?: string
@@ -36,7 +43,14 @@ export interface ServingEngineConfig {
   tokenIdMap?: Record<string, number | string>
   tokenIdResolver?: (token: string, item: Record<string, unknown>, engine: ServingEngineConfig, request: ServingRequestConfig) => number | string | null | undefined
   promptTokenIds?: Array<number | string>
+  tokenizerModel?: string
+  tokenizerPythonBin?: string
+  tokenizerResolveTimeoutSeconds?: number
+  tokenizerTrustRemoteCode?: boolean
+  trustRemoteCode?: boolean
+  resolveTokenIdsWithTokenizer?: boolean
   frameworkVersion?: string
+  runtimeBackend?: string
   modelRevision?: string
   imageDigest?: string
   imageTag?: string
@@ -48,6 +62,8 @@ export interface ServingEngineConfig {
   nodeName?: string
   hostName?: string
   hostname?: string
+  hardwareInventoryPath?: string
+  hardwareInventorySha256?: string
   endpointPreflight?: Record<string, unknown>
 }
 
@@ -64,6 +80,7 @@ export interface ServingRequestConfig {
   topLogprobs?: number
   promptTokenIds?: Array<number | string>
   tokenizerModel?: string
+  resolveTokenIdsWithTokenizer?: boolean
 }
 
 export interface ServingProducerConfig {
@@ -72,6 +89,11 @@ export interface ServingProducerConfig {
   performanceIq?: PerformanceIQ
   submit?: boolean
   artifactDir?: string
+  eventLogPath?: string
+  writeEventLog?: boolean
+  eventTopic?: string
+  /** @deprecated Use eventTopic. The stable SDK does not publish to Kafka. */
+  kafkaTopic?: string
   producer?: Partial<ProducerIdentity>
   campaign?: Partial<PerformanceIQRunInput["campaign"]>
   workload?: Partial<PerformanceIQRunInput["workload"]>
@@ -134,6 +156,12 @@ export interface ServingRequestSample {
   nativeGpuMemoryBytes?: number | null
   nativeKvCacheUsedBlocks?: number | null
   nativeKvCacheMaxBlocks?: number | null
+  trtllmPerfKvAllocatedBlocks?: number | null
+  trtllmPerfKvNewBlocks?: number | null
+  trtllmPerfKvReusedBlocks?: number | null
+  trtllmPerfKvMissedBlocks?: number | null
+  trtllmPerfRecordCount?: number | null
+  trtllmPerfRequestIdSha256?: string | null
   runningRequests?: number | null
   waitingRequests?: number | null
   kvCacheUsagePct?: number | null
@@ -148,18 +176,46 @@ export interface ServingRequestSample {
   avgPowerWattsPerGpu?: number | null
   gpuUtilizationPct?: number | null
   memoryCopyUtilizationPct?: number | null
+  smActivePct?: number | null
+  dramActivePct?: number | null
+  tensorActivePct?: number | null
+  fp64ActivePct?: number | null
+  fp32ActivePct?: number | null
+  fp16ActivePct?: number | null
+  pcieTxThroughputKiBps?: number | null
+  pcieRxThroughputKiBps?: number | null
+  pcieTxBytesDelta?: number | null
+  pcieRxBytesDelta?: number | null
+  pcieReplayDelta?: number | null
+  nvlinkTxBytesDelta?: number | null
+  nvlinkRxBytesDelta?: number | null
+  nvlinkBandwidthTotalMBps?: number | null
+  encoderUtilizationPct?: number | null
+  decoderUtilizationPct?: number | null
   gpuTemperatureC?: number | null
   smClockMHz?: number | null
   memoryClockMHz?: number | null
   fbUsedMiB?: number | null
   fbFreeMiB?: number | null
   energyJoules?: number | null
+  xidErrors?: number | null
+  xidErrorsDelta?: number | null
+  eccSbeVolatileTotalDelta?: number | null
+  eccDbeVolatileTotalDelta?: number | null
+  powerViolationTimeUsDelta?: number | null
+  thermalViolationTimeUsDelta?: number | null
+  hardwareRawMetricCount?: number | null
+  hardwareRawMetricNamesSha256?: string | null
   tokenDetailsAvailable?: boolean
   tokenIdsAvailable?: boolean
   logprobsAvailable?: boolean
   tokenDetailCount?: number
   tokenDetailSource?: string
   tokenIdSource?: string | null
+  tokenDetailsCapabilityStatus?: string | null
+  tokenDetailsUnsupportedReason?: string | null
+  tokenizerModel?: string | null
+  tokenizerPythonBinSha256?: string | null
   promptTokenIdsAvailable?: boolean
   promptTokenDetailCount?: number
   promptTokenIdSource?: string | null
@@ -170,6 +226,7 @@ export interface ServingRequestSample {
   prefillMs?: number | null
   decodeMs?: number | null
   engineVersion?: unknown
+  runtimeBackend?: unknown
   modelRevision?: unknown
   imageTag?: unknown
   imageDigest?: unknown
@@ -179,7 +236,9 @@ export interface ServingRequestSample {
   podName?: unknown
   nodeName?: unknown
   hostName?: unknown
+  hardwareInventorySha256?: unknown
   tokenTimeline?: ServingTokenTimelineChunk[]
+  metricSnapshots?: ServingMetricSnapshot[]
   error?: string
 }
 
@@ -199,6 +258,20 @@ export interface ServingTokenTimelineChunk {
   tokenTextSha256?: string | null
   topLogprobsJson?: string | null
   tokenDetailSource?: string
+  tokenizerModel?: string | null
+  tokenizerPythonBinSha256?: string | null
+}
+
+export interface ServingMetricSnapshot {
+  requestId: string
+  metricSource: string
+  snapshotPhase: "before" | "after"
+  metricName: string
+  metricLabelsSha256: string
+  metricValue: number
+  metricSampleOrdinal: number
+  capturedAtUtc?: string
+  rawMetricTextSha256?: string | null
 }
 
 type PromptTokenSummary = Pick<
@@ -222,6 +295,7 @@ export interface ServingProducerResult {
   runInput: PerformanceIQRunInput
   artifactPath: string
   manifestPath: string
+  eventLogPath?: string
   samples: ServingRequestSample[]
   measurements: Record<string, unknown>[]
   submission?: unknown
@@ -233,7 +307,23 @@ const ENGINE_LABELS: Record<ServingEngineId, string> = {
   "tensorrt-llm": "TensorRT-LLM",
 }
 
-const DEFAULT_IMAGE_DIGEST = `sha256:${"0".repeat(64)}`
+const DEFAULT_IMAGE_DIGEST = `sha256:${sha256Text("performance-iq-sdk:uncontainerized-local:v1")}`
+const DEFAULT_PRODUCER_COMMIT = `uncommitted-worktree:${createHash("sha256")
+  .update(readFileSync(fileURLToPath(import.meta.url)))
+  .digest("hex")}`
+const SERVING_EVENT_SCHEMA_VERSION = "performance-iq.serving-telemetry-event.v1"
+const SERVING_EVENT_DEFAULT_TOPIC = "performance-iq.serving.telemetry.v1"
+const EXTERNAL_TOKENIZER_CACHE = new Map<string, number | null>()
+const EXTERNAL_PROMPT_TOKENIZER_CACHE = new Map<string, {
+  tokenIds: number[]
+  tokenTexts: Array<string | null>
+  mode: string
+} | null>()
+const EXTERNAL_TEXT_TOKENIZER_CACHE = new Map<string, {
+  tokenIds: number[]
+  tokenTexts: Array<string | null>
+  mode: string
+} | null>()
 
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "")
@@ -241,6 +331,41 @@ function normalizeBaseUrl(value: string): string {
 
 function safeSlug(value: string): string {
   return value.replace(/[^a-z0-9._-]+/gi, "-").replace(/^-|-$/g, "") || "value"
+}
+
+function artifactDir(config: ServingProducerConfig): string {
+  return config.artifactDir ?? path.join(process.cwd(), ".performance-iq", "serving-producers")
+}
+
+function artifactBaseName(config: ServingProducerConfig, capturedAtUtc: string): string {
+  return `${config.engine.engine}-${safeSlug(config.request.model)}-${capturedAtUtc.replace(/[:.]/g, "-")}`
+}
+
+function summaryArtifactPath(config: ServingProducerConfig, capturedAtUtc: string): string {
+  return path.join(artifactDir(config), `${artifactBaseName(config, capturedAtUtc)}.json`)
+}
+
+function rawArtifactPath(config: ServingProducerConfig, capturedAtUtc: string): string {
+  return path.join(artifactDir(config), `${artifactBaseName(config, capturedAtUtc)}-operator-full.json`)
+}
+
+function manifestArtifactPath(config: ServingProducerConfig, capturedAtUtc: string): string {
+  return path.join(artifactDir(config), `${artifactBaseName(config, capturedAtUtc)}-manifest.json`)
+}
+
+function eventLogEnabled(config: ServingProducerConfig): boolean {
+  return config.writeEventLog !== false
+}
+
+function servingEventLogPath(config: ServingProducerConfig, capturedAtUtc: string): string | null {
+  if (!eventLogEnabled(config)) return null
+  const configuredPath = config.eventLogPath?.trim()
+  if (configuredPath) return configuredPath
+  return path.join(artifactDir(config), `${artifactBaseName(config, capturedAtUtc)}-events.jsonl`)
+}
+
+function eventTopic(config: ServingProducerConfig): string {
+  return config.eventTopic?.trim() || config.kafkaTopic?.trim() || SERVING_EVENT_DEFAULT_TOPIC
 }
 
 function nowIso(now: () => Date): string {
@@ -270,6 +395,29 @@ function sha256Json(value: unknown): string {
   return sha256Text(JSON.stringify(value))
 }
 
+function stableJson(value: unknown): string {
+  return JSON.stringify(stableJsonValue(value)) ?? "null"
+}
+
+function stableJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => stableJsonValue(item) ?? null)
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value as Record<string, unknown>)
+        .sort()
+        .flatMap((key) => {
+          const normalized = stableJsonValue((value as Record<string, unknown>)[key])
+          return normalized === undefined ? [] : [[key, normalized]]
+        }),
+    )
+  }
+  return value
+}
+
+function sha256StableJson(value: unknown): string {
+  return sha256Text(stableJson(value))
+}
+
 function sha256OptionalJson(value: unknown): string | null {
   return value == null ? null : sha256Json(value)
 }
@@ -291,11 +439,37 @@ function firstDefined(source: Record<string, unknown>, keys: string[]): unknown 
   return undefined
 }
 
+function tokenizerResolutionRequested(config: ServingProducerConfig): boolean {
+  return Boolean(config.request.resolveTokenIdsWithTokenizer || config.engine.resolveTokenIdsWithTokenizer)
+}
+
+function tokenizerModel(config: ServingProducerConfig): string | null {
+  const engineExtras = config.engine as unknown as Record<string, unknown>
+  const explicit = config.request.tokenizerModel ?? engineExtras.tokenizerModel ?? engineExtras.tokenizer_model
+  if (typeof explicit === "string" && explicit.trim()) return explicit.trim()
+  return tokenizerResolutionRequested(config) ? config.request.model : null
+}
+
+function tokenizerPythonBin(config: ServingProducerConfig): string | null {
+  const engineExtras = config.engine as unknown as Record<string, unknown>
+  const value = engineExtras.tokenizerPythonBin ?? engineExtras.tokenizer_python_bin
+  return typeof value === "string" && value.trim() ? value.trim() : null
+}
+
+function tokenizerProvenance(config: ServingProducerConfig): Record<string, string | null> {
+  const pythonBin = tokenizerPythonBin(config)
+  return {
+    tokenizerModel: tokenizerModel(config),
+    tokenizerPythonBinSha256: pythonBin ? createHash("sha256").update(readFileSync(pythonBin)).digest("hex") : null,
+  }
+}
+
 function runtimeProvenance(config: ServingProducerConfig, telemetry: Record<string, unknown> = {}): Record<string, unknown> {
   const engine = config.engine as unknown as Record<string, unknown>
   const serverArgs = telemetry.serverArgs ?? engine.serverArgs
   return {
     engineVersion: telemetry.engineVersion ?? engine.frameworkVersion,
+    runtimeBackend: telemetry.runtimeBackend ?? engine.runtimeBackend,
     modelRevision: telemetry.modelRevision ?? engine.modelRevision,
     imageTag: firstDefined(engine, ["imageTag", "containerImageTag"]),
     imageDigest: firstDefined(engine, ["imageDigest", "containerImageDigest"]),
@@ -305,6 +479,8 @@ function runtimeProvenance(config: ServingProducerConfig, telemetry: Record<stri
     podName: firstDefined(engine, ["podName"]) ?? nestedValue(engine, "container", ["podName"]),
     nodeName: firstDefined(engine, ["nodeName"]) ?? nestedValue(engine, "container", ["nodeName"]),
     hostName: firstDefined(engine, ["hostName", "hostname"]) ?? nestedValue(engine, "process", ["hostName", "hostname"]),
+    hardwareInventorySha256: engine.hardwareInventorySha256,
+    ...tokenizerProvenance(config),
   }
 }
 
@@ -364,6 +540,18 @@ function metricCompleteness(row: Record<string, unknown>): number {
       row.avgPowerWattsPerGpu,
       row.avgGpuUtilizationPct,
       row.avgMemoryCopyUtilizationPct,
+      row.avgSmActivePct,
+      row.avgDramActivePct,
+      row.avgTensorActivePct,
+      row.avgPcieTxBytesDelta,
+      row.avgPcieRxBytesDelta,
+      row.avgNvlinkTxBytesDelta,
+      row.avgNvlinkRxBytesDelta,
+      row.avgEncoderUtilizationPct,
+      row.avgDecoderUtilizationPct,
+      row.avgXidErrorsDelta,
+      row.avgEccDbeVolatileTotalDelta,
+      row.hardwareRawMetricCountMin,
       row.totalEnergyJoules,
     )
   }
@@ -372,6 +560,9 @@ function metricCompleteness(row: Record<string, unknown>): number {
   }
   if (row.promptTokenDetailsRequired) {
     required.push(row.promptTokenIdsAvailableCount === row.successCount ? row.promptTokenIdsAvailableCount : null)
+  }
+  if (row.eventLogRequired) {
+    required.push(row.eventLogWritten ? 1 : null)
   }
   return required.filter((value) => typeof value === "number" && finite(value)).length / required.length
 }
@@ -493,6 +684,10 @@ function defaultNativeJsonMetricsUrl(engine: ServingEngineConfig): string | null
   return engine.engine === "tensorrt-llm" ? `${normalizeBaseUrl(engine.baseUrl)}/metrics` : null
 }
 
+function defaultNativePerfMetricsUrl(engine: ServingEngineConfig): string | null {
+  return engine.engine === "tensorrt-llm" ? `${normalizeBaseUrl(engine.baseUrl)}/perf_metrics` : null
+}
+
 function metricsUrl(config: ServingProducerConfig): string | null {
   if (config.engine.metricsUrl?.trim()) return config.engine.metricsUrl.trim()
   return config.engine.collectNativeMetrics ? defaultNativeMetricsUrl(config.engine) : null
@@ -502,6 +697,24 @@ function nativeJsonMetricsUrl(config: ServingProducerConfig): string | null {
   if (config.engine.nativeJsonMetricsUrl?.trim()) return config.engine.nativeJsonMetricsUrl.trim()
   if (config.engine.jsonMetricsUrl?.trim()) return config.engine.jsonMetricsUrl.trim()
   return config.engine.collectNativeMetrics ? defaultNativeJsonMetricsUrl(config.engine) : null
+}
+
+function nativePerfMetricsUrl(config: ServingProducerConfig): string | null {
+  if (config.engine.nativePerfMetricsUrl?.trim()) return config.engine.nativePerfMetricsUrl.trim()
+  if (config.engine.perfMetricsUrl?.trim()) return config.engine.perfMetricsUrl.trim()
+  return config.engine.collectNativeMetrics ? defaultNativePerfMetricsUrl(config.engine) : null
+}
+
+function nativeTelemetryExpected(config: ServingProducerConfig): boolean {
+  if (config.engine.requireNativeTelemetry) return true
+  if (config.engine.metricsUrlAutoConfigured || config.engine.nativeJsonMetricsUrlAutoConfigured || config.engine.nativePerfMetricsUrlAutoConfigured) return false
+  return Boolean(metricsUrl(config) || nativeJsonMetricsUrl(config) || nativePerfMetricsUrl(config))
+}
+
+const DCGM_BLANK_VALUE_THRESHOLD = 9e18
+
+function isDcgmBlankValue(metricName: string, value: number): boolean {
+  return metricName.startsWith("DCGM_") && Math.abs(value) >= DCGM_BLANK_VALUE_THRESHOLD
 }
 
 function parsePrometheusMetrics(text: string): Record<string, number> {
@@ -514,6 +727,7 @@ function parsePrometheusMetrics(text: string): Record<string, number> {
     const value = Number(match[3])
     if (!Number.isFinite(value)) continue
     const metricName = match[1]
+    if (isDcgmBlankValue(metricName, value)) continue
     metrics[metricName] = (metrics[metricName] ?? 0) + value
     metrics[`${metricName}__sample_count`] = (metrics[`${metricName}__sample_count`] ?? 0) + 1
     const labels = Object.fromEntries(Array.from((match[2] ?? "").matchAll(/([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"/g), (item) => [item[1], item[2]]))
@@ -532,6 +746,50 @@ function parsePrometheusMetrics(text: string): Record<string, number> {
     }
   }
   return metrics
+}
+
+function parsePrometheusMetricSeries(text: string): Array<Record<string, unknown>> {
+  const series: Array<Record<string, unknown>> = []
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith("#")) continue
+    const match = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+([-+0-9.eE]+)/)
+    if (!match) continue
+    const value = Number(match[3])
+    if (!Number.isFinite(value)) continue
+    const metricName = match[1]
+    if (isDcgmBlankValue(metricName, value)) continue
+    const labels = Object.fromEntries(Array.from((match[2] ?? "").matchAll(/([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"/g), (item) => [item[1], item[2]]))
+    series.push({
+      metricName,
+      labels,
+      labelsSha256: sha256StableJson(labels),
+      value,
+    })
+  }
+  return series
+}
+
+function parseInvalidDcgmMetricSeries(text: string): Array<Record<string, unknown>> {
+  const invalid: Array<Record<string, unknown>> = []
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith("#")) continue
+    const match = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+([-+0-9.eE]+)/)
+    if (!match) continue
+    const value = Number(match[3])
+    const metricName = match[1]
+    if (!Number.isFinite(value) || !isDcgmBlankValue(metricName, value)) continue
+    const labels = Object.fromEntries(Array.from((match[2] ?? "").matchAll(/([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"/g), (item) => [item[1], item[2]]))
+    invalid.push({
+      metricName,
+      labels,
+      labelsSha256: sha256StableJson(labels),
+      rawValue: match[3],
+      invalidReason: "dcgm-blank-sentinel",
+    })
+  }
+  return invalid
 }
 
 function flattenNumericJsonMetrics(value: unknown, prefix = ""): Record<string, number> {
@@ -577,13 +835,59 @@ function parseNativeJsonMetrics(text: string): Record<string, number> {
   return summary
 }
 
+function parseNativeJsonMetricSeries(text: string): Array<Record<string, unknown>> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return []
+  }
+  const records = Array.isArray(parsed) ? parsed : [parsed]
+  return records.flatMap((record, recordIndex) => {
+    if (!record || typeof record !== "object" || Array.isArray(record)) return []
+    const labels = { record: String(recordIndex) }
+    const labelsSha256 = sha256StableJson(labels)
+    return Object.entries(flattenNumericJsonMetrics(record)).map(([metricName, value]) => ({
+      metricName,
+      labels,
+      labelsSha256,
+      value,
+    }))
+  })
+}
+
+function parseNativePerfMetadata(text: string): Record<string, unknown> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return {}
+  }
+  const records = (Array.isArray(parsed) ? parsed : [parsed]).filter(
+    (record): record is Record<string, unknown> => Boolean(record) && typeof record === "object" && !Array.isArray(record),
+  )
+  if (!records.length) return {}
+  const requestId = records[records.length - 1].request_id
+  return {
+    recordCount: records.length,
+    ...(requestId != null ? { requestIdSha256: sha256Text(String(requestId)) } : {}),
+  }
+}
+
 async function readNativeMetrics(config: ServingProducerConfig): Promise<Record<string, unknown>> {
   const url = metricsUrl(config)
   const jsonUrl = nativeJsonMetricsUrl(config)
-  if (!url && !jsonUrl) return { available: false, source: "metrics-url-not-configured" }
+  const perfUrl = nativePerfMetricsUrl(config)
+  if (!url && !jsonUrl && !perfUrl) return { available: false, source: "metrics-url-not-configured" }
   const fetchImpl = config.fetchImpl ?? fetch
   const metrics: Record<string, number> = {}
   const jsonMetrics: Record<string, number> = {}
+  const perfJsonMetrics: Record<string, number> = {}
+  const metricSeries: Array<Record<string, unknown>> = []
+  const jsonMetricSeries: Array<Record<string, unknown>> = []
+  const perfMetricSeries: Array<Record<string, unknown>> = []
+  const perfMetadata: Record<string, unknown> = {}
+  const rawMetricsText: Record<string, string> = {}
   const sources: string[] = []
   const errors: Array<Record<string, unknown>> = []
   if (url) {
@@ -600,7 +904,10 @@ async function readNativeMetrics(config: ServingProducerConfig): Promise<Record<
       } else {
         const text = await response.text()
         Object.assign(metrics, parsePrometheusMetrics(text))
+        metricSeries.push(...parsePrometheusMetricSeries(text))
         Object.assign(jsonMetrics, parseNativeJsonMetrics(text))
+        jsonMetricSeries.push(...parseNativeJsonMetricSeries(text))
+        rawMetricsText.metrics = text
         if (Object.keys(metrics).length) sources.push("prometheus-snapshot")
         if (Object.keys(jsonMetrics).length) sources.push("native-json-snapshot")
       }
@@ -624,13 +931,16 @@ async function readNativeMetrics(config: ServingProducerConfig): Promise<Record<
     if (!response.ok) {
         errors.push({ source: "native-json-unavailable", nativeJsonMetricsUrl: jsonUrl, status: response.status })
       } else {
-        const parsed = parseNativeJsonMetrics(await response.text())
+        const text = await response.text()
+        const parsed = parseNativeJsonMetrics(text)
         if (Object.keys(parsed).length) {
           Object.assign(jsonMetrics, parsed)
+          jsonMetricSeries.push(...parseNativeJsonMetricSeries(text))
           sources.push("native-json-snapshot")
         } else if (!Object.keys(metrics).length) {
           errors.push({ source: "native-json-empty", nativeJsonMetricsUrl: jsonUrl })
         }
+        rawMetricsText.nativeJsonMetrics = text
       }
     } catch (error) {
       errors.push({
@@ -640,12 +950,45 @@ async function readNativeMetrics(config: ServingProducerConfig): Promise<Record<
       })
     }
   }
-  if (!Object.keys(metrics).length && !Object.keys(jsonMetrics).length) {
+  if (perfUrl && perfUrl !== url && perfUrl !== jsonUrl) {
+    try {
+      const response = await fetchImpl(perfUrl, {
+        method: "GET",
+        headers: {
+          accept: "application/json, text/plain",
+          ...(config.engine.apiKey ? { authorization: `Bearer ${config.engine.apiKey}` } : {}),
+        },
+      })
+      if (!response.ok) {
+        errors.push({ source: "native-perf-json-unavailable", nativePerfMetricsUrl: perfUrl, status: response.status })
+      } else {
+        const text = await response.text()
+        const parsed = parseNativeJsonMetrics(text)
+        if (Object.keys(parsed).length) {
+          Object.assign(perfJsonMetrics, parsed)
+          perfMetricSeries.push(...parseNativeJsonMetricSeries(text))
+          Object.assign(perfMetadata, parseNativePerfMetadata(text))
+          sources.push("native-perf-json-snapshot")
+        } else {
+          errors.push({ source: "native-perf-json-empty", nativePerfMetricsUrl: perfUrl })
+        }
+        rawMetricsText.nativePerfMetrics = text
+      }
+    } catch (error) {
+      errors.push({
+        source: "native-perf-json-unavailable",
+        nativePerfMetricsUrl: perfUrl,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  if (!Object.keys(metrics).length && !Object.keys(jsonMetrics).length && !Object.keys(perfJsonMetrics).length) {
     return {
       available: false,
       source: typeof errors[0]?.source === "string" ? errors[0].source : "native-metrics-empty",
       metricsUrl: url,
       ...(jsonUrl ? { nativeJsonMetricsUrl: jsonUrl } : {}),
+      ...(perfUrl ? { nativePerfMetricsUrl: perfUrl } : {}),
       ...(errors.length ? { errors } : {}),
     }
   }
@@ -654,8 +997,15 @@ async function readNativeMetrics(config: ServingProducerConfig): Promise<Record<
     source: Array.from(new Set(sources)).join("+") || "native-metrics-snapshot",
     metricsUrl: url,
     ...(jsonUrl ? { nativeJsonMetricsUrl: jsonUrl } : {}),
+    ...(perfUrl ? { nativePerfMetricsUrl: perfUrl } : {}),
     metrics,
+    ...(metricSeries.length ? { metricSeries } : {}),
     ...(Object.keys(jsonMetrics).length ? { jsonMetrics } : {}),
+    ...(jsonMetricSeries.length ? { jsonMetricSeries } : {}),
+    ...(Object.keys(perfJsonMetrics).length ? { perfJsonMetrics } : {}),
+    ...(perfMetricSeries.length ? { perfMetricSeries } : {}),
+    ...(Object.keys(perfMetadata).length ? { perfMetadata } : {}),
+    ...(Object.keys(rawMetricsText).length ? { rawMetricsText } : {}),
     ...(errors.length ? { errors } : {}),
     capturedAtUtc: new Date().toISOString(),
   }
@@ -691,15 +1041,21 @@ async function readHardwareMetrics(config: ServingProducerConfig): Promise<Recor
     if (!response.ok) {
       return { available: false, source: "hardware-prometheus-unavailable", metricsUrl: url, status: response.status }
     }
+    const text = await response.text()
     const metrics = Object.fromEntries(
-      Object.entries(parsePrometheusMetrics(await response.text())).filter(([key]) => key.startsWith("DCGM_FI_")),
+      Object.entries(parsePrometheusMetrics(text)).filter(([key]) => key.startsWith("DCGM_")),
     )
+    const metricSeries = parsePrometheusMetricSeries(text).filter((row) => String(row.metricName).startsWith("DCGM_"))
+    const invalidMetricSeries = parseInvalidDcgmMetricSeries(text)
     if (!Object.keys(metrics).length) return { available: false, source: "dcgm-prometheus-empty", metricsUrl: url }
     return {
       available: true,
       source: "dcgm-prometheus-snapshot",
       metricsUrl: url,
       metrics,
+      metricSeries,
+      ...(invalidMetricSeries.length ? { invalidMetricSeries, invalidMetricCount: invalidMetricSeries.length } : {}),
+      rawMetricsText: text,
       capturedAtUtc: new Date().toISOString(),
     }
   } catch (error) {
@@ -710,6 +1066,48 @@ async function readHardwareMetrics(config: ServingProducerConfig): Promise<Recor
       error: error instanceof Error ? error.message : String(error),
     }
   }
+}
+
+function metricSnapshotRows(
+  requestId: string,
+  source: string,
+  snapshotPhase: "before" | "after",
+  snapshot: Record<string, unknown>,
+): ServingMetricSnapshot[] {
+  const rows: ServingMetricSnapshot[] = []
+  const rawMetricText = snapshot.rawMetricsText
+  const rawTextByKind = rawMetricText && typeof rawMetricText === "object" && !Array.isArray(rawMetricText)
+    ? rawMetricText as Record<string, unknown>
+    : {}
+  for (const [seriesKey, metricSource, rawTextKey] of [
+    ["metricSeries", `${source}-prometheus`, "metrics"],
+    ["jsonMetricSeries", `${source}-json`, "nativeJsonMetrics"],
+    ["perfMetricSeries", `${source}-perf-json`, "nativePerfMetrics"],
+  ] as const) {
+    const series = snapshot[seriesKey]
+    if (!Array.isArray(series)) continue
+    const rawText = typeof rawMetricText === "string" && rawTextKey === "metrics"
+      ? rawMetricText
+      : rawTextByKind[rawTextKey]
+    const rawMetricTextSha256 = typeof rawText === "string" ? sha256Text(rawText) : null
+    series.forEach((item, metricSampleOrdinal) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return
+      const row = item as Record<string, unknown>
+      if (typeof row.metricName !== "string" || typeof row.value !== "number" || !Number.isFinite(row.value)) return
+      rows.push({
+        requestId,
+        metricSource,
+        snapshotPhase,
+        metricName: row.metricName,
+        metricLabelsSha256: typeof row.labelsSha256 === "string" ? row.labelsSha256 : sha256StableJson(row.labels ?? {}),
+        metricValue: row.value,
+        metricSampleOrdinal,
+        capturedAtUtc: typeof snapshot.capturedAtUtc === "string" ? snapshot.capturedAtUtc : undefined,
+        rawMetricTextSha256,
+      })
+    })
+  }
+  return rows
 }
 
 function metricValue(metrics: Record<string, number>, candidates: string[]): number | null {
@@ -730,6 +1128,11 @@ function metricAverage(metrics: Record<string, number>, candidates: string[]): n
   return null
 }
 
+function metricPercentAverage(metrics: Record<string, number>, candidates: string[]): number | null {
+  const value = metricAverage(metrics, candidates)
+  return value == null ? null : value * 100
+}
+
 function jsonMetricValue(metrics: Record<string, number>, candidates: string[]): number | null {
   return metricValue(metrics, candidates)
 }
@@ -741,10 +1144,17 @@ function firstNumber(...values: Array<number | null>): number | null {
   return null
 }
 
+function elapsedMs(start: number | null, end: number | null): number | null {
+  if (start == null || end == null) return null
+  const elapsed = (end - start) * 1000
+  return elapsed >= 0 ? elapsed : null
+}
+
 function counterDelta(before: Record<string, number>, after: Record<string, number>, candidates: string[]): number | null {
-  const beforeValue = metricValue(before, candidates)
+  let beforeValue = metricValue(before, candidates)
   const afterValue = metricValue(after, candidates)
-  if (beforeValue == null || afterValue == null) return null
+  if (afterValue == null) return null
+  if (beforeValue == null) beforeValue = 0
   const delta = afterValue - beforeValue
   return delta >= 0 ? delta : null
 }
@@ -781,6 +1191,21 @@ function nativeMetricsDelta(
   const afterJsonMetrics = after.jsonMetrics && typeof after.jsonMetrics === "object" && !Array.isArray(after.jsonMetrics)
     ? after.jsonMetrics as Record<string, number>
     : {}
+  const afterPerfMetrics = after.perfJsonMetrics && typeof after.perfJsonMetrics === "object" && !Array.isArray(after.perfJsonMetrics)
+    ? after.perfJsonMetrics as Record<string, number>
+    : {}
+  const afterPerfMetadata = after.perfMetadata && typeof after.perfMetadata === "object" && !Array.isArray(after.perfMetadata)
+    ? after.perfMetadata as Record<string, unknown>
+    : {}
+  const perfArrivalS = jsonMetricValue(afterPerfMetrics, ["latest.perf_metrics.timing_metrics.arrival_time"])
+  const perfFirstScheduledS = jsonMetricValue(afterPerfMetrics, ["latest.perf_metrics.timing_metrics.first_scheduled_time"])
+  const perfFirstTokenS = jsonMetricValue(afterPerfMetrics, ["latest.perf_metrics.timing_metrics.first_token_time"])
+  const perfLastTokenS = jsonMetricValue(afterPerfMetrics, ["latest.perf_metrics.timing_metrics.last_token_time"])
+  const perfQueueWaitMs = elapsedMs(perfArrivalS, perfFirstScheduledS)
+  const perfPrefillMs = elapsedMs(perfFirstScheduledS, perfFirstTokenS)
+  const perfTtftMs = elapsedMs(perfArrivalS, perfFirstTokenS)
+  const perfDecodeMs = elapsedMs(perfFirstTokenS, perfLastTokenS)
+  const perfE2eMs = elapsedMs(perfArrivalS, perfLastTokenS)
   const prefixQueries = counterDelta(beforeMetrics, afterMetrics, [
     "vllm:prefix_cache_queries",
     "vllm:prefix_cache_queries_total",
@@ -803,14 +1228,14 @@ function nativeMetricsDelta(
     "trtllm:prefix_cache_hits_total",
     "trtllm_prefix_cache_hits_total",
   ])
-  const nativeE2eLatencyMs = histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+  const nativeE2eLatencyMs = firstNumber(histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
     "vllm:e2e_request_latency_seconds",
     "sglang:e2e_request_latency_seconds",
     "sglang_e2e_request_latency_seconds",
     "trtllm:e2e_request_latency_seconds",
     "trtllm_e2e_request_latency_seconds",
-  ])
-  const queueWaitMs = histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+  ]), perfE2eMs)
+  const queueWaitMs = firstNumber(histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
     "vllm:request_queue_time_seconds",
     "sglang:queue_time_seconds",
     "sglang:request_queue_time_seconds",
@@ -819,8 +1244,8 @@ function nativeMetricsDelta(
     "trtllm_request_queue_time_seconds",
     "trtllm_queue_time_seconds",
     "trtllm:queue_time_seconds",
-  ])
-  const prefillMs = histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+  ]), perfQueueWaitMs, jsonMetricValue(afterJsonMetrics, ["avg.newActiveRequestsQueueLatencyMS", "latest.newActiveRequestsQueueLatencyMS"]))
+  let prefillMs = firstNumber(histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
     "vllm:request_prefill_time_seconds",
     "sglang:per_stage_req_latency_seconds{stage=prefill_forward}",
     "sglang:per_stage_req_latency_seconds{mode=prefill_forward}",
@@ -830,8 +1255,19 @@ function nativeMetricsDelta(
     "trtllm_request_prefill_time_seconds",
     "trtllm:context_time_seconds",
     "trtllm_context_time_seconds",
-  ])
-  let decodeMs = histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+  ]), perfPrefillMs)
+  const nativeTtftMs = firstNumber(histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+    "vllm:time_to_first_token_seconds",
+    "sglang:time_to_first_token_seconds",
+    "sglang_time_to_first_token_seconds",
+    "trtllm:time_to_first_token_seconds",
+    "trtllm_time_to_first_token_seconds",
+  ]), perfTtftMs)
+  if (prefillMs == null && nativeTtftMs != null && queueWaitMs != null) {
+    const derivedPrefillMs = nativeTtftMs - queueWaitMs
+    if (derivedPrefillMs >= 0) prefillMs = derivedPrefillMs
+  }
+  let decodeMs = firstNumber(histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
     "vllm:request_decode_time_seconds",
     "sglang:per_stage_req_latency_seconds{stage=decode_forward}",
     "sglang:per_stage_req_latency_seconds{mode=decode}",
@@ -841,7 +1277,11 @@ function nativeMetricsDelta(
     "trtllm_request_decode_time_seconds",
     "trtllm:generation_time_seconds",
     "trtllm_generation_time_seconds",
-  ])
+  ]), perfDecodeMs)
+  if (decodeMs == null && nativeE2eLatencyMs != null && nativeTtftMs != null) {
+    const derivedDecodeMs = nativeE2eLatencyMs - nativeTtftMs
+    if (derivedDecodeMs >= 0) decodeMs = derivedDecodeMs
+  }
   if (decodeMs == null && nativeE2eLatencyMs != null && queueWaitMs != null && prefillMs != null) {
     const derivedDecodeMs = nativeE2eLatencyMs - queueWaitMs - prefillMs
     if (derivedDecodeMs >= 0) decodeMs = derivedDecodeMs
@@ -851,16 +1291,21 @@ function nativeMetricsDelta(
   const trtllmKvUsage = trtllmKvUsedBlocks != null && trtllmKvMaxBlocks != null && trtllmKvMaxBlocks > 0
     ? trtllmKvUsedBlocks / trtllmKvMaxBlocks
     : null
+  const perfKvReusedBlocks = jsonMetricValue(afterPerfMetrics, ["latest.perf_metrics.kv_cache_metrics.num_reused_blocks"])
+  const perfKvMissedBlocks = jsonMetricValue(afterPerfMetrics, ["latest.perf_metrics.kv_cache_metrics.num_missed_blocks"])
+  const perfCacheHitRate = perfKvReusedBlocks != null && perfKvMissedBlocks != null && perfKvReusedBlocks + perfKvMissedBlocks > 0
+    ? perfKvReusedBlocks / (perfKvReusedBlocks + perfKvMissedBlocks)
+    : null
   const prefixCacheHitRate = prefixHits != null && prefixQueries != null && prefixQueries > 0 ? prefixHits / prefixQueries : null
-  const values: Record<string, number | null> = {
-    nativeTtftMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
-      "vllm:time_to_first_token_seconds",
-      "sglang:time_to_first_token_seconds",
-      "sglang_time_to_first_token_seconds",
-      "trtllm:time_to_first_token_seconds",
-      "trtllm_time_to_first_token_seconds",
-    ]),
-    nativeTpotMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+  const nativeInterTokenLatencyMs = histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
+    "vllm:inter_token_latency_seconds",
+    "sglang:inter_token_latency_seconds",
+    "sglang_inter_token_latency_seconds",
+    "trtllm:inter_token_latency_seconds",
+    "trtllm_inter_token_latency_seconds",
+  ])
+  const nativeTpotMs = firstNumber(
+    histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
       "vllm:request_time_per_output_token_seconds",
       "vllm:time_per_output_token_seconds",
       "sglang:request_time_per_output_token_seconds",
@@ -872,13 +1317,37 @@ function nativeMetricsDelta(
       "trtllm_request_time_per_output_token_seconds",
       "trtllm_time_per_output_token_seconds",
     ]),
-    nativeInterTokenLatencyMs: histogramDeltaMeanMs(beforeMetrics, afterMetrics, [
-      "vllm:inter_token_latency_seconds",
-      "sglang:inter_token_latency_seconds",
-      "sglang_inter_token_latency_seconds",
-      "trtllm:inter_token_latency_seconds",
-      "trtllm_inter_token_latency_seconds",
-    ]),
+    nativeInterTokenLatencyMs,
+  )
+  const promptTokensComputedDelta = counterDelta(beforeMetrics, afterMetrics, [
+    "vllm:request_prefill_kv_computed_tokens_sum",
+    "sglang:request_prefill_kv_computed_tokens_sum",
+    "sglang_request_prefill_kv_computed_tokens_sum",
+    "sglang:uncached_prompt_tokens_total",
+    "sglang_uncached_prompt_tokens_total",
+    "sglang:uncached_prompt_tokens_histogram_sum",
+    "sglang_uncached_prompt_tokens_histogram_sum",
+    "sglang:realtime_tokens_total{mode=prefill_compute}",
+    "sglang_realtime_tokens_total{mode=prefill_compute}",
+    "trtllm:request_prefill_kv_computed_tokens_sum",
+    "trtllm_request_prefill_kv_computed_tokens_sum",
+  ])
+  let promptTokensCachedDelta = counterDelta(beforeMetrics, afterMetrics, [
+    "vllm:prompt_tokens_cached_total",
+    "sglang:prompt_tokens_cached_total",
+    "sglang_prompt_tokens_cached_total",
+    "sglang:cached_tokens_total",
+    "sglang_cached_tokens_total",
+    "sglang:realtime_tokens_total{mode=prefill_cache}",
+    "sglang_realtime_tokens_total{mode=prefill_cache}",
+    "trtllm:prompt_tokens_cached_total",
+    "trtllm_prompt_tokens_cached_total",
+  ])
+  if (promptTokensCachedDelta == null && promptTokensComputedDelta != null) promptTokensCachedDelta = 0
+  const values: Record<string, number | null> = {
+    nativeTtftMs,
+    nativeTpotMs,
+    nativeInterTokenLatencyMs,
     nativeE2eLatencyMs,
     queueWaitMs,
     prefillMs,
@@ -887,7 +1356,10 @@ function nativeMetricsDelta(
       metricValue(afterMetrics, ["vllm:num_requests_running", "sglang:num_running_reqs", "sglang_num_running_reqs", "trtllm:num_requests_running", "trtllm_num_requests_running", "trtllm:num_active_requests", "trtllm_num_active_requests"]),
       jsonMetricValue(afterJsonMetrics, ["latest.numActiveRequests", "avg.numActiveRequests", "max.numActiveRequests"]),
     ),
-    waitingRequests: metricValue(afterMetrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs", "trtllm:num_requests_waiting", "trtllm_num_requests_waiting", "trtllm:num_queued_requests", "trtllm_num_queued_requests"]),
+    waitingRequests: firstNumber(
+      metricValue(afterMetrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs", "trtllm:num_requests_waiting", "trtllm_num_requests_waiting", "trtllm:num_queued_requests", "trtllm_num_queued_requests"]),
+      jsonMetricValue(afterJsonMetrics, ["latest.numQueuedRequests", "avg.numQueuedRequests", "max.numQueuedRequests"]),
+    ),
     kvCacheUsagePct: firstNumber(
       metricValue(afterMetrics, ["vllm:kv_cache_usage_perc", "sglang:token_usage", "sglang_token_usage", "trtllm:kv_cache_usage_perc", "trtllm_kv_cache_usage_perc", "trtllm:kv_cache_utilization", "trtllm_kv_cache_utilization"]),
       trtllmKvUsage,
@@ -896,40 +1368,37 @@ function nativeMetricsDelta(
     trtllmGpuMemoryBytes: jsonMetricValue(afterJsonMetrics, ["latest.gpuMemUsage", "max.gpuMemUsage"]),
     trtllmKvCacheUsedBlocks: trtllmKvUsedBlocks,
     trtllmKvCacheMaxBlocks: trtllmKvMaxBlocks,
+    trtllmPerfKvAllocatedBlocks: jsonMetricValue(afterPerfMetrics, ["latest.perf_metrics.kv_cache_metrics.num_total_allocated_blocks"]),
+    trtllmPerfKvNewBlocks: jsonMetricValue(afterPerfMetrics, ["latest.perf_metrics.kv_cache_metrics.num_new_allocated_blocks"]),
+    trtllmPerfKvReusedBlocks: perfKvReusedBlocks,
+    trtllmPerfKvMissedBlocks: perfKvMissedBlocks,
+    trtllmPerfRecordCount: numberFrom(afterPerfMetadata.recordCount),
     prefixCacheQueriesDelta: prefixQueries,
     prefixCacheHitsDelta: prefixHits,
     cacheHitRate: firstNumber(
       prefixCacheHitRate,
       metricValue(afterMetrics, ["sglang:cache_hit_rate", "sglang_cache_hit_rate", "trtllm:kv_cache_hit_rate", "trtllm_kv_cache_hit_rate"]),
       jsonMetricValue(afterJsonMetrics, ["latest.kvCacheStats.cacheHitRate", "avg.kvCacheStats.cacheHitRate"]),
+      perfCacheHitRate,
     ),
-    promptTokensCachedDelta: counterDelta(beforeMetrics, afterMetrics, [
-      "vllm:prompt_tokens_cached_total",
-      "sglang:prompt_tokens_cached_total",
-      "sglang_prompt_tokens_cached_total",
-      "trtllm:prompt_tokens_cached_total",
-      "trtllm_prompt_tokens_cached_total",
-    ]),
-    promptTokensComputedDelta: counterDelta(beforeMetrics, afterMetrics, [
-      "vllm:request_prefill_kv_computed_tokens_sum",
-      "sglang:request_prefill_kv_computed_tokens_sum",
-      "sglang_request_prefill_kv_computed_tokens_sum",
-      "trtllm:request_prefill_kv_computed_tokens_sum",
-      "trtllm_request_prefill_kv_computed_tokens_sum",
-    ]),
+    promptTokensCachedDelta,
+    promptTokensComputedDelta,
   }
   const availableValues = Object.fromEntries(Object.entries(values).filter(([, value]) => value != null))
   const deltaSources = [
     ...(Object.keys(beforeMetrics).length && Object.keys(afterMetrics).length ? ["prometheus-delta"] : []),
     ...(Object.keys(afterJsonMetrics).length ? ["native-json-snapshot"] : []),
+    ...(Object.keys(afterPerfMetrics).length ? ["native-perf-json-snapshot"] : []),
   ]
   return {
     available: Object.keys(availableValues).length > 0,
     source: deltaSources.join("+") || "native-metrics-delta",
     metricsUrl: after.metricsUrl ?? before.metricsUrl,
     nativeJsonMetricsUrl: after.nativeJsonMetricsUrl ?? before.nativeJsonMetricsUrl,
+    nativePerfMetricsUrl: after.nativePerfMetricsUrl ?? before.nativePerfMetricsUrl,
     beforeCapturedAtUtc: before.capturedAtUtc,
     afterCapturedAtUtc: after.capturedAtUtc,
+    ...(typeof afterPerfMetadata.requestIdSha256 === "string" ? { trtllmPerfRequestIdSha256: afterPerfMetadata.requestIdSha256 } : {}),
     ...availableValues,
   }
 }
@@ -957,17 +1426,43 @@ function hardwareMetricsDelta(
     ? after.metrics as Record<string, number>
     : {}
   const energyMj = counterDelta(beforeMetrics, afterMetrics, ["DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION"])
+  const dcgmMetricNames = Object.keys(afterMetrics)
+    .filter((name) => name.startsWith("DCGM_") && !name.endsWith("__sample_count"))
+    .sort()
   const values: Record<string, number | null> = {
     powerWatts: metricValue(afterMetrics, ["DCGM_FI_DEV_POWER_USAGE"]),
     powerWattsPerGpu: metricAverage(afterMetrics, ["DCGM_FI_DEV_POWER_USAGE"]),
     gpuUtilizationPct: metricAverage(afterMetrics, ["DCGM_FI_DEV_GPU_UTIL", "DCGM_FI_PROF_SM_ACTIVE"]),
     memoryCopyUtilizationPct: metricAverage(afterMetrics, ["DCGM_FI_DEV_MEM_COPY_UTIL", "DCGM_FI_PROF_DRAM_ACTIVE"]),
+    smActivePct: metricPercentAverage(afterMetrics, ["DCGM_FI_PROF_SM_ACTIVE"]),
+    dramActivePct: metricPercentAverage(afterMetrics, ["DCGM_FI_PROF_DRAM_ACTIVE"]),
+    tensorActivePct: metricPercentAverage(afterMetrics, ["DCGM_FI_PROF_PIPE_TENSOR_ACTIVE"]),
+    fp64ActivePct: metricPercentAverage(afterMetrics, ["DCGM_FI_PROF_PIPE_FP64_ACTIVE"]),
+    fp32ActivePct: metricPercentAverage(afterMetrics, ["DCGM_FI_PROF_PIPE_FP32_ACTIVE"]),
+    fp16ActivePct: metricPercentAverage(afterMetrics, ["DCGM_FI_PROF_PIPE_FP16_ACTIVE"]),
+    pcieTxThroughputKiBps: metricAverage(afterMetrics, ["DCGM_FI_DEV_PCIE_TX_THROUGHPUT"]),
+    pcieRxThroughputKiBps: metricAverage(afterMetrics, ["DCGM_FI_DEV_PCIE_RX_THROUGHPUT"]),
+    pcieTxBytesDelta: counterDelta(beforeMetrics, afterMetrics, ["DCGM_FI_PROF_PCIE_TX_BYTES"]),
+    pcieRxBytesDelta: counterDelta(beforeMetrics, afterMetrics, ["DCGM_FI_PROF_PCIE_RX_BYTES"]),
+    pcieReplayDelta: counterDelta(beforeMetrics, afterMetrics, ["DCGM_FI_DEV_PCIE_REPLAY_COUNTER"]),
+    nvlinkTxBytesDelta: counterDelta(beforeMetrics, afterMetrics, ["DCGM_FI_PROF_NVLINK_TX_BYTES"]),
+    nvlinkRxBytesDelta: counterDelta(beforeMetrics, afterMetrics, ["DCGM_FI_PROF_NVLINK_RX_BYTES"]),
+    nvlinkBandwidthTotalMBps: metricAverage(afterMetrics, ["DCGM_FI_DEV_NVLINK_BANDWIDTH_TOTAL"]),
+    encoderUtilizationPct: metricAverage(afterMetrics, ["DCGM_FI_DEV_ENC_UTIL"]),
+    decoderUtilizationPct: metricAverage(afterMetrics, ["DCGM_FI_DEV_DEC_UTIL"]),
     gpuTemperatureC: metricAverage(afterMetrics, ["DCGM_FI_DEV_GPU_TEMP"]),
     smClockMHz: metricAverage(afterMetrics, ["DCGM_FI_DEV_SM_CLOCK"]),
     memoryClockMHz: metricAverage(afterMetrics, ["DCGM_FI_DEV_MEM_CLOCK"]),
     fbUsedMiB: metricValue(afterMetrics, ["DCGM_FI_DEV_FB_USED"]),
     fbFreeMiB: metricValue(afterMetrics, ["DCGM_FI_DEV_FB_FREE"]),
     energyJoules: energyMj == null ? null : energyMj / 1000,
+    xidErrors: metricValue(afterMetrics, ["DCGM_FI_DEV_XID_ERRORS"]),
+    xidErrorsDelta: counterDelta(beforeMetrics, afterMetrics, ["DCGM_FI_DEV_XID_ERRORS"]),
+    eccSbeVolatileTotalDelta: counterDelta(beforeMetrics, afterMetrics, ["DCGM_FI_DEV_ECC_SBE_VOL_TOTAL"]),
+    eccDbeVolatileTotalDelta: counterDelta(beforeMetrics, afterMetrics, ["DCGM_FI_DEV_ECC_DBE_VOL_TOTAL"]),
+    powerViolationTimeUsDelta: counterDelta(beforeMetrics, afterMetrics, ["DCGM_FI_DEV_POWER_VIOLATION"]),
+    thermalViolationTimeUsDelta: counterDelta(beforeMetrics, afterMetrics, ["DCGM_FI_DEV_THERMAL_VIOLATION"]),
+    hardwareRawMetricCount: dcgmMetricNames.length,
   }
   const availableValues = Object.fromEntries(Object.entries(values).filter(([, value]) => value != null))
   return {
@@ -977,6 +1472,7 @@ function hardwareMetricsDelta(
     beforeCapturedAtUtc: before.capturedAtUtc,
     afterCapturedAtUtc: after.capturedAtUtc,
     ...availableValues,
+    ...(dcgmMetricNames.length ? { hardwareRawMetricNamesSha256: sha256Text(dcgmMetricNames.join("\n")) } : {}),
   }
 }
 
@@ -1013,6 +1509,89 @@ function nativeIterationFields(telemetry: Record<string, unknown>): Pick<
   }
 }
 
+function enrichNativeTokenTiming(telemetry: Record<string, unknown>, outputTokenCount: number): void {
+  const decodeMs = numberFrom(telemetry.decodeMs)
+  if (decodeMs == null || outputTokenCount <= 0) return
+  const nativeTpotMs = decodeMs / Math.max(outputTokenCount - 1, 1)
+  if (numberFrom(telemetry.nativeTpotMs) == null) telemetry.nativeTpotMs = nativeTpotMs
+  if (numberFrom(telemetry.nativeInterTokenLatencyMs) == null) telemetry.nativeInterTokenLatencyMs = nativeTpotMs
+}
+
+function hardwareSampleFields(telemetry: Record<string, unknown>): Pick<
+  ServingRequestSample,
+  | "avgPowerWatts"
+  | "avgPowerWattsPerGpu"
+  | "gpuUtilizationPct"
+  | "memoryCopyUtilizationPct"
+  | "smActivePct"
+  | "dramActivePct"
+  | "tensorActivePct"
+  | "fp64ActivePct"
+  | "fp32ActivePct"
+  | "fp16ActivePct"
+  | "pcieTxThroughputKiBps"
+  | "pcieRxThroughputKiBps"
+  | "pcieTxBytesDelta"
+  | "pcieRxBytesDelta"
+  | "pcieReplayDelta"
+  | "nvlinkTxBytesDelta"
+  | "nvlinkRxBytesDelta"
+  | "nvlinkBandwidthTotalMBps"
+  | "encoderUtilizationPct"
+  | "decoderUtilizationPct"
+  | "gpuTemperatureC"
+  | "smClockMHz"
+  | "memoryClockMHz"
+  | "fbUsedMiB"
+  | "fbFreeMiB"
+  | "energyJoules"
+  | "xidErrors"
+  | "xidErrorsDelta"
+  | "eccSbeVolatileTotalDelta"
+  | "eccDbeVolatileTotalDelta"
+  | "powerViolationTimeUsDelta"
+  | "thermalViolationTimeUsDelta"
+  | "hardwareRawMetricCount"
+  | "hardwareRawMetricNamesSha256"
+> {
+  return {
+    avgPowerWatts: numberFrom(telemetry.powerWatts),
+    avgPowerWattsPerGpu: numberFrom(telemetry.powerWattsPerGpu),
+    gpuUtilizationPct: numberFrom(telemetry.gpuUtilizationPct),
+    memoryCopyUtilizationPct: numberFrom(telemetry.memoryCopyUtilizationPct),
+    smActivePct: numberFrom(telemetry.smActivePct),
+    dramActivePct: numberFrom(telemetry.dramActivePct),
+    tensorActivePct: numberFrom(telemetry.tensorActivePct),
+    fp64ActivePct: numberFrom(telemetry.fp64ActivePct),
+    fp32ActivePct: numberFrom(telemetry.fp32ActivePct),
+    fp16ActivePct: numberFrom(telemetry.fp16ActivePct),
+    pcieTxThroughputKiBps: numberFrom(telemetry.pcieTxThroughputKiBps),
+    pcieRxThroughputKiBps: numberFrom(telemetry.pcieRxThroughputKiBps),
+    pcieTxBytesDelta: numberFrom(telemetry.pcieTxBytesDelta),
+    pcieRxBytesDelta: numberFrom(telemetry.pcieRxBytesDelta),
+    pcieReplayDelta: numberFrom(telemetry.pcieReplayDelta),
+    nvlinkTxBytesDelta: numberFrom(telemetry.nvlinkTxBytesDelta),
+    nvlinkRxBytesDelta: numberFrom(telemetry.nvlinkRxBytesDelta),
+    nvlinkBandwidthTotalMBps: numberFrom(telemetry.nvlinkBandwidthTotalMBps),
+    encoderUtilizationPct: numberFrom(telemetry.encoderUtilizationPct),
+    decoderUtilizationPct: numberFrom(telemetry.decoderUtilizationPct),
+    gpuTemperatureC: numberFrom(telemetry.gpuTemperatureC),
+    smClockMHz: numberFrom(telemetry.smClockMHz),
+    memoryClockMHz: numberFrom(telemetry.memoryClockMHz),
+    fbUsedMiB: numberFrom(telemetry.fbUsedMiB),
+    fbFreeMiB: numberFrom(telemetry.fbFreeMiB),
+    energyJoules: numberFrom(telemetry.energyJoules),
+    xidErrors: numberFrom(telemetry.xidErrors),
+    xidErrorsDelta: numberFrom(telemetry.xidErrorsDelta),
+    eccSbeVolatileTotalDelta: numberFrom(telemetry.eccSbeVolatileTotalDelta),
+    eccDbeVolatileTotalDelta: numberFrom(telemetry.eccDbeVolatileTotalDelta),
+    powerViolationTimeUsDelta: numberFrom(telemetry.powerViolationTimeUsDelta),
+    thermalViolationTimeUsDelta: numberFrom(telemetry.thermalViolationTimeUsDelta),
+    hardwareRawMetricCount: numberFrom(telemetry.hardwareRawMetricCount),
+    hardwareRawMetricNamesSha256: typeof telemetry.hardwareRawMetricNamesSha256 === "string" ? telemetry.hardwareRawMetricNamesSha256 : null,
+  }
+}
+
 function tokenIdFrom(item: Record<string, any>): number | null {
   for (const key of ["token_id", "tokenId", "id"]) {
     const value = item[key]
@@ -1040,6 +1619,14 @@ function tokenIdWithSource(
   if (Number.isInteger(resolved)) return { tokenId: Number(resolved), tokenIdSource: "configured-token-id-resolver" }
   if (typeof resolved === "string" && /^\d+$/.test(resolved)) {
     return { tokenId: Number(resolved), tokenIdSource: "configured-token-id-resolver" }
+  }
+
+  const model = tokenizerModel(config)
+  if (model) {
+    const tokenizerResolved = externalHfTokenId(model, token, config)
+    if (tokenizerResolved != null) {
+      return { tokenId: tokenizerResolved, tokenIdSource: "external-hf-tokenizer" }
+    }
   }
 
   return { tokenId: null, tokenIdSource: null }
@@ -1092,6 +1679,8 @@ function tokenDetailSummary(details: Array<Record<string, any>>, requested: bool
       tokenDetailCount: 0,
       tokenDetailSource: requested ? "requested-not-exposed" : "not-requested",
       tokenIdSource: null,
+      tokenDetailsCapabilityStatus: requested ? "requested-not-exposed" : "not-requested",
+      tokenDetailsUnsupportedReason: null,
     }
   }
   const tokenIdSources = Array.from(new Set(
@@ -1099,13 +1688,19 @@ function tokenDetailSummary(details: Array<Record<string, any>>, requested: bool
       .filter((detail) => detail.tokenId != null && typeof detail.tokenIdSource === "string")
       .map((detail) => String(detail.tokenIdSource)),
   ))
+  const tokenDetailSources = Array.from(new Set(details.flatMap((detail) => {
+    if (typeof detail.tokenDetailSource === "string" && detail.tokenDetailSource) return [detail.tokenDetailSource]
+    return detail.logprob != null ? ["response-logprobs"] : []
+  })))
   return {
     tokenDetailsAvailable: true,
     tokenIdsAvailable: details.some((detail) => detail.tokenId != null),
     logprobsAvailable: details.some((detail) => detail.logprob != null),
     tokenDetailCount: details.length,
-    tokenDetailSource: "response-logprobs",
+    tokenDetailSource: tokenDetailSources.length ? tokenDetailSources.join("+") : "token-ids-only",
     tokenIdSource: tokenIdSources.length ? tokenIdSources.join("+") : null,
+    tokenDetailsCapabilityStatus: "available",
+    tokenDetailsUnsupportedReason: null,
   }
 }
 
@@ -1118,10 +1713,256 @@ function coerceTokenIds(value: unknown): number[] {
   })
 }
 
+function externalTokenizerTimeoutMs(config: ServingProducerConfig): number {
+  const value = (config.engine as unknown as Record<string, unknown>).tokenizerResolveTimeoutSeconds
+  const seconds = typeof value === "number" ? value : typeof value === "string" ? Number(value) : 30
+  return Math.max(1, Number.isFinite(seconds) ? seconds : 30) * 1000
+}
+
+function tokenizerTrustRemoteCode(config: ServingProducerConfig): boolean {
+  return Boolean(config.engine.tokenizerTrustRemoteCode || config.engine.trustRemoteCode)
+}
+
+function externalHfTokenizer(
+  config: ServingProducerConfig,
+  mode: "token" | "prompt" | "text",
+  model: string,
+  payload: unknown,
+): Record<string, unknown> | null {
+  const pythonBin = tokenizerPythonBin(config)
+  if (!pythonBin || !existsSync(pythonBin)) return null
+  const code = `
+import json
+import sys
+
+mode = sys.argv[1]
+model = sys.argv[2]
+payload = json.loads(sys.argv[3])
+trust_remote_code = sys.argv[4] == "1"
+
+try:
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=trust_remote_code)
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": str(exc)}, sort_keys=True))
+    raise SystemExit(0)
+
+def coerce_token_ids(value):
+    if not isinstance(value, list):
+        return []
+    ids = []
+    for item in value:
+        if isinstance(item, int) and not isinstance(item, bool):
+            ids.append(item)
+        elif isinstance(item, str) and item.isdigit():
+            ids.append(int(item))
+    return ids
+
+def token_id(token):
+    if not token:
+        return None
+    try:
+        value = tokenizer.convert_tokens_to_ids(token)
+        unknown = getattr(tokenizer, "unk_token_id", None)
+        if isinstance(value, int) and value >= 0 and value != unknown:
+            return value
+    except Exception:
+        pass
+    try:
+        encoded = tokenizer.encode(token, add_special_tokens=False)
+        if isinstance(encoded, list) and len(encoded) == 1 and isinstance(encoded[0], int):
+            return encoded[0]
+    except Exception:
+        pass
+    try:
+        encoded = tokenizer(token, add_special_tokens=False)
+        input_ids = encoded.get("input_ids") if isinstance(encoded, dict) else None
+        if isinstance(input_ids, list) and len(input_ids) == 1 and isinstance(input_ids[0], int):
+            return input_ids[0]
+    except Exception:
+        pass
+    return None
+
+if mode == "token":
+    print(json.dumps({"ok": True, "tokenId": token_id(str(payload))}, sort_keys=True))
+elif mode == "prompt":
+    prompt_payload = payload if isinstance(payload, dict) else {}
+    token_ids = []
+    tokenization_mode = "tokenizer-empty"
+    messages = prompt_payload.get("messages")
+    if isinstance(messages, list) and hasattr(tokenizer, "apply_chat_template"):
+        for kwargs in ({"tokenize": True, "add_generation_prompt": True}, {"tokenize": True}):
+            try:
+                token_ids = coerce_token_ids(tokenizer.apply_chat_template(messages, **kwargs))
+                if token_ids:
+                    tokenization_mode = "chat-template"
+                    break
+            except Exception:
+                pass
+    if not token_ids:
+        parts = []
+        for message in prompt_payload.get("messages", []) or []:
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                parts.append(message["content"])
+        text = "\\n".join(parts) or str(prompt_payload.get("prompt") or "")
+        if text:
+            try:
+                token_ids = coerce_token_ids(tokenizer.encode(text, add_special_tokens=False))
+                if token_ids:
+                    tokenization_mode = "prompt-text"
+            except Exception:
+                pass
+    token_texts = []
+    for token_id_value in token_ids:
+        try:
+            value = tokenizer.convert_ids_to_tokens(token_id_value)
+            if isinstance(value, str):
+                token_texts.append(value)
+                continue
+        except Exception:
+            pass
+        try:
+            value = tokenizer.decode([token_id_value], skip_special_tokens=False)
+            token_texts.append(value if isinstance(value, str) else None)
+        except Exception:
+            token_texts.append(None)
+    print(json.dumps({"ok": True, "tokenIds": token_ids, "tokenTexts": token_texts, "mode": tokenization_mode}, sort_keys=True))
+elif mode == "text":
+    text = str(payload or "")
+    token_ids = []
+    tokenization_mode = "output-text"
+    if text:
+        try:
+            token_ids = coerce_token_ids(tokenizer.encode(text, add_special_tokens=False))
+        except Exception:
+            pass
+        if not token_ids:
+            try:
+                encoded = tokenizer(text, add_special_tokens=False)
+                input_ids = encoded.get("input_ids") if isinstance(encoded, dict) else None
+                token_ids = coerce_token_ids(input_ids)
+            except Exception:
+                pass
+    token_texts = []
+    for token_id_value in token_ids:
+        try:
+            value = tokenizer.convert_ids_to_tokens(token_id_value)
+            if isinstance(value, str):
+                token_texts.append(value)
+                continue
+        except Exception:
+            pass
+        try:
+            value = tokenizer.decode([token_id_value], skip_special_tokens=False)
+            token_texts.append(value if isinstance(value, str) else None)
+        except Exception:
+            token_texts.append(None)
+    print(json.dumps({"ok": True, "tokenIds": token_ids, "tokenTexts": token_texts, "mode": tokenization_mode}, sort_keys=True))
+else:
+    print(json.dumps({"ok": False, "error": "unknown mode"}, sort_keys=True))
+`.trim()
+  const result = spawnSync(pythonBin, [
+    "-c",
+    code,
+    mode,
+    model,
+    JSON.stringify(payload),
+    tokenizerTrustRemoteCode(config) ? "1" : "0",
+  ], {
+    encoding: "utf8",
+    timeout: externalTokenizerTimeoutMs(config),
+    maxBuffer: 1024 * 1024,
+  })
+  const lines = String(result.stdout ?? "").split(/\r?\n/).reverse()
+  for (const line of lines) {
+    try {
+      const parsed = JSON.parse(line)
+      if (parsed && typeof parsed === "object" && parsed.ok === true) return parsed as Record<string, unknown>
+    } catch {
+      continue
+    }
+  }
+  return null
+}
+
+function externalHfTokenId(model: string, token: string, config: ServingProducerConfig): number | null {
+  const pythonBin = tokenizerPythonBin(config)
+  if (!pythonBin) return null
+  const key = JSON.stringify([pythonBin, model, token, tokenizerTrustRemoteCode(config)])
+  if (!EXTERNAL_TOKENIZER_CACHE.has(key)) {
+    const result = externalHfTokenizer(config, "token", model, token)
+    const tokenId = result?.tokenId
+    EXTERNAL_TOKENIZER_CACHE.set(key, Number.isInteger(tokenId) ? Number(tokenId) : null)
+  }
+  return EXTERNAL_TOKENIZER_CACHE.get(key) ?? null
+}
+
+function externalPromptTokens(model: string, payload: Record<string, unknown>, config: ServingProducerConfig): {
+  tokenIds: number[]
+  tokenTexts: Array<string | null>
+  mode: string
+} | null {
+  const pythonBin = tokenizerPythonBin(config)
+  if (!pythonBin) return null
+  const key = JSON.stringify([pythonBin, model, sha256Json(payload), tokenizerTrustRemoteCode(config)])
+  if (!EXTERNAL_PROMPT_TOKENIZER_CACHE.has(key)) {
+    const result = externalHfTokenizer(config, "prompt", model, payload)
+    const tokenIds = coerceTokenIds(result?.tokenIds)
+    EXTERNAL_PROMPT_TOKENIZER_CACHE.set(key, tokenIds.length ? {
+      tokenIds,
+      tokenTexts: Array.isArray(result?.tokenTexts)
+        ? result.tokenTexts.map((item) => typeof item === "string" ? item : null)
+        : [],
+      mode: typeof result?.mode === "string" ? result.mode : "external",
+    } : null)
+  }
+  return EXTERNAL_PROMPT_TOKENIZER_CACHE.get(key) ?? null
+}
+
+function externalTextTokens(model: string, text: string, config: ServingProducerConfig): {
+  tokenIds: number[]
+  tokenTexts: Array<string | null>
+  mode: string
+} | null {
+  const pythonBin = tokenizerPythonBin(config)
+  if (!pythonBin || !text) return null
+  const key = JSON.stringify([pythonBin, model, sha256Text(text), tokenizerTrustRemoteCode(config)])
+  if (!EXTERNAL_TEXT_TOKENIZER_CACHE.has(key)) {
+    const result = externalHfTokenizer(config, "text", model, text)
+    const tokenIds = coerceTokenIds(result?.tokenIds)
+    EXTERNAL_TEXT_TOKENIZER_CACHE.set(key, tokenIds.length ? {
+      tokenIds,
+      tokenTexts: Array.isArray(result?.tokenTexts)
+        ? result.tokenTexts.map((item) => typeof item === "string" ? item : null)
+        : [],
+      mode: typeof result?.mode === "string" ? result.mode : "output-text",
+    } : null)
+  }
+  return EXTERNAL_TEXT_TOKENIZER_CACHE.get(key) ?? null
+}
+
+function outputTokenDetailsFromText(config: ServingProducerConfig, outputText: string): Array<Record<string, any>> {
+  const model = tokenizerModel(config)
+  if (!model || !outputText) return []
+  const external = externalTextTokens(model, outputText, config)
+  if (!external?.tokenIds.length) return []
+  return external.tokenIds.map((tokenId, tokenIndex) => {
+    const tokenText = external.tokenTexts[tokenIndex]
+    return {
+      tokenText,
+      tokenSha256: typeof tokenText === "string" ? sha256Text(tokenText) : null,
+      tokenBytes: typeof tokenText === "string" ? Buffer.byteLength(tokenText) : null,
+      tokenId,
+      tokenIdSource: "external-hf-tokenizer",
+      logprob: null,
+      topLogprobs: [],
+      tokenDetailSource: `external-hf-tokenizer-${external.mode}`,
+    }
+  })
+}
+
 function promptTokenizerModel(config: ServingProducerConfig): string | null {
-  const engineExtras = config.engine as unknown as Record<string, unknown>
-  const model = config.request.tokenizerModel ?? engineExtras.tokenizerModel ?? engineExtras.tokenizer_model
-  return typeof model === "string" && model.trim() ? model.trim() : null
+  return tokenizerModel(config)
 }
 
 function promptTokenDetailsRequired(config: ServingProducerConfig): boolean {
@@ -1144,6 +1985,35 @@ function promptTokenCapture(config: ServingProducerConfig, payload: Record<strin
   const tokenizerModel = promptTokenizerModel(config)
   const promptDigest = sha256Text(promptText(payload))
   if (!explicitTokenIds.length) {
+    const external = tokenizerModel ? externalPromptTokens(tokenizerModel, payload, config) : null
+    if (external?.tokenIds.length) {
+      const source = "external-hf-tokenizer"
+      return {
+        summary: {
+          promptTokenIdsAvailable: true,
+          promptTokenDetailCount: external.tokenIds.length,
+          promptTokenIdSource: source,
+          promptTokenIdsSha256: sha256Json(external.tokenIds),
+          promptTokenizationSource: external.mode,
+          promptTokenizerModel: tokenizerModel,
+        },
+        details: external.tokenIds.map((tokenId, tokenIndex) => {
+          const tokenText = external.tokenTexts[tokenIndex]
+          return {
+            tokenPhase: "prompt",
+            tokenIndex,
+            tokenId,
+            tokenIdSource: source,
+            tokenDetailSource: source,
+            promptSha256: promptDigest,
+            tokenLogprob: null,
+            tokenTextSha256: typeof tokenText === "string" ? sha256Text(tokenText) : null,
+            topLogprobsJson: null,
+            ...tokenizerProvenance(config),
+          }
+        }),
+      }
+    }
     return {
       summary: {
         promptTokenIdsAvailable: false,
@@ -1176,6 +2046,7 @@ function promptTokenCapture(config: ServingProducerConfig, payload: Record<strin
       tokenLogprob: null,
       tokenTextSha256: null,
       topLogprobsJson: null,
+      ...tokenizerProvenance(config),
     })),
   }
 }
@@ -1201,6 +2072,8 @@ function promptTokenTimeline(
     tokenTextSha256: typeof detail.tokenTextSha256 === "string" ? detail.tokenTextSha256 : null,
     topLogprobsJson: null,
     tokenDetailSource: typeof detail.tokenDetailSource === "string" ? detail.tokenDetailSource : "configured-prompt-token-ids",
+    tokenizerModel: typeof detail.tokenizerModel === "string" ? detail.tokenizerModel : null,
+    tokenizerPythonBinSha256: typeof detail.tokenizerPythonBinSha256 === "string" ? detail.tokenizerPythonBinSha256 : null,
   }))
 }
 
@@ -1337,57 +2210,88 @@ async function sendChatCompletion(
       const completionTokens = Number(usage.completion_tokens ?? usage.completionTokens ?? 0) || outputChunks.length
       const totalTokens = Number(usage.total_tokens ?? usage.totalTokens ?? 0) || (inputTokens + completionTokens)
       const outputTokenCount = completionTokens || outputChunks.length
+      enrichNativeTokenTiming(telemetry, outputTokenCount)
       const tpotMs = firstOutput && lastOutput
         ? (lastOutput.receivedMs - firstOutput.receivedMs) / Math.max(outputTokenCount - 1, 1)
         : null
       const gaps = outputChunks.slice(1).map((chunk, index) => chunk.receivedMs - outputChunks[index].receivedMs)
-      const tokenSummary = tokenDetailSummary(rawTokenDetails, tokenDetailsRequested)
+      const fallbackTokenDetails = rawTokenDetails.length ? [] : outputTokenDetailsFromText(config, outputText)
+      const tokenDetailsForSummary = rawTokenDetails.length ? rawTokenDetails : fallbackTokenDetails
+      const tokenSummary = tokenDetailSummary(tokenDetailsForSummary, tokenDetailsRequested)
       const tokenTimeline: ServingTokenTimelineChunk[] = promptTokenTimeline(requestId, promptTokens.details, requestStartedAtUtc)
       let tokenIndex = 0
-      for (const chunk of outputChunks) {
-        const details = Array.isArray((chunk as Record<string, any>).tokenDetails)
-          ? (chunk as Record<string, any>).tokenDetails as Array<Record<string, any>>
-          : []
-        if (details.length) {
-          for (const detail of details) {
-            const topLogprobs = Array.isArray(detail.topLogprobs) ? detail.topLogprobs : []
+      if (fallbackTokenDetails.length) {
+        const firstOutputMs = firstOutput?.receivedMs ?? 0
+        const perTokenMs = typeof tpotMs === "number" && Number.isFinite(tpotMs) ? tpotMs : 0
+        for (const detail of fallbackTokenDetails) {
+          tokenTimeline.push({
+            requestId,
+            tokenPhase: "output",
+            chunkIndex: null,
+            tokenIndex,
+            receivedAtUtc: tokenIndex === 0 ? String(firstOutput?.receivedAtUtc ?? requestCompletedAtUtc) : String(lastOutput?.receivedAtUtc ?? requestCompletedAtUtc),
+            relativeMs: firstOutputMs + (perTokenMs * tokenIndex),
+            contentBytes: numberFrom(detail.tokenBytes),
+            contentSha256: typeof detail.tokenSha256 === "string" ? detail.tokenSha256 : sha256Text(outputText),
+            isFirstOutput: tokenIndex === 0,
+            tokenId: numberFrom(detail.tokenId),
+            tokenIdSource: typeof detail.tokenIdSource === "string" ? detail.tokenIdSource : null,
+            tokenLogprob: null,
+            tokenTextSha256: typeof detail.tokenSha256 === "string" ? detail.tokenSha256 : null,
+            topLogprobsJson: null,
+            tokenDetailSource: typeof detail.tokenDetailSource === "string" ? detail.tokenDetailSource : String(tokenSummary.tokenDetailSource),
+            ...tokenizerProvenance(config),
+          })
+          tokenIndex += 1
+        }
+      } else {
+        for (const chunk of outputChunks) {
+          const details = Array.isArray((chunk as Record<string, any>).tokenDetails)
+            ? (chunk as Record<string, any>).tokenDetails as Array<Record<string, any>>
+            : []
+          if (details.length) {
+            for (const detail of details) {
+              const topLogprobs = Array.isArray(detail.topLogprobs) ? detail.topLogprobs : []
+              tokenTimeline.push({
+                requestId,
+                tokenPhase: "output",
+                chunkIndex: chunk.chunkIndex,
+                tokenIndex,
+                receivedAtUtc: chunk.receivedAtUtc,
+                relativeMs: chunk.receivedMs,
+                contentBytes: detail.tokenBytes ?? Buffer.byteLength(chunk.content),
+                contentSha256: detail.tokenSha256 ?? sha256Text(chunk.content),
+                isFirstOutput: tokenIndex === 0,
+                tokenId: numberFrom(detail.tokenId),
+                tokenIdSource: typeof detail.tokenIdSource === "string" ? detail.tokenIdSource : null,
+                tokenLogprob: numberFrom(detail.logprob),
+                tokenTextSha256: typeof detail.tokenSha256 === "string" ? detail.tokenSha256 : null,
+                topLogprobsJson: topLogprobs.length ? JSON.stringify(topLogprobs) : null,
+                tokenDetailSource: String(tokenSummary.tokenDetailSource),
+                ...tokenizerProvenance(config),
+              })
+              tokenIndex += 1
+            }
+          } else {
             tokenTimeline.push({
               requestId,
               tokenPhase: "output",
               chunkIndex: chunk.chunkIndex,
-              tokenIndex,
+              tokenIndex: null,
               receivedAtUtc: chunk.receivedAtUtc,
               relativeMs: chunk.receivedMs,
-              contentBytes: detail.tokenBytes ?? Buffer.byteLength(chunk.content),
-              contentSha256: detail.tokenSha256 ?? sha256Text(chunk.content),
-              isFirstOutput: tokenIndex === 0,
-              tokenId: numberFrom(detail.tokenId),
-              tokenIdSource: typeof detail.tokenIdSource === "string" ? detail.tokenIdSource : null,
-              tokenLogprob: numberFrom(detail.logprob),
-              tokenTextSha256: typeof detail.tokenSha256 === "string" ? detail.tokenSha256 : null,
-              topLogprobsJson: topLogprobs.length ? JSON.stringify(topLogprobs) : null,
+              contentBytes: Buffer.byteLength(chunk.content),
+              contentSha256: sha256Text(chunk.content),
+              isFirstOutput: chunk.chunkIndex === 0,
+              tokenId: null,
+              tokenIdSource: null,
+              tokenLogprob: null,
+              tokenTextSha256: null,
+              topLogprobsJson: null,
               tokenDetailSource: String(tokenSummary.tokenDetailSource),
+              ...tokenizerProvenance(config),
             })
-            tokenIndex += 1
           }
-        } else {
-          tokenTimeline.push({
-            requestId,
-            tokenPhase: "output",
-            chunkIndex: chunk.chunkIndex,
-            tokenIndex: null,
-            receivedAtUtc: chunk.receivedAtUtc,
-            relativeMs: chunk.receivedMs,
-            contentBytes: Buffer.byteLength(chunk.content),
-            contentSha256: sha256Text(chunk.content),
-            isFirstOutput: chunk.chunkIndex === 0,
-            tokenId: null,
-            tokenIdSource: null,
-            tokenLogprob: null,
-            tokenTextSha256: null,
-            topLogprobsJson: null,
-            tokenDetailSource: String(tokenSummary.tokenDetailSource),
-          })
         }
       }
       const redacted = redactedRequest(payload)
@@ -1436,6 +2340,12 @@ async function sendChatCompletion(
         nativeE2eLatencyMs: numberFrom(telemetry.nativeE2eLatencyMs),
         nativeInterTokenLatencyMs: numberFrom(telemetry.nativeInterTokenLatencyMs),
         ...nativeIterationFields(telemetry),
+        trtllmPerfKvAllocatedBlocks: numberFrom(telemetry.trtllmPerfKvAllocatedBlocks),
+        trtllmPerfKvNewBlocks: numberFrom(telemetry.trtllmPerfKvNewBlocks),
+        trtllmPerfKvReusedBlocks: numberFrom(telemetry.trtllmPerfKvReusedBlocks),
+        trtllmPerfKvMissedBlocks: numberFrom(telemetry.trtllmPerfKvMissedBlocks),
+        trtllmPerfRecordCount: numberFrom(telemetry.trtllmPerfRecordCount),
+        trtllmPerfRequestIdSha256: typeof telemetry.trtllmPerfRequestIdSha256 === "string" ? telemetry.trtllmPerfRequestIdSha256 : null,
         runningRequests: numberFrom(telemetry.runningRequests),
         waitingRequests: numberFrom(telemetry.waitingRequests),
         kvCacheUsagePct: numberFrom(telemetry.kvCacheUsagePct),
@@ -1446,16 +2356,7 @@ async function sendChatCompletion(
         promptTokensComputedDelta: numberFrom(telemetry.promptTokensComputedDelta),
         hardwareTelemetrySource: typeof hwTelemetry.source === "string" ? hwTelemetry.source : null,
         hardwareMetricsUrl: typeof hwTelemetry.metricsUrl === "string" ? hwTelemetry.metricsUrl : null,
-        avgPowerWatts: numberFrom(hwTelemetry.powerWatts),
-        avgPowerWattsPerGpu: numberFrom(hwTelemetry.powerWattsPerGpu),
-        gpuUtilizationPct: numberFrom(hwTelemetry.gpuUtilizationPct),
-        memoryCopyUtilizationPct: numberFrom(hwTelemetry.memoryCopyUtilizationPct),
-        gpuTemperatureC: numberFrom(hwTelemetry.gpuTemperatureC),
-        smClockMHz: numberFrom(hwTelemetry.smClockMHz),
-        memoryClockMHz: numberFrom(hwTelemetry.memoryClockMHz),
-        fbUsedMiB: numberFrom(hwTelemetry.fbUsedMiB),
-        fbFreeMiB: numberFrom(hwTelemetry.fbFreeMiB),
-        energyJoules: numberFrom(hwTelemetry.energyJoules),
+        ...hardwareSampleFields(hwTelemetry),
         ...(tokenSummary as {
           tokenDetailsAvailable: boolean
           tokenIdsAvailable: boolean
@@ -1470,6 +2371,12 @@ async function sendChatCompletion(
         decodeMs: numberFrom(telemetry.decodeMs),
         ...provenance,
         tokenTimeline,
+        metricSnapshots: [
+          ...metricSnapshotRows(requestId, "native", "before", nativeBefore),
+          ...metricSnapshotRows(requestId, "native", "after", nativeAfter),
+          ...metricSnapshotRows(requestId, "dcgm", "before", hardwareBefore),
+          ...metricSnapshotRows(requestId, "dcgm", "after", hardwareAfter),
+        ],
         error: response.ok ? undefined : JSON.stringify(lastBody),
         rawCapture: {
           requestId,
@@ -1477,7 +2384,7 @@ async function sendChatCompletion(
           requestPayload: payload,
           responseEvents: events,
           outputText,
-          tokenDetails: rawTokenDetails,
+          tokenDetails: tokenDetailsForSummary,
           promptTokenDetails: promptTokens.details,
           nativeMetricsRaw: {
             before: nativeBefore,
@@ -1505,6 +2412,8 @@ async function sendChatCompletion(
       nativeTelemetry(config, body),
       nativeMetricsDelta(config, nativeBefore, nativeAfter),
     )
+    const completionTokens = Number(usage.completion_tokens ?? usage.completionTokens ?? 0)
+    enrichNativeTokenTiming(telemetry, completionTokens)
     const hwTelemetry = hardwareMetricsDelta(config, hardwareBefore, hardwareAfter)
     const rawTokenDetails = choiceTokenDetails(body, config)
     const tokenSummary = tokenDetailSummary(rawTokenDetails, tokenDetailsRequested)
@@ -1526,6 +2435,7 @@ async function sendChatCompletion(
         tokenTextSha256: typeof detail.tokenSha256 === "string" ? detail.tokenSha256 : null,
         topLogprobsJson: Array.isArray(detail.topLogprobs) && detail.topLogprobs.length ? JSON.stringify(detail.topLogprobs) : null,
         tokenDetailSource: String(tokenSummary.tokenDetailSource),
+        ...tokenizerProvenance(config),
       })),
     ]
     const redacted = redactedRequest(payload)
@@ -1546,9 +2456,9 @@ async function sendChatCompletion(
       tpotMs: null,
       interTokenLatencyMs: null,
       streamChunkCount: 0,
-      outputTokenCount: Number(usage.completion_tokens ?? usage.completionTokens ?? 0),
+      outputTokenCount: completionTokens,
       promptTokens: Number(usage.prompt_tokens ?? usage.promptTokens ?? 0),
-      completionTokens: Number(usage.completion_tokens ?? usage.completionTokens ?? 0),
+      completionTokens,
       totalTokens: Number(usage.total_tokens ?? usage.totalTokens ?? 0),
       tokenCountSource: Object.keys(usage).length ? "response-usage" : "none",
       responseId: typeof body.id === "string" ? body.id : undefined,
@@ -1571,6 +2481,12 @@ async function sendChatCompletion(
       nativeE2eLatencyMs: numberFrom(telemetry.nativeE2eLatencyMs),
       nativeInterTokenLatencyMs: numberFrom(telemetry.nativeInterTokenLatencyMs),
       ...nativeIterationFields(telemetry),
+      trtllmPerfKvAllocatedBlocks: numberFrom(telemetry.trtllmPerfKvAllocatedBlocks),
+      trtllmPerfKvNewBlocks: numberFrom(telemetry.trtllmPerfKvNewBlocks),
+      trtllmPerfKvReusedBlocks: numberFrom(telemetry.trtllmPerfKvReusedBlocks),
+      trtllmPerfKvMissedBlocks: numberFrom(telemetry.trtllmPerfKvMissedBlocks),
+      trtllmPerfRecordCount: numberFrom(telemetry.trtllmPerfRecordCount),
+      trtllmPerfRequestIdSha256: typeof telemetry.trtllmPerfRequestIdSha256 === "string" ? telemetry.trtllmPerfRequestIdSha256 : null,
       runningRequests: numberFrom(telemetry.runningRequests),
       waitingRequests: numberFrom(telemetry.waitingRequests),
       kvCacheUsagePct: numberFrom(telemetry.kvCacheUsagePct),
@@ -1581,16 +2497,7 @@ async function sendChatCompletion(
       promptTokensComputedDelta: numberFrom(telemetry.promptTokensComputedDelta),
       hardwareTelemetrySource: typeof hwTelemetry.source === "string" ? hwTelemetry.source : null,
       hardwareMetricsUrl: typeof hwTelemetry.metricsUrl === "string" ? hwTelemetry.metricsUrl : null,
-      avgPowerWatts: numberFrom(hwTelemetry.powerWatts),
-      avgPowerWattsPerGpu: numberFrom(hwTelemetry.powerWattsPerGpu),
-      gpuUtilizationPct: numberFrom(hwTelemetry.gpuUtilizationPct),
-      memoryCopyUtilizationPct: numberFrom(hwTelemetry.memoryCopyUtilizationPct),
-      gpuTemperatureC: numberFrom(hwTelemetry.gpuTemperatureC),
-      smClockMHz: numberFrom(hwTelemetry.smClockMHz),
-      memoryClockMHz: numberFrom(hwTelemetry.memoryClockMHz),
-      fbUsedMiB: numberFrom(hwTelemetry.fbUsedMiB),
-      fbFreeMiB: numberFrom(hwTelemetry.fbFreeMiB),
-      energyJoules: numberFrom(hwTelemetry.energyJoules),
+      ...hardwareSampleFields(hwTelemetry),
       ...(tokenSummary as {
         tokenDetailsAvailable: boolean
         tokenIdsAvailable: boolean
@@ -1605,6 +2512,12 @@ async function sendChatCompletion(
       decodeMs: numberFrom(telemetry.decodeMs),
       ...provenance,
       tokenTimeline,
+      metricSnapshots: [
+        ...metricSnapshotRows(requestId, "native", "before", nativeBefore),
+        ...metricSnapshotRows(requestId, "native", "after", nativeAfter),
+        ...metricSnapshotRows(requestId, "dcgm", "before", hardwareBefore),
+        ...metricSnapshotRows(requestId, "dcgm", "after", hardwareAfter),
+      ],
       error: response.ok ? undefined : JSON.stringify(body),
       rawCapture: {
         requestId,
@@ -1683,6 +2596,7 @@ function buildMeasurements(
   samples: ServingRequestSample[],
   capturedAtUtc: string,
   rawArtifactPath: string | null = null,
+  eventLogPath: string | null = null,
 ): Record<string, unknown>[] {
   const engineLabel = ENGINE_LABELS[config.engine.engine]
   const successful = samples.filter((sample) => sample.ok)
@@ -1776,6 +2690,30 @@ function buildMeasurements(
     powerSource: finite(configuredPowerWattsPerGpu) ? "pricing-config" : observedPowerWattsPerGpu != null ? "dcgm" : "unknown",
     avgGpuUtilizationPct: avg(successful.map((sample) => sample.gpuUtilizationPct ?? null).filter(finite)),
     avgMemoryCopyUtilizationPct: avg(successful.map((sample) => sample.memoryCopyUtilizationPct ?? null).filter(finite)),
+    avgSmActivePct: avg(successful.map((sample) => sample.smActivePct ?? null).filter(finite)),
+    avgDramActivePct: avg(successful.map((sample) => sample.dramActivePct ?? null).filter(finite)),
+    avgTensorActivePct: avg(successful.map((sample) => sample.tensorActivePct ?? null).filter(finite)),
+    avgFp64ActivePct: avg(successful.map((sample) => sample.fp64ActivePct ?? null).filter(finite)),
+    avgFp32ActivePct: avg(successful.map((sample) => sample.fp32ActivePct ?? null).filter(finite)),
+    avgFp16ActivePct: avg(successful.map((sample) => sample.fp16ActivePct ?? null).filter(finite)),
+    avgPcieTxThroughputKiBps: avg(successful.map((sample) => sample.pcieTxThroughputKiBps ?? null).filter(finite)),
+    avgPcieRxThroughputKiBps: avg(successful.map((sample) => sample.pcieRxThroughputKiBps ?? null).filter(finite)),
+    avgPcieTxBytesDelta: avg(successful.map((sample) => sample.pcieTxBytesDelta ?? null).filter(finite)),
+    avgPcieRxBytesDelta: avg(successful.map((sample) => sample.pcieRxBytesDelta ?? null).filter(finite)),
+    avgPcieReplayDelta: avg(successful.map((sample) => sample.pcieReplayDelta ?? null).filter(finite)),
+    avgNvlinkTxBytesDelta: avg(successful.map((sample) => sample.nvlinkTxBytesDelta ?? null).filter(finite)),
+    avgNvlinkRxBytesDelta: avg(successful.map((sample) => sample.nvlinkRxBytesDelta ?? null).filter(finite)),
+    avgNvlinkBandwidthTotalMBps: avg(successful.map((sample) => sample.nvlinkBandwidthTotalMBps ?? null).filter(finite)),
+    avgEncoderUtilizationPct: avg(successful.map((sample) => sample.encoderUtilizationPct ?? null).filter(finite)),
+    avgDecoderUtilizationPct: avg(successful.map((sample) => sample.decoderUtilizationPct ?? null).filter(finite)),
+    avgXidErrorsDelta: avg(successful.map((sample) => sample.xidErrorsDelta ?? null).filter(finite)),
+    avgEccSbeVolatileTotalDelta: avg(successful.map((sample) => sample.eccSbeVolatileTotalDelta ?? null).filter(finite)),
+    avgEccDbeVolatileTotalDelta: avg(successful.map((sample) => sample.eccDbeVolatileTotalDelta ?? null).filter(finite)),
+    avgPowerViolationTimeUsDelta: avg(successful.map((sample) => sample.powerViolationTimeUsDelta ?? null).filter(finite)),
+    avgThermalViolationTimeUsDelta: avg(successful.map((sample) => sample.thermalViolationTimeUsDelta ?? null).filter(finite)),
+    hardwareRawMetricCountMin: successful.map((sample) => sample.hardwareRawMetricCount ?? null).filter(finite).length
+      ? Math.min(...successful.map((sample) => sample.hardwareRawMetricCount ?? null).filter(finite))
+      : null,
     totalEnergyJoules: sum(successful.map((sample) => sample.energyJoules ?? 0)),
     tokensPerWatt,
     campaignCount: Math.max(successful.length, 1),
@@ -1788,7 +2726,7 @@ function buildMeasurements(
     dcgmGrounded: successful.length > 0 && successful.every((sample) => sample.hardwareTelemetryAvailable),
     streamingRequestCount: successful.filter((sample) => sample.streaming).length,
     nativeTelemetryAvailableCount: successful.filter((sample) => sample.nativeTelemetryAvailable).length,
-    nativeTelemetryRequired: Boolean(config.engine.requireNativeTelemetry),
+    nativeTelemetryRequired: nativeTelemetryExpected(config),
     hardwareTelemetryAvailableCount: successful.filter((sample) => sample.hardwareTelemetryAvailable).length,
     hardwareTelemetryRequired: Boolean(config.engine.requireHardwareTelemetry || hardwareMetricsUrl(config)),
     tokenDetailsAvailableCount: successful.filter((sample) => sample.tokenDetailsAvailable).length,
@@ -1798,6 +2736,10 @@ function buildMeasurements(
     promptTokenIdsAvailableCount: successful.filter((sample) => sample.promptTokenIdsAvailable).length,
     promptTokenDetailsRequired: promptTokenDetailsRequired(config),
     runtimeProvenanceAvailableCount: successful.filter(hasRuntimeProvenance).length,
+    eventLogRequired: eventLogEnabled(config),
+    eventLogWritten: Boolean(eventLogPath),
+    eventLogPath,
+    eventTopic: eventTopic(config),
     hardwareProvenance: config.workload?.hardware && config.workload.hardware !== "unknown" ? "configured" : "unknown",
     tags: [
       "serving-producer",
@@ -1815,12 +2757,19 @@ function buildMeasurements(
     hardware: config.workload?.hardware ?? "unknown",
     runtimeFramework: engineLabel,
     runtimeEngine: config.engine.engine,
+    runtimeBackend: sample.runtimeBackend,
     operatingPoint: config.workload?.operatingPoint ?? "laptop-smoke",
     basis: "per_request",
     requestId: sample.requestId,
     requestIndex: sample.requestIndex,
+    requestEndpoint: sample.endpoint,
+    requestStartedAtUtc: sample.requestStartedAtUtc,
+    requestCompletedAtUtc: sample.requestCompletedAtUtc,
+    responseId: sample.responseId,
+    responseModel: sample.responseModel,
     status: sample.status,
     ok: sample.ok,
+    streaming: sample.streaming,
     e2eLatencyMs: sample.e2eLatencyMs,
     latencyMs: sample.latencyMs,
     timeToFirstByteMs: sample.timeToFirstByteMs,
@@ -1833,6 +2782,7 @@ function buildMeasurements(
     totalTokens: sample.totalTokens,
     tokenCountSource: sample.tokenCountSource,
     outputTokenCount: sample.outputTokenCount,
+    outputBytes: sample.outputBytes,
     streamChunkCount: sample.streamChunkCount,
     firstChunkAtUtc: sample.firstChunkAtUtc,
     firstOutputAtUtc: sample.firstOutputAtUtc,
@@ -1842,10 +2792,13 @@ function buildMeasurements(
     promptSha256: sample.promptSha256,
     requestPayloadSha256: sample.requestPayloadSha256,
     outputSha256: sample.outputSha256,
+    errorSha256: sample.error ? sha256Text(sample.error) : null,
     nativeTelemetryAvailable: sample.nativeTelemetryAvailable,
     hardwareTelemetryAvailable: sample.hardwareTelemetryAvailable,
     nativeTelemetrySource: sample.nativeTelemetrySource,
     nativeMetricsUrl: sample.nativeMetricsUrl,
+    nativeJsonMetricsUrl: sample.nativeTelemetry?.nativeJsonMetricsUrl,
+    nativePerfMetricsUrl: sample.nativeTelemetry?.nativePerfMetricsUrl,
     nativeTtftMs: sample.nativeTtftMs,
     nativeTpotMs: sample.nativeTpotMs,
     nativeE2eLatencyMs: sample.nativeE2eLatencyMs,
@@ -1854,6 +2807,12 @@ function buildMeasurements(
     nativeGpuMemoryBytes: sample.nativeGpuMemoryBytes,
     nativeKvCacheUsedBlocks: sample.nativeKvCacheUsedBlocks,
     nativeKvCacheMaxBlocks: sample.nativeKvCacheMaxBlocks,
+    trtllmPerfKvAllocatedBlocks: sample.trtllmPerfKvAllocatedBlocks,
+    trtllmPerfKvNewBlocks: sample.trtllmPerfKvNewBlocks,
+    trtllmPerfKvReusedBlocks: sample.trtllmPerfKvReusedBlocks,
+    trtllmPerfKvMissedBlocks: sample.trtllmPerfKvMissedBlocks,
+    trtllmPerfRecordCount: sample.trtllmPerfRecordCount,
+    trtllmPerfRequestIdSha256: sample.trtllmPerfRequestIdSha256,
     runningRequests: sample.runningRequests,
     waitingRequests: sample.waitingRequests,
     kvCacheUsagePct: sample.kvCacheUsagePct,
@@ -1868,18 +2827,46 @@ function buildMeasurements(
     avgPowerWattsPerGpu: sample.avgPowerWattsPerGpu,
     gpuUtilizationPct: sample.gpuUtilizationPct,
     memoryCopyUtilizationPct: sample.memoryCopyUtilizationPct,
+    smActivePct: sample.smActivePct,
+    dramActivePct: sample.dramActivePct,
+    tensorActivePct: sample.tensorActivePct,
+    fp64ActivePct: sample.fp64ActivePct,
+    fp32ActivePct: sample.fp32ActivePct,
+    fp16ActivePct: sample.fp16ActivePct,
+    pcieTxThroughputKiBps: sample.pcieTxThroughputKiBps,
+    pcieRxThroughputKiBps: sample.pcieRxThroughputKiBps,
+    pcieTxBytesDelta: sample.pcieTxBytesDelta,
+    pcieRxBytesDelta: sample.pcieRxBytesDelta,
+    pcieReplayDelta: sample.pcieReplayDelta,
+    nvlinkTxBytesDelta: sample.nvlinkTxBytesDelta,
+    nvlinkRxBytesDelta: sample.nvlinkRxBytesDelta,
+    nvlinkBandwidthTotalMBps: sample.nvlinkBandwidthTotalMBps,
+    encoderUtilizationPct: sample.encoderUtilizationPct,
+    decoderUtilizationPct: sample.decoderUtilizationPct,
     gpuTemperatureC: sample.gpuTemperatureC,
     smClockMHz: sample.smClockMHz,
     memoryClockMHz: sample.memoryClockMHz,
     fbUsedMiB: sample.fbUsedMiB,
     fbFreeMiB: sample.fbFreeMiB,
     energyJoules: sample.energyJoules,
+    xidErrors: sample.xidErrors,
+    xidErrorsDelta: sample.xidErrorsDelta,
+    eccSbeVolatileTotalDelta: sample.eccSbeVolatileTotalDelta,
+    eccDbeVolatileTotalDelta: sample.eccDbeVolatileTotalDelta,
+    powerViolationTimeUsDelta: sample.powerViolationTimeUsDelta,
+    thermalViolationTimeUsDelta: sample.thermalViolationTimeUsDelta,
+    hardwareRawMetricCount: sample.hardwareRawMetricCount,
+    hardwareRawMetricNamesSha256: sample.hardwareRawMetricNamesSha256,
     tokenDetailsAvailable: sample.tokenDetailsAvailable,
     tokenIdsAvailable: sample.tokenIdsAvailable,
     logprobsAvailable: sample.logprobsAvailable,
     tokenDetailCount: sample.tokenDetailCount,
     tokenDetailSource: sample.tokenDetailSource,
     tokenIdSource: sample.tokenIdSource,
+    tokenDetailsCapabilityStatus: sample.tokenDetailsCapabilityStatus,
+    tokenDetailsUnsupportedReason: sample.tokenDetailsUnsupportedReason,
+    tokenizerModel: sample.tokenizerModel,
+    tokenizerPythonBinSha256: sample.tokenizerPythonBinSha256,
     promptTokenIdsAvailable: sample.promptTokenIdsAvailable,
     promptTokenDetailCount: sample.promptTokenDetailCount,
     promptTokenIdSource: sample.promptTokenIdSource,
@@ -1899,6 +2886,7 @@ function buildMeasurements(
     podName: sample.podName,
     nodeName: sample.nodeName,
     hostName: sample.hostName,
+    hardwareInventorySha256: sample.hardwareInventorySha256,
     rawArtifactPath,
     latestCapturedAtUtc: capturedAtUtc,
   }))
@@ -1922,20 +2910,34 @@ function buildMeasurements(
     tokenTextSha256: chunk.tokenTextSha256,
     topLogprobsJson: chunk.topLogprobsJson,
     tokenDetailSource: chunk.tokenDetailSource,
+    tokenizerModel: chunk.tokenizerModel ?? sample.tokenizerModel,
+    tokenizerPythonBinSha256: chunk.tokenizerPythonBinSha256 ?? sample.tokenizerPythonBinSha256,
     latestCapturedAtUtc: capturedAtUtc,
   })))
-  return [row, ...sampleRows, ...timelineRows]
+  const metricSnapshotRowsForRun = samples.flatMap((sample) => (sample.metricSnapshots ?? []).map((snapshot): Record<string, unknown> => ({
+    surface: "serving_metric_snapshot",
+    model: config.request.model,
+    runtimeFramework: engineLabel,
+    runtimeEngine: config.engine.engine,
+    ...snapshot,
+    rawArtifactPath,
+    latestCapturedAtUtc: capturedAtUtc,
+  })))
+  return [row, ...sampleRows, ...timelineRows, ...metricSnapshotRowsForRun]
 }
 
 const PRODUCER_COVERAGE_DESCRIPTIONS: Record<string, string> = {
   clientStreamTiming: "Client stream=true timing for E2E, TTFB, TTFT, TTFOT, TPOT, and output token timeline rows.",
   nativeRuntimeTelemetry: "Native runtime timing/cache/concurrency fields exposed by vLLM, SGLang, or TensorRT-LLM metrics.",
-  dcgmHardwareTelemetry: "DCGM hardware counters for power, utilization, clocks, memory, temperature, and energy.",
+  dcgmHardwareTelemetry: "DCGM hardware counters for power, utilization, profiling activity, PCIe/NVLink, clocks, memory, temperature, errors, violations, raw metric inventory, and energy.",
   promptTokenIds: "Tokenizer-exact prompt/input token IDs and prompt token provenance.",
-  outputTokenIdsLogprobs: "Output token IDs, token logprobs, top-logprobs, and token provenance.",
+  outputTokenIds: "Output token IDs and token provenance from runtime logprobs or tokenizer fallback.",
+  outputTokenLogprobs: "Output token logprobs, top-logprobs, and token-logprob provenance.",
   operatorFullArtifacts: "Operator-full raw request/response artifacts retained outside customer-safe rows.",
   rawMetricSnapshots: "Operator-full before/after native and DCGM metric snapshots retained outside customer-safe rows.",
+  metricSnapshots: "Queryable per-series native and DCGM before/after metric snapshots with label and raw-exposition provenance hashes.",
   runtimeProvenance: "Engine version, model revision, image, server args, process, container, pod, node, or host provenance.",
+  kafkaEventLog: "Post-capture JSONL event log with request-sample, token-timeline, aggregate, and coverage events.",
 }
 
 function coverageStatus(proven: number, expected: number): string {
@@ -1948,15 +2950,14 @@ function coverageStatus(proven: number, expected: number): string {
 function hasRuntimeProvenance(sample: ServingRequestSample): boolean {
   return [
     sample.engineVersion,
+    sample.runtimeBackend,
     sample.modelRevision,
+    sample.imageTag,
     sample.imageDigest,
     sample.serverArgsSha256,
-    sample.processId,
     sample.containerId,
-    sample.podName,
-    sample.nodeName,
     sample.hostName,
-  ].some((value) => value != null && value !== "")
+  ].every((value) => typeof value === "string" && value.length > 0)
 }
 
 function rawSnapshotAvailable(capture: Record<string, unknown>, key: string): boolean {
@@ -1984,15 +2985,14 @@ function producerCoverageRows(
   samples: ServingRequestSample[],
   aggregateRow: Record<string, unknown>,
   rawArtifactPath: string,
+  eventLogPath: string | null,
   rawCaptures: Record<string, unknown>[],
   capturedAtUtc: string,
 ): Record<string, unknown>[] {
   const successful = samples.filter((sample) => sample.ok)
   const expectedSamples = successful.length || samples.length || 1
-  const tokenRequired = Boolean(requestPayload(config.request, config.request.stream !== false).logprobs)
+  const tokenLogprobsRequired = Boolean(requestPayload(config.request, config.request.stream !== false).logprobs)
   const promptRequired = Boolean(aggregateRow.promptTokenDetailsRequired)
-  const nativeExpected = aggregateRow.nativeTelemetryRequired ? expectedSamples : 0
-  const hardwareExpected = aggregateRow.hardwareTelemetryRequired ? expectedSamples : 0
   const specs: Array<[string, number, number, string[]]> = []
 
   const streamProven = successful.filter((sample) =>
@@ -2020,6 +3020,7 @@ function producerCoverageRows(
     finite(sample.prefillMs) &&
     finite(sample.decodeMs),
   ).length
+  const nativeExpected = aggregateRow.nativeTelemetryRequired || nativeProven > 0 ? expectedSamples : 0
   specs.push([
     "nativeRuntimeTelemetry",
     nativeProven,
@@ -2032,8 +3033,18 @@ function producerCoverageRows(
     finite(sample.avgPowerWatts) &&
     finite(sample.gpuUtilizationPct) &&
     finite(sample.gpuTemperatureC) &&
+    finite(sample.smActivePct) &&
+    finite(sample.dramActivePct) &&
+    finite(sample.tensorActivePct) &&
+    finite(sample.pcieTxBytesDelta) &&
+    finite(sample.pcieRxBytesDelta) &&
+    finite(sample.nvlinkTxBytesDelta) &&
+    finite(sample.nvlinkRxBytesDelta) &&
+    finite(sample.hardwareRawMetricCount) &&
+    typeof sample.hardwareRawMetricNamesSha256 === "string" &&
     finite(sample.energyJoules),
   ).length
+  const hardwareExpected = aggregateRow.hardwareTelemetryRequired || hardwareProven > 0 ? expectedSamples : 0
   specs.push([
     "dcgmHardwareTelemetry",
     hardwareProven,
@@ -2053,17 +3064,29 @@ function producerCoverageRows(
     !promptRequired || promptProven === expectedSamples ? [] : ["prompt token IDs missing"],
   ])
 
-  const outputProven = successful.filter((sample) =>
+  const outputIdsProven = successful.filter((sample) =>
     sample.tokenDetailsAvailable === true &&
     sample.tokenIdsAvailable === true &&
-    sample.logprobsAvailable === true &&
     typeof sample.tokenIdSource === "string",
   ).length
+  const outputIdsExpected = tokenLogprobsRequired || outputIdsProven > 0 ? expectedSamples : 0
   specs.push([
-    "outputTokenIdsLogprobs",
-    outputProven,
-    tokenRequired ? expectedSamples : 0,
-    !tokenRequired || outputProven === expectedSamples ? [] : ["output token IDs/logprobs missing"],
+    "outputTokenIds",
+    outputIdsProven,
+    outputIdsExpected,
+    outputIdsExpected === 0 || outputIdsProven === expectedSamples ? [] : ["output token IDs missing"],
+  ])
+
+  const outputLogprobsProven = successful.filter((sample) =>
+    sample.tokenDetailsAvailable === true &&
+    sample.logprobsAvailable === true,
+  ).length
+  const outputLogprobsExpected = tokenLogprobsRequired || outputLogprobsProven > 0 ? expectedSamples : 0
+  specs.push([
+    "outputTokenLogprobs",
+    outputLogprobsProven,
+    outputLogprobsExpected,
+    outputLogprobsExpected === 0 || outputLogprobsProven === expectedSamples ? [] : ["output token logprobs missing"],
   ])
 
   const rawPresent = rawArtifactPath && existsSync(rawArtifactPath) ? 1 : 0
@@ -2086,12 +3109,37 @@ function producerCoverageRows(
     rawSnapshotExpected === 0 || rawSnapshotProven === rawSnapshotExpected ? [] : ["operator-full native/DCGM raw metric snapshots missing"],
   ])
 
+  const metricSnapshotExpected = nativeExpected > 0 || hardwareExpected > 0 ? expectedSamples : 0
+  const metricSnapshotProven = successful.filter((sample) =>
+    (sample.metricSnapshots ?? []).some((snapshot) =>
+      typeof snapshot.metricName === "string" &&
+      finite(snapshot.metricValue) &&
+      typeof snapshot.metricLabelsSha256 === "string" &&
+      ["before", "after"].includes(snapshot.snapshotPhase),
+    ),
+  ).length
+  specs.push([
+    "metricSnapshots",
+    metricSnapshotProven,
+    metricSnapshotExpected,
+    metricSnapshotExpected === 0 || metricSnapshotProven === metricSnapshotExpected ? [] : ["per-request native/DCGM metric snapshot rows missing"],
+  ])
+
   const runtimeProven = successful.filter(hasRuntimeProvenance).length
   specs.push([
     "runtimeProvenance",
     runtimeProven,
     expectedSamples,
     runtimeProven === expectedSamples ? [] : ["runtime provenance missing or partial"],
+  ])
+
+  const eventLogExpected = eventLogEnabled(config) ? 1 : 0
+  const eventLogProven = eventLogPath ? 1 : 0
+  specs.push([
+    "kafkaEventLog",
+    eventLogProven,
+    eventLogExpected,
+    eventLogExpected === 0 || eventLogProven === eventLogExpected ? [] : ["Post-capture event log missing"],
   ])
 
   const allProven = specs.every(([, proven, expected]) => ["proven", "not_configured"].includes(coverageStatus(proven, expected)))
@@ -2109,9 +3157,163 @@ function producerCoverageRows(
     missingJson: JSON.stringify(missing),
     description: PRODUCER_COVERAGE_DESCRIPTIONS[category],
     allProven,
-    proofPath: rawArtifactPath,
+    proofPath: category === "kafkaEventLog" ? eventLogPath : rawArtifactPath,
     latestCapturedAtUtc: capturedAtUtc,
   }))
+}
+
+function eventKey(...parts: unknown[]): string {
+  return parts
+    .filter((part) => part != null && String(part) !== "")
+    .map((part) => String(part))
+    .join("|")
+}
+
+function servingTelemetryEvent(args: {
+  topic: string
+  eventType: string
+  partitionKey: string
+  emittedAtUtc: string
+  model: string
+  campaignId: string
+  runId: string
+  engine: ServingEngineId
+  runtimeFramework: string
+  artifactPath: string
+  rawArtifactPath: string
+  manifestPath: string
+  eventLogPath: string
+  payload: Record<string, unknown>
+}): Record<string, unknown> {
+  const event = {
+    schemaVersion: SERVING_EVENT_SCHEMA_VERSION,
+    topic: args.topic,
+    eventType: args.eventType,
+    partitionKey: args.partitionKey,
+    emittedAtUtc: args.emittedAtUtc,
+    model: args.model,
+    campaignId: args.campaignId,
+    runId: args.runId,
+    engine: args.engine,
+    runtimeFramework: args.runtimeFramework,
+    artifactPath: args.artifactPath,
+    rawArtifactPath: args.rawArtifactPath,
+    manifestPath: args.manifestPath,
+    eventLogPath: args.eventLogPath,
+    payload: args.payload,
+  }
+  return {
+    ...event,
+    eventId: sha256StableJson({
+      schemaVersion: event.schemaVersion,
+      eventType: event.eventType,
+      partitionKey: event.partitionKey,
+      payload: event.payload,
+    }),
+  }
+}
+
+function buildServingEventRecords(args: {
+  config: ServingProducerConfig
+  samples: ServingRequestSample[]
+  measurements: Record<string, unknown>[]
+  capturedAtUtc: string
+  campaignId: string
+  runId: string
+  artifactPath: string
+  rawArtifactPath: string
+  manifestPath: string
+  eventLogPath: string
+}): Record<string, unknown>[] {
+  const topic = eventTopic(args.config)
+  const runtimeFramework = ENGINE_LABELS[args.config.engine.engine]
+  const keyBase = eventKey(args.campaignId, args.runId, args.config.engine.engine)
+  const common = {
+    topic,
+    emittedAtUtc: args.capturedAtUtc,
+    model: args.config.request.model,
+    campaignId: args.campaignId,
+    runId: args.runId,
+    engine: args.config.engine.engine,
+    runtimeFramework,
+    artifactPath: args.artifactPath,
+    rawArtifactPath: args.rawArtifactPath,
+    manifestPath: args.manifestPath,
+    eventLogPath: args.eventLogPath,
+  }
+  const events = [
+    servingTelemetryEvent({
+      ...common,
+      eventType: "serving.producer_run",
+      partitionKey: keyBase,
+      payload: {
+        schemaVersion: "performance-iq.serving-producer-run-event.v1",
+        campaignId: args.campaignId,
+        runId: args.runId,
+        engine: args.config.engine.engine,
+        runtimeFramework,
+        model: args.config.request.model,
+        requestCount: args.samples.length,
+        successCount: args.samples.filter((sample) => sample.ok).length,
+        measurementCount: args.measurements.length,
+        servingRequestSampleCount: args.measurements.filter((row) => row.surface === "serving_request_sample").length,
+        servingTokenTimelineCount: args.measurements.filter((row) => row.surface === "serving_token_timeline").length,
+        artifactPath: args.artifactPath,
+        rawArtifactPath: args.rawArtifactPath,
+        manifestPath: args.manifestPath,
+        eventLogPath: args.eventLogPath,
+        eventTopic: topic,
+      },
+    }),
+  ]
+
+  args.measurements.forEach((row, index) => {
+    const surface = String(row.surface ?? "result")
+    events.push(servingTelemetryEvent({
+      ...common,
+      eventType: `serving.measurement.${surface}`,
+      partitionKey: eventKey(keyBase, surface, row.requestId, row.chunkIndex, row.tokenIndex, index),
+      payload: {
+        campaignId: args.campaignId,
+        runId: args.runId,
+        artifactPath: args.artifactPath,
+        rawArtifactPath: args.rawArtifactPath,
+        manifestPath: args.manifestPath,
+        eventLogPath: args.eventLogPath,
+        ...row,
+      },
+    }))
+  })
+  return events
+}
+
+async function writeServingEventLog(
+  config: ServingProducerConfig,
+  samples: ServingRequestSample[],
+  measurements: Record<string, unknown>[],
+  capturedAtUtc: string,
+  campaignId: string,
+  runId: string,
+  artifactPath: string,
+  rawArtifactPath: string,
+  manifestPath: string,
+  eventLogPath: string,
+): Promise<string> {
+  await mkdir(path.dirname(eventLogPath), { recursive: true })
+  const events = buildServingEventRecords({
+    config,
+    samples,
+    measurements,
+    capturedAtUtc,
+    campaignId,
+    runId,
+    artifactPath,
+    rawArtifactPath,
+    manifestPath,
+    eventLogPath,
+  })
+  await writeFile(eventLogPath, events.map((event) => stableJson(event)).join("\n") + "\n")
+  return eventLogPath
 }
 
 async function writeSummaryArtifact(
@@ -2120,14 +3322,10 @@ async function writeSummaryArtifact(
   measurements: Record<string, unknown>[],
   capturedAtUtc: string,
   rawArtifactPath: string,
+  eventLogPath: string | null,
 ): Promise<string> {
-  const artifactDir = config.artifactDir ?? path.join(process.cwd(), ".performance-iq", "serving-producers")
-  await mkdir(artifactDir, { recursive: true })
-  const safeModel = safeSlug(config.request.model)
-  const artifactPath = path.join(
-    artifactDir,
-    `${config.engine.engine}-${safeModel}-${capturedAtUtc.replace(/[:.]/g, "-")}.json`,
-  )
+  const artifactPath = summaryArtifactPath(config, capturedAtUtc)
+  await mkdir(path.dirname(artifactPath), { recursive: true })
   await writeFile(artifactPath, JSON.stringify({
     schemaVersion: "performance-iq.serving-producer-summary.v1",
     capturedAtUtc,
@@ -2140,6 +3338,8 @@ async function writeSummaryArtifact(
     capturePolicy: {
       mode: "operator-full",
       rawArtifactPath,
+      eventLogPath,
+      eventTopic: eventTopic(config),
       summaryPayload: "redacted-hashes-and-derived-fields",
     },
     request: redactedRequest(requestPayload(config.request, config.request.stream !== false)),
@@ -2193,19 +3393,30 @@ async function writeRawArtifact(
   rawCaptures: Record<string, unknown>[],
   capturedAtUtc: string,
 ): Promise<string> {
-  const artifactDir = config.artifactDir ?? path.join(process.cwd(), ".performance-iq", "serving-producers")
-  await mkdir(artifactDir, { recursive: true })
-  const safeModel = safeSlug(config.request.model)
-  const rawPath = path.join(
-    artifactDir,
-    `${config.engine.engine}-${safeModel}-${capturedAtUtc.replace(/[:.]/g, "-")}-operator-full.json`,
-  )
+  const rawPath = rawArtifactPath(config, capturedAtUtc)
+  await mkdir(path.dirname(rawPath), { recursive: true })
   await writeFile(rawPath, JSON.stringify({
     schemaVersion: "performance-iq.serving-operator-full-raw.v1",
     confidentiality: "operator-full",
     capturedAtUtc,
     engine: config.engine.engine,
     engineLabel: ENGINE_LABELS[config.engine.engine],
+    runtimeConfiguration: {
+      frameworkVersion: config.engine.frameworkVersion,
+      runtimeBackend: config.engine.runtimeBackend,
+      modelRevision: config.engine.modelRevision,
+      imageTag: config.engine.imageTag,
+      imageDigest: config.engine.imageDigest,
+      serverArgs: config.engine.serverArgs,
+      tokenizerModel: tokenizerModel(config),
+      processId: config.engine.processId ?? config.engine.pid,
+      containerId: config.engine.containerId,
+      podName: config.engine.podName,
+      nodeName: config.engine.nodeName,
+      hostName: config.engine.hostName ?? config.engine.hostname,
+      hardwareInventoryPath: config.engine.hardwareInventoryPath,
+      hardwareInventorySha256: config.engine.hardwareInventorySha256,
+    },
     requestPayload: requestPayload(config.request, config.request.stream !== false),
     captures: rawCaptures,
   }, null, 2) + "\n")
@@ -2217,13 +3428,8 @@ async function writeManifestArtifact(
   manifest: ProducerRunManifest,
   capturedAtUtc: string,
 ): Promise<string> {
-  const artifactDir = config.artifactDir ?? path.join(process.cwd(), ".performance-iq", "serving-producers")
-  await mkdir(artifactDir, { recursive: true })
-  const safeModel = safeSlug(config.request.model)
-  const manifestPath = path.join(
-    artifactDir,
-    `${config.engine.engine}-${safeModel}-${capturedAtUtc.replace(/[:.]/g, "-")}-manifest.json`,
-  )
+  const manifestPath = manifestArtifactPath(config, capturedAtUtc)
+  await mkdir(path.dirname(manifestPath), { recursive: true })
   await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n")
   return manifestPath
 }
@@ -2244,9 +3450,26 @@ export async function runServingProducer(config: ServingProducerConfig): Promise
   }
 
   const rawArtifactPath = await writeRawArtifact(config, rawCaptures, capturedAtUtc)
-  const measurements = buildMeasurements(config, samples, capturedAtUtc, rawArtifactPath)
-  measurements.push(...producerCoverageRows(config, samples, measurements[0], rawArtifactPath, rawCaptures, capturedAtUtc))
-  const artifactPath = await writeSummaryArtifact(config, samples, measurements, capturedAtUtc, rawArtifactPath)
+  const artifactPath = summaryArtifactPath(config, capturedAtUtc)
+  const manifestPath = manifestArtifactPath(config, capturedAtUtc)
+  const eventLogPath = servingEventLogPath(config, capturedAtUtc)
+  const measurements = buildMeasurements(config, samples, capturedAtUtc, rawArtifactPath, eventLogPath)
+  measurements.push(...producerCoverageRows(config, samples, measurements[0], rawArtifactPath, eventLogPath, rawCaptures, capturedAtUtc))
+  if (eventLogPath) {
+    await writeServingEventLog(
+      config,
+      samples,
+      measurements,
+      capturedAtUtc,
+      campaignId,
+      runId,
+      artifactPath,
+      rawArtifactPath,
+      manifestPath,
+      eventLogPath,
+    )
+  }
+  await writeSummaryArtifact(config, samples, measurements, capturedAtUtc, rawArtifactPath, eventLogPath)
   const engineLabel = ENGINE_LABELS[config.engine.engine]
   const runInput: PerformanceIQRunInput = {
     sourceType: config.sourceType ?? "other-measured-producer",
@@ -2255,7 +3478,7 @@ export async function runServingProducer(config: ServingProducerConfig): Promise
     producer: {
       repo: "performance-iq-sdk",
       tool: `${config.engine.engine}-serving-producer`,
-      commitSha: "local-serving-producer",
+      commitSha: DEFAULT_PRODUCER_COMMIT,
       ...config.producer,
     },
     campaign: {
@@ -2274,12 +3497,13 @@ export async function runServingProducer(config: ServingProducerConfig): Promise
     },
     runtime: {
       imageDigest: config.engine.imageDigest ?? DEFAULT_IMAGE_DIGEST,
-      imageTag: config.engine.imageTag,
+      imageTag: config.engine.imageTag ?? (config.engine.imageDigest ? undefined : "uncontainerized-local"),
       framework: engineLabel,
     },
     artifacts: [
       { kind: "normalized-summary", path: artifactPath },
       { kind: "operator-full-serving-raw", path: rawArtifactPath },
+      ...(eventLogPath ? [{ kind: "serving-telemetry-event-log", path: eventLogPath }] : []),
     ],
     measurements,
     platform: {
@@ -2292,6 +3516,7 @@ export async function runServingProducer(config: ServingProducerConfig): Promise
       `for model ${config.request.model}.`,
       "Each request includes x-performance-iq-* trace headers.",
       "Metrics are derived from client-side streaming SSE timings, response usage fields, response token logprobs/IDs when exposed, native telemetry when exposed, and DCGM hardware metrics when a hardware metrics endpoint is configured.",
+      "Post-capture serving events are written to a JSONL event log; experimental exporters may replay that artifact after durable capture.",
     ].join(" "),
     limitations: [
       "Serving producer captures client stream timing, request-path, usage, latency, token logprobs/IDs when exposed, and provenance; hardware-level DCGM counters require a reachable DCGM/Prometheus metrics endpoint or configured hardware telemetry.",
@@ -2302,7 +3527,7 @@ export async function runServingProducer(config: ServingProducerConfig): Promise
     runInput.runtime.imageTag = runInput.runtime.imageTag ?? `${config.engine.engine}:${config.engine.frameworkVersion}`
   }
   const manifest = await buildManifest(runInput)
-  const manifestPath = await writeManifestArtifact(config, manifest, capturedAtUtc)
+  await writeManifestArtifact(config, manifest, capturedAtUtc)
   const submission = config.performanceIq && config.submit !== false
     ? await config.performanceIq.submitRun(runInput, { idempotencyKey: manifest.campaign.runId })
     : undefined
@@ -2313,6 +3538,7 @@ export async function runServingProducer(config: ServingProducerConfig): Promise
     runInput,
     artifactPath,
     manifestPath,
+    ...(eventLogPath ? { eventLogPath } : {}),
     samples,
     measurements,
     submission,

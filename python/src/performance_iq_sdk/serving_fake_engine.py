@@ -21,6 +21,7 @@ class FakeEngineState:
         self.engine = engine
         self.model = model
         self.request_count = 0
+        self.last_perf_read_count = 0
         self.lock = threading.Lock()
 
     def increment_requests(self) -> int:
@@ -30,6 +31,13 @@ class FakeEngineState:
 
     def current_requests(self) -> int:
         with self.lock:
+            return self.request_count
+
+    def pop_perf_request_count(self) -> int | None:
+        with self.lock:
+            if self.request_count <= self.last_perf_read_count:
+                return None
+            self.last_perf_read_count = self.request_count
             return self.request_count
 
 
@@ -43,7 +51,7 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         return
 
-    def _write_json(self, status: int, body: dict[str, Any]) -> None:
+    def _write_json(self, status: int, body: Any) -> None:
         payload = json.dumps(body).encode("utf-8")
         self.send_response(status)
         self.send_header("content-type", "application/json")
@@ -57,6 +65,9 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/metrics" and self.state.engine == "tensorrt-llm":
             self._write_tensorrt_json_metrics()
+            return
+        if self.path == "/perf_metrics" and self.state.engine == "tensorrt-llm":
+            self._write_tensorrt_perf_metrics()
             return
         if self.path in {"/metrics", "/prometheus/metrics"}:
             self._write_metrics()
@@ -264,6 +275,8 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
             "gpuMemUsage": 2_000_000_000 + count,
             "iterLatencyMS": 7 + count,
             "numActiveRequests": 1,
+            "numQueuedRequests": 0,
+            "newActiveRequestsQueueLatencyMS": 5,
             "kvCacheStats": {
                 "usedNumBlocks": 4 + count,
                 "maxNumBlocks": 10,
@@ -275,6 +288,30 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def _write_tensorrt_perf_metrics(self) -> None:
+        count = self.state.pop_perf_request_count()
+        if count is None:
+            self._write_json(200, [])
+            return
+        arrival = 100 + count
+        self._write_json(200, [{
+            "request_id": count,
+            "perf_metrics": {
+                "timing_metrics": {
+                    "arrival_time": arrival,
+                    "first_scheduled_time": arrival + 0.005,
+                    "first_token_time": arrival + 0.105,
+                    "last_token_time": arrival + 0.135,
+                },
+                "kv_cache_metrics": {
+                    "num_total_allocated_blocks": 10,
+                    "num_new_allocated_blocks": 8,
+                    "num_reused_blocks": 2,
+                    "num_missed_blocks": 8,
+                },
+            },
+        }])
 
 
 class FakeOpenAIServer(ThreadingHTTPServer):

@@ -24,17 +24,17 @@ first byte, first output token/content, every output chunk/token row, and
 request completion from the measuring client. This is request-path measurement,
 not Kafka streaming.
 
-Do not put Kafka between the producer and the serving engine for TTFT/TPOT
-measurement; a broker would add latency and change the measured path. Kafka can
-be added later as an optional ingestion transport after the producer has already
-captured timestamps, token details, raw operator artifacts, DCGM/native metrics,
+Do not put a broker between the producer and the serving engine for TTFT/TPOT
+measurement; it would add latency and change the measured path. The product
+ingestion service accepts the captured envelope directly after the producer has
+recorded timestamps, token details, raw operator artifacts, DCGM/native metrics,
 hashes, receipts, and provenance.
 
-Smoke runs now write a post-capture event log for Kafka-style ingestion:
+Smoke runs write a post-capture event log:
 
 ```bash
 export PIQ_SERVING_EVENT_LOG=$PIQ_ARTIFACT_DIR/serving-events.jsonl
-export PIQ_SERVING_KAFKA_TOPIC=performance-iq.serving.telemetry.v1
+export PIQ_SERVING_EVENT_TOPIC=performance-iq.serving.telemetry.v1
 ```
 
 Each JSONL record is a self-contained event with `schemaVersion`, `topic`,
@@ -42,24 +42,15 @@ Each JSONL record is a self-contained event with `schemaVersion`, `topic`,
 artifact and manifest paths, and a payload. Events include submissions,
 artifact pointers, aggregate measurements, `serving_request_sample` rows,
 `serving_token_timeline` rows, `serving_telemetry_coverage` rows, native
-telemetry, DCGM telemetry, token-detail summaries, request receipts, and the
-dashboard snapshot. This is the right
-Kafka boundary: publish these already-timestamped events downstream, not the
-live request stream used to measure TTFT/TPOT.
+telemetry, DCGM telemetry, per-series `serving_metric_snapshot` rows,
+token-detail summaries, request receipts, and the dashboard snapshot. The log
+is an immutable replay artifact, not the live request stream used to measure
+TTFT/TPOT.
 
-To publish that event log to Kafka after capture, install the optional Kafka
-extra or use the smoke runner image, then opt in explicitly:
-
-```bash
-python -m pip install './python[kafka]'
-export PIQ_SERVING_PUBLISH_KAFKA=true
-export PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS=kafka-1:9092,kafka-2:9092
-export PIQ_SERVING_KAFKA_CLIENT_ID=performance-iq-serving-producer
-```
-
-When Kafka publication is enabled, the proof summary records a
-`kafkaPublication` report with the event log path, published event count,
-event-type counts, topic counts, client ID, and publication timestamp.
+Kafka publication is deliberately experimental and is not installed in the
+smoke image or product Kubernetes deployment. See
+[`experimental/kafka/README.md`](../../experimental/kafka/README.md) only when
+a buyer requirement or independent-consumer need justifies operating a broker.
 
 Token-level detail is captured when the engine exposes OpenAI-compatible
 `logprobs`/`top_logprobs`. Enable it with:
@@ -92,7 +83,9 @@ export PIQ_TENSORRT_LLM_HARDWARE_METRICS_URL=http://dcgm-exporter:9400/metrics
 Use `PIQ_SERVING_COLLECT_HARDWARE_METRICS=true` to read DCGM metrics from each
 engine `/metrics` endpoint when DCGM is exposed there. Use
 `PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true` for a strict proof gate that fails
-metric completeness if configured engines do not produce hardware telemetry.
+proof verification if configured engines do not produce hardware telemetry.
+`metricCompleteness` remains a fractional serving-coverage signal; it is not
+forced to `1.0` by the strict verifier.
 
 Native serving metrics are read from each engine Prometheus endpoint and are
 promoted into queryable `serving_request_samples` rows when exposed: native
@@ -106,15 +99,22 @@ GPU/memory-copy utilization, temperature, SM and memory clocks, framebuffer
 used/free, and energy.
 
 TensorRT-LLM defaults to the Prometheus metrics endpoint
-`/prometheus/metrics` for strict native telemetry. The smoke runner also reads
-`PIQ_TENSORRT_LLM_JSON_METRICS_URL` (default `/metrics`) when available, so
-TensorRT iteration-stat JSON fields such as iteration latency, GPU memory
-usage, active requests, KV-cache block usage, and cache hit rate are preserved
-without losing Prometheus queue/prefill/decode timing.
+`/prometheus/metrics` for native TTFT, TPOT, E2E, and queue histograms. The
+compose config enables this endpoint with `return_perf_metrics: true`. The
+runner also reads `PIQ_TENSORRT_LLM_JSON_METRICS_URL` (default `/metrics`) for
+iteration latency, GPU memory, active requests, and KV-cache state, plus
+`PIQ_TENSORRT_LLM_PERF_METRICS_URL` (default `/perf_metrics`) for per-request
+arrival, scheduling, first-token, last-token, and KV allocation timestamps.
+Those timestamps provide native queue, prefill, decode, TTFT, and E2E values;
+all three raw responses and their queryable numeric series are retained. The
+request fact also preserves the retained record count, a SHA-256 of the
+TensorRT internal request ID, and exact allocated/new/reused/missed KV block
+counts. These cache-block values are never relabeled as prompt-token counts.
 
 Runtime provenance has two layers. Dashboard rows get safe identifiers and
-hashes: framework version, model revision, image tag/digest, server-args hash,
-process/container/pod/node/host identifiers, and raw artifact links. Operator
+hashes: framework version/backend, model revision, image tag/digest,
+server-args hash, process/container/pod/node/host identifiers, GPU inventory
+hash, request/response IDs and timestamps, endpoint, and raw artifact links. Operator
 artifacts retain the full raw request/response, token details, native telemetry,
 hardware telemetry, full before/after native and DCGM metric snapshots, and full
 runtime provenance for internal audit.
@@ -125,6 +125,12 @@ runtime provenance for internal audit.
   Performance IQ.
 - `docker-compose.nvidia.yaml` - NVIDIA/Linux local stack template for the
   three serving engines.
+- `dcgm-counters.csv` - explicit strict counter inventory, including profiling,
+  interconnect, error, ECC, health, and throttling fields.
+- `tensorrt-llm-config.yaml` - enables TensorRT-LLM Prometheus and retained
+  per-request performance metrics.
+- `run-nvidia-e2e.sh` - validates, starts, proves, and optionally retains the
+  complete NVIDIA stack.
 - `Dockerfile.smoke` - smoke-runner image for Kubernetes or remote operator
   hosts.
 - `kubernetes-smoke-job.yaml` - cluster job template for running the smoke
@@ -133,12 +139,32 @@ runtime provenance for internal audit.
 
 ## Local NVIDIA Host
 
-Copy the env template and set the TensorRT-LLM image:
+Copy the env template and set the Performance IQ target, token, and actual GPU
+price. The engine, DCGM, and model revisions are already pinned:
 
 ```bash
 cp ops/serving-producers/performance-iq-serving.env.example .env.serving-producers
 $EDITOR .env.serving-producers
 ```
+
+Validate content-addressed image manifests, compose rendering, the exact model
+revision, TensorRT-LLM v1.2.1 flags/metrics config, and the strict DCGM counter
+inventory without starting containers:
+
+```bash
+bash ops/serving-producers/run-nvidia-e2e.sh validate \
+  --env-file .env.serving-producers
+```
+
+The compose defaults deliberately cap all three engines so the same 0.5B model
+can be resident on one GPU: vLLM uses 20% executor memory, SGLang uses a 20%
+static pool, and TensorRT-LLM uses 20% of remaining memory for KV cache. The
+defaults also cap context length at 1,024 and concurrency at eight. Override
+the corresponding `PIQ_*` settings only after checking free memory.
+
+The TensorRT-LLM service defaults to `PIQ_TENSORRT_LLM_BACKEND=tensorrt`, not
+the framework's PyTorch fallback. This makes the final row set evidence of the
+TensorRT execution backend as well as the `trtllm-serve` API surface.
 
 Start DCGM plus the three engines:
 
@@ -197,8 +223,10 @@ output token IDs.
 
 On local Apple Silicon, SGLang MPS/MLX does not safely return decode logprobs.
 The smoke runner reads SGLang `/server_info`; when it sees `device=mps` and token
-details were requested, it records an `outputTokenIdsLogprobs` capability gap and
+details were requested, it records an `outputTokenLogprobs` capability gap and
 sends the streaming request without `logprobs` so the runtime keeps serving.
+Tokenizer-exact output token IDs can still be captured with
+`--resolve-token-ids-with-tokenizer`.
 Strict full-product proof still requires a SGLang endpoint that can return token
 logprobs, or an explicit `PIQ_SGLANG_ALLOW_UNSAFE_TOKEN_DETAILS=true` debug run.
 
@@ -252,14 +280,36 @@ Submit strict producer runs and verify dashboard materialization:
 bash ops/serving-producers/run-smoke.sh strict-recorded-smoke
 ```
 
+On a fresh trusted NVIDIA host, the end-to-end wrapper performs the stack start,
+exact-model readiness checks, actual container provenance capture, strict
+recorded smoke, dashboard queries, and saved-proof verification in one command:
+
+```bash
+bash ops/serving-producers/run-nvidia-e2e.sh run \
+  --env-file .env.serving-producers
+```
+
+Container provenance includes the installed framework package version,
+content-addressed image ID, configured image tag, effective Docker entrypoint
+and command, container/process IDs, runtime backend, model revision, and
+host/node identity. The runner also replaces the generic hardware label with
+the GPU name observed by `nvidia-smi` and writes
+`nvidia-gpu-inventory.csv` containing index, name, UUID, PCI address, memory,
+and driver version into the operator artifact directory. Its SHA-256 is linked
+from each engine's operator-full runtime configuration.
+
+It tears the stack down after capture by default and writes compose status/logs
+to the artifact directory on failure. Add `--keep-running` when the live engine
+endpoints must remain available for a demo or follow-up inspection.
+
 Use `smoke` only when request receipts are being captured by another layer.
 `recorded-smoke` starts in-process receipt proxies, routes all engine traffic
 through them, writes `PIQ_SERVING_RECEIPT_LOG`, submits the producer runs,
 queries the dashboard surfaces, writes `PIQ_SERVING_EVENT_LOG`, and writes the
 proof summary.
 Use `strict-smoke` or `strict-recorded-smoke` for product proof: these require
-token IDs/logprobs, token ID provenance, native engine telemetry, DCGM hardware
-counters, dashboard rows, request receipts, and configured GPU cost. Use
+token IDs, token ID provenance, output token logprobs, native engine telemetry,
+DCGM hardware counters, dashboard rows, request receipts, and configured GPU cost. Use
 `strict-smoke` when another gateway/proxy writes receipts to
 `PIQ_SERVING_RECEIPT_LOG`; use `strict-recorded-smoke` to start managed
 in-process receipt proxies. These strict wrapper modes also run the saved-proof
@@ -278,9 +328,9 @@ bash ops/serving-producers/run-smoke.sh fake-strict-smoke \
 
 `fake-strict-smoke` starts local fake OpenAI-compatible vLLM, SGLang, and
 TensorRT-LLM endpoints, routes traffic through receipt proxies, captures
-stream timing, token IDs/logprobs, prompt token IDs, native metrics, DCGM
+stream timing, token IDs, output token logprobs, prompt token IDs, native metrics, DCGM
 counters, operator-full artifacts, raw native/DCGM metric snapshots,
-Kafka-ready event rows, and a synthetic dashboard row snapshot. The command
+post-capture event rows, and a synthetic dashboard row snapshot. The command
 fails unless `verify-proof` is `ok` and `strictTelemetryGate.ok` is true.
 This is local contract proof only. It intentionally fails
 `realRuntimeProofGate.ok` when that gate is required, so it does not replace
@@ -302,9 +352,9 @@ Read these fields in the verifier output separately:
 - `strictTelemetryGate.ok` proves the full product telemetry set is both
   configured and present across required engines: client stream timing, native
   runtime telemetry, DCGM counters, tokenizer-exact prompt IDs, output token
-  IDs/logprobs, operator-full raw artifacts, request receipts, runtime
+  IDs, output token logprobs, operator-full raw artifacts, request receipts, runtime
   provenance, dashboard fine-grain rows, raw native/DCGM metric snapshots, and
-  Kafka-ready event rows.
+  post-capture event rows.
 - `realRuntimeProofGate.ok` proves the proof-boundary fields do not declare a
   fake, synthetic, fixture, or mock runtime proof. This is separate from
   telemetry shape: fake CI proof can pass `strictTelemetryGate.ok` while failing
@@ -328,9 +378,9 @@ bash ops/serving-producers/run-smoke.sh verify-proof \
 
 To inspect every generated row, add a proof-row dump. The output includes
 submitted runs, dashboard row snapshots, request samples, token timeline rows,
-producer measurement rows, producer telemetry coverage rows, verifier
+native/DCGM metric snapshot rows, producer measurement rows, producer telemetry coverage rows, verifier
 telemetry coverage rows, native telemetry, DCGM telemetry, request trace rows,
-request receipts, and Kafka-ready event rows, with campaign/run/engine
+request receipts, and post-capture event rows, with campaign/run/engine
 provenance attached to artifact-local rows:
 
 ```bash
@@ -358,21 +408,22 @@ Success requires:
 - each request ID has a matching receipt in `PIQ_SERVING_RECEIPT_LOG`;
 - Performance IQ accepts all three producer runs;
 - `price_performance`, `capacity_best`, `campaign_provenance`, `run_details`,
-  `serving_request_samples`, `serving_token_timeline`, and
-  `serving_telemetry_coverage` row counts increase;
+  `serving_request_samples`, `serving_token_timeline`,
+  `serving_metric_snapshots`, and `serving_telemetry_coverage` row counts increase;
 - the proof summary preserves row snapshots for those dashboard surfaces;
 - submitted campaign IDs appear in both `campaign_provenance` and
   `run_details`, request IDs appear in `serving_request_samples` and
-  `serving_token_timeline`, and coverage rows appear in
+  `serving_token_timeline`, per-series native/DCGM rows appear in
+  `serving_metric_snapshots`, and coverage rows appear in
   `serving_telemetry_coverage`.
 - `serving-smoke-proof-<suffix>.json` exists under `PIQ_ARTIFACT_DIR` and
   preserves preflight, per-engine artifact and manifest paths, submissions,
   and dashboard row proof.
 - `verify-proof` succeeds against that file, recomputing artifact hashes and
   checking the manifests, endpoint preflight, submitted campaigns, dashboard
-  surfaces, token timeline, native telemetry, DCGM counters, and runtime
+  surfaces, token timeline, per-series metric snapshots, native telemetry, DCGM counters, and runtime
   framework provenance.
-- `serving-events.jsonl` exists and `verify-proof` accepts its Kafka-ready
+- `serving-events.jsonl` exists and `verify-proof` accepts its post-capture
   event schema, including request-sample and token-timeline events.
 
 ## Mac / Apple Silicon

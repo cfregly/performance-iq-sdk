@@ -9,8 +9,10 @@ from typing import Any, Literal, NotRequired, TypedDict
 PRODUCER_MANIFEST_VERSION = "performance-iq.producer-manifest.v1"
 INGESTION_REQUEST_VERSION = "performance-iq.ingestion-request.v1"
 LATEST_PRODUCER_SOURCE_TABLES = [
-    "platform_store.object_store.producer_runner_result_bundles",
-    "platform_store.iceberg.intake_store.producer_runner_results",
+    "platform_store.iceberg.intake_platform_store.hpc_perftest_raw",
+]
+LATEST_PRODUCER_MODEL_TABLES = [
+    "model_store.fact_hpc_perftest_testcase_events",
 ]
 
 SourceType = Literal["fresh-run", "other-measured-producer"]

@@ -67,6 +67,8 @@ spec:
               value: http://tensorrt-llm:8001/prometheus/metrics
             - name: PIQ_TENSORRT_LLM_JSON_METRICS_URL
               value: http://tensorrt-llm:8001/metrics
+            - name: PIQ_TENSORRT_LLM_PERF_METRICS_URL
+              value: http://tensorrt-llm:8001/perf_metrics
             - name: PIQ_VLLM_HARDWARE_METRICS_URL
               value: http://dcgm-exporter:9400/metrics
             - name: PIQ_SGLANG_HARDWARE_METRICS_URL
@@ -81,14 +83,8 @@ spec:
               value: /tmp/performance-iq-serving-producers/serving-smoke-proof.json
             - name: PIQ_SERVING_EVENT_LOG
               value: /tmp/performance-iq-serving-producers/serving-events.jsonl
-            - name: PIQ_SERVING_KAFKA_TOPIC
+            - name: PIQ_SERVING_EVENT_TOPIC
               value: performance-iq.serving.telemetry.v1
-            - name: PIQ_SERVING_PUBLISH_KAFKA
-              value: "false"
-            # Set this when PIQ_SERVING_PUBLISH_KAFKA=true and the runner image
-            # includes performance-iq-sdk[kafka].
-            # - name: PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS
-            #   value: kafka-bootstrap.kafka.svc.cluster.local:9092
           command:
             - python
             - -m

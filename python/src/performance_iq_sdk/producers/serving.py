@@ -8,6 +8,7 @@ import re
 import subprocess
 import time
 import urllib.request
+from pathlib import Path
 from typing import Any, Callable, Literal, TypedDict
 
 from performance_iq_sdk.client import PerformanceIQ
@@ -21,7 +22,12 @@ SERVING_ENGINE_LABELS: dict[str, str] = {
     "tensorrt-llm": "TensorRT-LLM",
 }
 
-DEFAULT_IMAGE_DIGEST = "sha256:" + "0" * 64
+DEFAULT_IMAGE_DIGEST = "sha256:" + hashlib.sha256(
+    b"performance-iq-sdk:uncontainerized-local:v1"
+).hexdigest()
+DEFAULT_PRODUCER_COMMIT = "uncommitted-worktree:" + hashlib.sha256(
+    Path(__file__).read_bytes()
+).hexdigest()
 
 
 class ServingPostResult(TypedDict):
@@ -35,9 +41,47 @@ HttpGetText = Callable[[str, dict[str, str]], str]
 
 PROMETHEUS_SAMPLE_RE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+([-+0-9.eE]+)")
 PROMETHEUS_LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"')
+DCGM_BLANK_VALUE_THRESHOLD = 9e18
 _TOKENIZER_CACHE: dict[str, Any] = {}
 _EXTERNAL_TOKENIZER_CACHE: dict[tuple[str, str, str, bool], int | None] = {}
 _EXTERNAL_PROMPT_TOKENIZER_CACHE: dict[tuple[str, str, str, bool], dict[str, Any] | None] = {}
+_EXTERNAL_TEXT_TOKENIZER_CACHE: dict[tuple[str, str, str, bool], dict[str, Any] | None] = {}
+
+REQUIRED_HARDWARE_TELEMETRY_NUMBER_FIELDS = (
+    "avgPowerWatts",
+    "avgPowerWattsPerGpu",
+    "gpuUtilizationPct",
+    "memoryCopyUtilizationPct",
+    "smActivePct",
+    "dramActivePct",
+    "tensorActivePct",
+    "fp64ActivePct",
+    "fp32ActivePct",
+    "fp16ActivePct",
+    "pcieTxThroughputKiBps",
+    "pcieRxThroughputKiBps",
+    "pcieTxBytesDelta",
+    "pcieRxBytesDelta",
+    "pcieReplayDelta",
+    "nvlinkTxBytesDelta",
+    "nvlinkRxBytesDelta",
+    "nvlinkBandwidthTotalMBps",
+    "encoderUtilizationPct",
+    "decoderUtilizationPct",
+    "gpuTemperatureC",
+    "smClockMHz",
+    "memoryClockMHz",
+    "fbUsedMiB",
+    "fbFreeMiB",
+    "xidErrors",
+    "xidErrorsDelta",
+    "eccSbeVolatileTotalDelta",
+    "eccDbeVolatileTotalDelta",
+    "powerViolationTimeUsDelta",
+    "thermalViolationTimeUsDelta",
+    "hardwareRawMetricCount",
+    "energyJoules",
+)
 
 
 def laptop_smoke_model() -> str:
@@ -98,17 +142,34 @@ def _engine_provenance_value(engine: dict[str, Any], *keys: str) -> Any:
     return None
 
 
-def _runtime_provenance(engine: dict[str, Any], native_telemetry: dict[str, Any] | None = None) -> dict[str, Any]:
+def _tokenizer_model_value(engine: dict[str, Any], request: dict[str, Any] | None = None) -> str | None:
+    request = request or {}
+    explicit = request.get("tokenizerModel") or engine.get("tokenizerModel") or engine.get("tokenizer_model")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    if request and (engine.get("resolveTokenIdsWithTokenizer") or request.get("resolveTokenIdsWithTokenizer")):
+        model = request.get("model")
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+    return None
+
+
+def _runtime_provenance(
+    engine: dict[str, Any],
+    native_telemetry: dict[str, Any] | None = None,
+    request: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     telemetry = native_telemetry if isinstance(native_telemetry, dict) else {}
     server_args = telemetry.get("serverArgs", engine.get("serverArgs"))
     token_details_capability = _token_details_capability(engine)
     return {
         "engineVersion": telemetry.get("engineVersion", engine.get("frameworkVersion")),
+        "runtimeBackend": telemetry.get("runtimeBackend", engine.get("runtimeBackend")),
         "modelRevision": telemetry.get("modelRevision", engine.get("modelRevision")),
         "imageTag": _engine_provenance_value(engine, "imageTag", "containerImageTag"),
         "imageDigest": _engine_provenance_value(engine, "imageDigest", "containerImageDigest"),
         "serverArgsSha256": _sha256_optional_json(server_args),
-        "tokenizerModel": _engine_provenance_value(engine, "tokenizerModel", "tokenizer_model"),
+        "tokenizerModel": _tokenizer_model_value(engine, request),
         "tokenizerPythonBinSha256": _sha256_text(str(engine.get("tokenizerPythonBin"))) if engine.get("tokenizerPythonBin") else None,
         "tokenDetailsCapabilityStatus": token_details_capability.get("status") if token_details_capability else None,
         "tokenDetailsUnsupportedReason": token_details_capability.get("reason") if token_details_capability else None,
@@ -117,6 +178,7 @@ def _runtime_provenance(engine: dict[str, Any], native_telemetry: dict[str, Any]
         "podName": _engine_provenance_value(engine, "podName") or _nested_value(engine, "container", "podName"),
         "nodeName": _engine_provenance_value(engine, "nodeName") or _nested_value(engine, "container", "nodeName"),
         "hostName": _engine_provenance_value(engine, "hostName", "hostname") or _nested_value(engine, "process", "hostName", "hostname"),
+        "hardwareInventorySha256": engine.get("hardwareInventorySha256"),
     }
 
 
@@ -312,6 +374,12 @@ def _default_native_json_metrics_url(engine: dict[str, Any]) -> str | None:
     return f"{_normalize_base_url(str(engine['baseUrl']))}/metrics"
 
 
+def _default_native_perf_metrics_url(engine: dict[str, Any]) -> str | None:
+    if engine.get("engine") != "tensorrt-llm":
+        return None
+    return f"{_normalize_base_url(str(engine['baseUrl']))}/perf_metrics"
+
+
 def _metrics_url(engine: dict[str, Any]) -> str | None:
     configured = engine.get("metricsUrl")
     if isinstance(configured, str) and configured.strip():
@@ -329,6 +397,24 @@ def _native_json_metrics_url(engine: dict[str, Any]) -> str | None:
     if engine.get("collectNativeMetrics") is True:
         return _default_native_json_metrics_url(engine)
     return None
+
+
+def _native_perf_metrics_url(engine: dict[str, Any]) -> str | None:
+    for key in ("nativePerfMetricsUrl", "perfMetricsUrl"):
+        configured = engine.get(key)
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip()
+    if engine.get("collectNativeMetrics") is True:
+        return _default_native_perf_metrics_url(engine)
+    return None
+
+
+def _native_telemetry_expected(engine: dict[str, Any]) -> bool:
+    if engine.get("requireNativeTelemetry"):
+        return True
+    if engine.get("metricsUrlAutoConfigured") or engine.get("nativeJsonMetricsUrlAutoConfigured") or engine.get("nativePerfMetricsUrlAutoConfigured"):
+        return False
+    return bool(_metrics_url(engine) or _native_json_metrics_url(engine) or _native_perf_metrics_url(engine))
 
 
 def _metrics_headers(engine: dict[str, Any]) -> dict[str, str]:
@@ -352,6 +438,8 @@ def _parse_prometheus_metrics(text: str) -> dict[str, float]:
         except ValueError:
             continue
         metric_name = match.group(1)
+        if _is_dcgm_blank_value(metric_name, value):
+            continue
         metrics[metric_name] = metrics.get(metric_name, 0.0) + value
         metrics[f"{metric_name}__sample_count"] = metrics.get(f"{metric_name}__sample_count", 0.0) + 1
         labels = dict(PROMETHEUS_LABEL_RE.findall(match.group(2) or ""))
@@ -367,6 +455,65 @@ def _parse_prometheus_metrics(text: str) -> dict[str, float]:
                         metrics[labelled_histogram_name] = metrics.get(labelled_histogram_name, 0.0) + value
                         metrics[f"{labelled_histogram_name}__sample_count"] = metrics.get(f"{labelled_histogram_name}__sample_count", 0.0) + 1
     return metrics
+
+
+def _parse_prometheus_metric_series(text: str) -> list[dict[str, Any]]:
+    """Keep each Prometheus series intact for the operator artifact and fine-grain rows."""
+    series: list[dict[str, Any]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = PROMETHEUS_SAMPLE_RE.match(line)
+        if not match:
+            continue
+        try:
+            value = float(match.group(3))
+        except ValueError:
+            continue
+        metric_name = match.group(1)
+        if _is_dcgm_blank_value(metric_name, value):
+            continue
+        labels = dict(PROMETHEUS_LABEL_RE.findall(match.group(2) or ""))
+        series.append({
+            "metricName": metric_name,
+            "labels": labels,
+            "labelsSha256": _sha256_json(labels),
+            "value": value,
+        })
+    return series
+
+
+def _is_dcgm_blank_value(metric_name: str, value: float) -> bool:
+    """DCGM exports unsupported fields as finite INT64 sentinel values."""
+    return metric_name.startswith("DCGM_") and abs(value) >= DCGM_BLANK_VALUE_THRESHOLD
+
+
+def _parse_invalid_dcgm_metric_series(text: str) -> list[dict[str, Any]]:
+    invalid: list[dict[str, Any]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = PROMETHEUS_SAMPLE_RE.match(line)
+        if not match:
+            continue
+        try:
+            value = float(match.group(3))
+        except ValueError:
+            continue
+        metric_name = match.group(1)
+        if not _is_dcgm_blank_value(metric_name, value):
+            continue
+        labels = dict(PROMETHEUS_LABEL_RE.findall(match.group(2) or ""))
+        invalid.append({
+            "metricName": metric_name,
+            "labels": labels,
+            "labelsSha256": _sha256_json(labels),
+            "rawValue": match.group(3),
+            "invalidReason": "dcgm-blank-sentinel",
+        })
+    return invalid
 
 
 def _flatten_numeric_json_metrics(value: Any, prefix: str = "") -> dict[str, float]:
@@ -408,6 +555,43 @@ def _parse_native_json_metrics(text: str) -> dict[str, float]:
     return summary
 
 
+def _parse_native_json_metric_series(text: str) -> list[dict[str, Any]]:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    records = parsed if isinstance(parsed, list) else [parsed]
+    series: list[dict[str, Any]] = []
+    for record_index, record in enumerate(records):
+        if not isinstance(record, dict):
+            continue
+        for metric_name, value in _flatten_numeric_json_metrics(record).items():
+            labels = {"record": str(record_index)}
+            series.append({
+                "metricName": metric_name,
+                "labels": labels,
+                "labelsSha256": _sha256_json(labels),
+                "value": value,
+            })
+    return series
+
+
+def _parse_native_perf_metadata(text: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    records = parsed if isinstance(parsed, list) else [parsed]
+    records = [record for record in records if isinstance(record, dict)]
+    if not records:
+        return {}
+    request_id = records[-1].get("request_id")
+    return {
+        "recordCount": len(records),
+        **({"requestIdSha256": _sha256_text(str(request_id))} if request_id is not None else {}),
+    }
+
+
 def _hardware_metrics_url(engine: dict[str, Any]) -> str | None:
     configured = engine.get("hardwareMetricsUrl") or engine.get("dcgmMetricsUrl")
     if isinstance(configured, str) and configured.strip():
@@ -433,7 +617,12 @@ def _read_hardware_metrics(engine: dict[str, Any], http_get_text: HttpGetText | 
     except Exception as exc:
         return {"available": False, "source": "hardware-prometheus-unavailable", "metricsUrl": url, "error": str(exc)}
     metrics = _parse_prometheus_metrics(text)
-    dcgm_metrics = {key: value for key, value in metrics.items() if key.startswith("DCGM_FI_")}
+    dcgm_metrics = {key: value for key, value in metrics.items() if key.startswith("DCGM_")}
+    dcgm_series = [
+        row for row in _parse_prometheus_metric_series(text)
+        if str(row.get("metricName", "")).startswith("DCGM_")
+    ]
+    invalid_dcgm_series = _parse_invalid_dcgm_metric_series(text)
     if not dcgm_metrics:
         return {"available": False, "source": "dcgm-prometheus-empty", "metricsUrl": url}
     return {
@@ -441,6 +630,10 @@ def _read_hardware_metrics(engine: dict[str, Any], http_get_text: HttpGetText | 
         "source": "dcgm-prometheus-snapshot",
         "metricsUrl": url,
         "metrics": dcgm_metrics,
+        "metricSeries": dcgm_series,
+        **({"invalidMetricSeries": invalid_dcgm_series} if invalid_dcgm_series else {}),
+        **({"invalidMetricCount": len(invalid_dcgm_series)} if invalid_dcgm_series else {}),
+        "rawMetricsText": text,
         "capturedAtUtc": _now_iso(),
     }
 
@@ -448,11 +641,18 @@ def _read_hardware_metrics(engine: dict[str, Any], http_get_text: HttpGetText | 
 def _read_native_metrics(engine: dict[str, Any], http_get_text: HttpGetText | None = None) -> dict[str, Any]:
     url = _metrics_url(engine)
     json_url = _native_json_metrics_url(engine)
-    if not url and not json_url:
+    perf_url = _native_perf_metrics_url(engine)
+    if not url and not json_url and not perf_url:
         return {"available": False, "source": "metrics-url-not-configured"}
     get_text = http_get_text or _get_text
     metrics: dict[str, float] = {}
     json_metrics: dict[str, float] = {}
+    perf_json_metrics: dict[str, float] = {}
+    metric_series: list[dict[str, Any]] = []
+    json_metric_series: list[dict[str, Any]] = []
+    perf_metric_series: list[dict[str, Any]] = []
+    perf_metadata: dict[str, Any] = {}
+    raw_metric_text: dict[str, str] = {}
     sources: list[str] = []
     errors: list[dict[str, str]] = []
     captured_at = _now_iso()
@@ -460,12 +660,15 @@ def _read_native_metrics(engine: dict[str, Any], http_get_text: HttpGetText | No
         try:
             text = get_text(url, _metrics_headers(engine))
             metrics.update(_parse_prometheus_metrics(text))
+            metric_series.extend(_parse_prometheus_metric_series(text))
             parsed_json = _parse_native_json_metrics(text)
             if metrics:
                 sources.append("prometheus-snapshot")
             if parsed_json:
                 json_metrics.update(parsed_json)
+                json_metric_series.extend(_parse_native_json_metric_series(text))
                 sources.append("native-json-snapshot")
+            raw_metric_text["metrics"] = text
         except Exception as exc:
             errors.append({"url": url, "source": "prometheus-unavailable", "error": str(exc)})
     if json_url and json_url != url:
@@ -474,17 +677,34 @@ def _read_native_metrics(engine: dict[str, Any], http_get_text: HttpGetText | No
             parsed_json = _parse_native_json_metrics(text)
             if parsed_json:
                 json_metrics.update(parsed_json)
+                json_metric_series.extend(_parse_native_json_metric_series(text))
                 sources.append("native-json-snapshot")
             elif not metrics:
                 errors.append({"url": json_url, "source": "native-json-empty", "error": "no numeric JSON metrics"})
+            raw_metric_text["nativeJsonMetrics"] = text
         except Exception as exc:
             errors.append({"url": json_url, "source": "native-json-unavailable", "error": str(exc)})
-    if not metrics and not json_metrics:
+    if perf_url and perf_url not in {url, json_url}:
+        try:
+            text = get_text(perf_url, {**_metrics_headers(engine), "accept": "application/json, text/plain"})
+            parsed_json = _parse_native_json_metrics(text)
+            if parsed_json:
+                perf_json_metrics.update(parsed_json)
+                perf_metric_series.extend(_parse_native_json_metric_series(text))
+                perf_metadata.update(_parse_native_perf_metadata(text))
+                sources.append("native-perf-json-snapshot")
+            else:
+                errors.append({"url": perf_url, "source": "native-perf-json-empty", "error": "no numeric per-request JSON metrics"})
+            raw_metric_text["nativePerfMetrics"] = text
+        except Exception as exc:
+            errors.append({"url": perf_url, "source": "native-perf-json-unavailable", "error": str(exc)})
+    if not metrics and not json_metrics and not perf_json_metrics:
         return {
             "available": False,
             "source": errors[0]["source"] if errors else "native-metrics-empty",
             "metricsUrl": url,
             **({"nativeJsonMetricsUrl": json_url} if json_url else {}),
+            **({"nativePerfMetricsUrl": perf_url} if perf_url else {}),
             **({"errors": errors} if errors else {}),
         }
     return {
@@ -492,8 +712,15 @@ def _read_native_metrics(engine: dict[str, Any], http_get_text: HttpGetText | No
         "source": "+".join(dict.fromkeys(sources)) if sources else "native-metrics-snapshot",
         "metricsUrl": url,
         **({"nativeJsonMetricsUrl": json_url} if json_url else {}),
+        **({"nativePerfMetricsUrl": perf_url} if perf_url else {}),
         "metrics": metrics,
+        **({"metricSeries": metric_series} if metric_series else {}),
         **({"jsonMetrics": json_metrics} if json_metrics else {}),
+        **({"jsonMetricSeries": json_metric_series} if json_metric_series else {}),
+        **({"perfJsonMetrics": perf_json_metrics} if perf_json_metrics else {}),
+        **({"perfMetricSeries": perf_metric_series} if perf_metric_series else {}),
+        **({"perfMetadata": perf_metadata} if perf_metadata else {}),
+        **({"rawMetricsText": raw_metric_text} if raw_metric_text else {}),
         **({"errors": errors} if errors else {}),
         "capturedAtUtc": captured_at,
     }
@@ -537,11 +764,20 @@ def _first_number(*values: float | None) -> float | None:
     return None
 
 
+def _elapsed_ms(start: float | None, end: float | None) -> float | None:
+    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+        return None
+    elapsed = (float(end) - float(start)) * 1000
+    return elapsed if elapsed >= 0 else None
+
+
 def _counter_delta(before: dict[str, float], after: dict[str, float], candidates: list[str]) -> float | None:
     before_value = _metric_value(before, candidates)
     after_value = _metric_value(after, candidates)
-    if before_value is None or after_value is None:
+    if after_value is None:
         return None
+    if before_value is None:
+        before_value = 0.0
     delta = after_value - before_value
     return delta if delta >= 0 else None
 
@@ -567,8 +803,20 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
     before_metrics = before.get("metrics") if isinstance(before.get("metrics"), dict) else {}
     after_metrics = after.get("metrics") if isinstance(after.get("metrics"), dict) else {}
     after_json_metrics = after.get("jsonMetrics") if isinstance(after.get("jsonMetrics"), dict) else {}
+    after_perf_metrics = after.get("perfJsonMetrics") if isinstance(after.get("perfJsonMetrics"), dict) else {}
+    after_perf_metadata = after.get("perfMetadata") if isinstance(after.get("perfMetadata"), dict) else {}
     if not isinstance(before_metrics, dict) or not isinstance(after_metrics, dict):
         return {"available": False, "source": "prometheus-delta-invalid"}
+
+    perf_arrival_s = _json_metric_value(after_perf_metrics, ["latest.perf_metrics.timing_metrics.arrival_time"])
+    perf_first_scheduled_s = _json_metric_value(after_perf_metrics, ["latest.perf_metrics.timing_metrics.first_scheduled_time"])
+    perf_first_token_s = _json_metric_value(after_perf_metrics, ["latest.perf_metrics.timing_metrics.first_token_time"])
+    perf_last_token_s = _json_metric_value(after_perf_metrics, ["latest.perf_metrics.timing_metrics.last_token_time"])
+    perf_queue_wait_ms = _elapsed_ms(perf_arrival_s, perf_first_scheduled_s)
+    perf_prefill_ms = _elapsed_ms(perf_first_scheduled_s, perf_first_token_s)
+    perf_ttft_ms = _elapsed_ms(perf_arrival_s, perf_first_token_s)
+    perf_decode_ms = _elapsed_ms(perf_first_token_s, perf_last_token_s)
+    perf_e2e_ms = _elapsed_ms(perf_arrival_s, perf_last_token_s)
 
     native_ttft_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
         "vllm:time_to_first_token_seconds",
@@ -577,6 +825,7 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         "trtllm:time_to_first_token_seconds",
         "trtllm_time_to_first_token_seconds",
     ])
+    native_ttft_ms = _first_number(native_ttft_ms, perf_ttft_ms)
     native_tpot_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
         "vllm:request_time_per_output_token_seconds",
         "vllm:time_per_output_token_seconds",
@@ -605,6 +854,7 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         "trtllm:e2e_request_latency_seconds",
         "trtllm_e2e_request_latency_seconds",
     ])
+    native_e2e_ms = _first_number(native_e2e_ms, perf_e2e_ms)
     queue_wait_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
         "vllm:request_queue_time_seconds",
         "sglang:queue_time_seconds",
@@ -616,6 +866,11 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         "trtllm:queue_time_seconds",
         "trtllm_request_queue_time_seconds",
     ])
+    queue_wait_ms = _first_number(
+        queue_wait_ms,
+        perf_queue_wait_ms,
+        _json_metric_value(after_json_metrics, ["avg.newActiveRequestsQueueLatencyMS", "latest.newActiveRequestsQueueLatencyMS"]),
+    )
     prefill_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
         "vllm:request_prefill_time_seconds",
         "sglang:per_stage_req_latency_seconds{stage=prefill_forward}",
@@ -627,6 +882,11 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         "trtllm:context_time_seconds",
         "trtllm_context_time_seconds",
     ])
+    prefill_ms = _first_number(prefill_ms, perf_prefill_ms)
+    if prefill_ms is None and native_ttft_ms is not None and queue_wait_ms is not None:
+        derived_prefill_ms = native_ttft_ms - queue_wait_ms
+        if derived_prefill_ms >= 0:
+            prefill_ms = derived_prefill_ms
     decode_ms = _histogram_delta_mean_ms(before_metrics, after_metrics, [
         "vllm:request_decode_time_seconds",
         "sglang:per_stage_req_latency_seconds{stage=decode_forward}",
@@ -638,6 +898,11 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         "trtllm:generation_time_seconds",
         "trtllm_generation_time_seconds",
     ])
+    decode_ms = _first_number(decode_ms, perf_decode_ms)
+    if decode_ms is None and native_e2e_ms is not None and native_ttft_ms is not None:
+        derived_decode_ms = native_e2e_ms - native_ttft_ms
+        if derived_decode_ms >= 0:
+            decode_ms = derived_decode_ms
     if decode_ms is None and native_e2e_ms is not None and queue_wait_ms is not None and prefill_ms is not None:
         derived_decode_ms = native_e2e_ms - queue_wait_ms - prefill_ms
         if derived_decode_ms >= 0:
@@ -672,6 +937,39 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         if trtllm_kv_used_blocks is not None and trtllm_kv_max_blocks and trtllm_kv_max_blocks > 0
         else None
     )
+    perf_kv_reused_blocks = _json_metric_value(after_perf_metrics, ["latest.perf_metrics.kv_cache_metrics.num_reused_blocks"])
+    perf_kv_missed_blocks = _json_metric_value(after_perf_metrics, ["latest.perf_metrics.kv_cache_metrics.num_missed_blocks"])
+    perf_cache_hit_rate = (
+        perf_kv_reused_blocks / (perf_kv_reused_blocks + perf_kv_missed_blocks)
+        if perf_kv_reused_blocks is not None and perf_kv_missed_blocks is not None and perf_kv_reused_blocks + perf_kv_missed_blocks > 0
+        else None
+    )
+    prompt_tokens_cached_delta = _counter_delta(before_metrics, after_metrics, [
+        "vllm:prompt_tokens_cached_total",
+        "sglang:prompt_tokens_cached_total",
+        "sglang_prompt_tokens_cached_total",
+        "sglang:cached_tokens_total",
+        "sglang_cached_tokens_total",
+        "sglang:realtime_tokens_total{mode=prefill_cache}",
+        "sglang_realtime_tokens_total{mode=prefill_cache}",
+        "trtllm:prompt_tokens_cached_total",
+        "trtllm_prompt_tokens_cached_total",
+    ])
+    prompt_tokens_computed_delta = _counter_delta(before_metrics, after_metrics, [
+        "vllm:request_prefill_kv_computed_tokens_sum",
+        "sglang:request_prefill_kv_computed_tokens_sum",
+        "sglang_request_prefill_kv_computed_tokens_sum",
+        "sglang:uncached_prompt_tokens_total",
+        "sglang_uncached_prompt_tokens_total",
+        "sglang:uncached_prompt_tokens_histogram_sum",
+        "sglang_uncached_prompt_tokens_histogram_sum",
+        "sglang:realtime_tokens_total{mode=prefill_compute}",
+        "sglang_realtime_tokens_total{mode=prefill_compute}",
+        "trtllm:request_prefill_kv_computed_tokens_sum",
+        "trtllm_request_prefill_kv_computed_tokens_sum",
+    ])
+    if prompt_tokens_cached_delta is None and prompt_tokens_computed_delta is not None:
+        prompt_tokens_cached_delta = 0.0
     values = {
         "nativeTtftMs": native_ttft_ms,
         "nativeTpotMs": native_tpot_ms,
@@ -684,7 +982,10 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
             _metric_value(after_metrics, ["vllm:num_requests_running", "sglang:num_running_reqs", "sglang_num_running_reqs", "trtllm:num_requests_running", "trtllm_num_requests_running", "trtllm:num_active_requests", "trtllm_num_active_requests"]),
             _json_metric_value(after_json_metrics, ["latest.numActiveRequests", "avg.numActiveRequests", "max.numActiveRequests"]),
         ),
-        "waitingRequests": _metric_value(after_metrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs", "trtllm:num_requests_waiting", "trtllm_num_requests_waiting", "trtllm:num_queued_requests", "trtllm_num_queued_requests"]),
+        "waitingRequests": _first_number(
+            _metric_value(after_metrics, ["vllm:num_requests_waiting", "sglang:num_queue_reqs", "sglang_num_queue_reqs", "trtllm:num_requests_waiting", "trtllm_num_requests_waiting", "trtllm:num_queued_requests", "trtllm_num_queued_requests"]),
+            _json_metric_value(after_json_metrics, ["latest.numQueuedRequests", "avg.numQueuedRequests", "max.numQueuedRequests"]),
+        ),
         "kvCacheUsagePct": _first_number(
             _metric_value(after_metrics, ["vllm:kv_cache_usage_perc", "sglang:token_usage", "sglang_token_usage", "trtllm:kv_cache_usage_perc", "trtllm_kv_cache_usage_perc", "trtllm:kv_cache_utilization", "trtllm_kv_cache_utilization"]),
             trtllm_kv_usage,
@@ -693,37 +994,21 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         "trtllmGpuMemoryBytes": _json_metric_value(after_json_metrics, ["latest.gpuMemUsage", "max.gpuMemUsage"]),
         "trtllmKvCacheUsedBlocks": trtllm_kv_used_blocks,
         "trtllmKvCacheMaxBlocks": trtllm_kv_max_blocks,
+        "trtllmPerfKvAllocatedBlocks": _json_metric_value(after_perf_metrics, ["latest.perf_metrics.kv_cache_metrics.num_total_allocated_blocks"]),
+        "trtllmPerfKvNewBlocks": _json_metric_value(after_perf_metrics, ["latest.perf_metrics.kv_cache_metrics.num_new_allocated_blocks"]),
+        "trtllmPerfKvReusedBlocks": perf_kv_reused_blocks,
+        "trtllmPerfKvMissedBlocks": perf_kv_missed_blocks,
+        "trtllmPerfRecordCount": after_perf_metadata.get("recordCount"),
         "prefixCacheQueriesDelta": prefix_queries,
         "prefixCacheHitsDelta": prefix_hits,
         "cacheHitRate": _first_number(
             cache_hit_rate,
             _metric_value(after_metrics, ["sglang:cache_hit_rate", "sglang_cache_hit_rate", "trtllm:kv_cache_hit_rate", "trtllm_kv_cache_hit_rate"]),
             _json_metric_value(after_json_metrics, ["latest.kvCacheStats.cacheHitRate", "avg.kvCacheStats.cacheHitRate"]),
+            perf_cache_hit_rate,
         ),
-        "promptTokensCachedDelta": _counter_delta(before_metrics, after_metrics, [
-            "vllm:prompt_tokens_cached_total",
-            "sglang:prompt_tokens_cached_total",
-            "sglang_prompt_tokens_cached_total",
-            "sglang:cached_tokens_total",
-            "sglang_cached_tokens_total",
-            "sglang:realtime_tokens_total{mode=prefill_cache}",
-            "sglang_realtime_tokens_total{mode=prefill_cache}",
-            "trtllm:prompt_tokens_cached_total",
-            "trtllm_prompt_tokens_cached_total",
-        ]),
-        "promptTokensComputedDelta": _counter_delta(before_metrics, after_metrics, [
-            "vllm:request_prefill_kv_computed_tokens_sum",
-            "sglang:request_prefill_kv_computed_tokens_sum",
-            "sglang_request_prefill_kv_computed_tokens_sum",
-            "sglang:uncached_prompt_tokens_total",
-            "sglang_uncached_prompt_tokens_total",
-            "sglang:uncached_prompt_tokens_histogram_sum",
-            "sglang_uncached_prompt_tokens_histogram_sum",
-            "sglang:realtime_tokens_total{mode=prefill_compute}",
-            "sglang_realtime_tokens_total{mode=prefill_compute}",
-            "trtllm:request_prefill_kv_computed_tokens_sum",
-            "trtllm_request_prefill_kv_computed_tokens_sum",
-        ]),
+        "promptTokensCachedDelta": prompt_tokens_cached_delta,
+        "promptTokensComputedDelta": prompt_tokens_computed_delta,
     }
     available_values = {key: value for key, value in values.items() if value is not None}
     delta_sources = []
@@ -731,13 +1016,17 @@ def _native_metrics_delta(engine: dict[str, Any], before: dict[str, Any], after:
         delta_sources.append("prometheus-delta")
     if after_json_metrics:
         delta_sources.append("native-json-snapshot")
+    if after_perf_metrics:
+        delta_sources.append("native-perf-json-snapshot")
     return {
         "available": bool(available_values),
         "source": "+".join(delta_sources) if delta_sources else "native-metrics-delta",
         "metricsUrl": after.get("metricsUrl") or before.get("metricsUrl"),
         "nativeJsonMetricsUrl": after.get("nativeJsonMetricsUrl") or before.get("nativeJsonMetricsUrl"),
+        "nativePerfMetricsUrl": after.get("nativePerfMetricsUrl") or before.get("nativePerfMetricsUrl"),
         "beforeCapturedAtUtc": before.get("capturedAtUtc"),
         "afterCapturedAtUtc": after.get("capturedAtUtc"),
+        **({"trtllmPerfRequestIdSha256": after_perf_metadata["requestIdSha256"]} if isinstance(after_perf_metadata.get("requestIdSha256"), str) else {}),
         **available_values,
     }
 
@@ -761,7 +1050,7 @@ def _hardware_metrics_delta(engine: dict[str, Any], before: dict[str, Any], afte
     energy_mj = _counter_delta(before_metrics, after_metrics, ["DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION"])
     dcgm_metric_names = sorted(
         name for name in after_metrics
-        if name.startswith("DCGM_FI_") and not name.endswith("__sample_count")
+        if name.startswith("DCGM_") and not name.endswith("__sample_count")
     )
     values = {
         "powerWatts": _metric_value(after_metrics, ["DCGM_FI_DEV_POWER_USAGE"]),
@@ -837,6 +1126,69 @@ def _native_iteration_fields(native_telemetry: dict[str, Any]) -> dict[str, Any]
         "nativeKvCacheUsedBlocks": native_telemetry.get("nativeKvCacheUsedBlocks", native_telemetry.get("trtllmKvCacheUsedBlocks")),
         "nativeKvCacheMaxBlocks": native_telemetry.get("nativeKvCacheMaxBlocks", native_telemetry.get("trtllmKvCacheMaxBlocks")),
     }
+
+
+def _enrich_native_token_timing(native_telemetry: dict[str, Any], output_token_count: int | None) -> None:
+    if not isinstance(output_token_count, int) or output_token_count <= 0:
+        return
+    decode_ms = native_telemetry.get("decodeMs")
+    if not isinstance(decode_ms, (int, float)):
+        return
+    native_tpot_ms = float(decode_ms) / max(output_token_count - 1, 1)
+    if not isinstance(native_telemetry.get("nativeTpotMs"), (int, float)):
+        native_telemetry["nativeTpotMs"] = native_tpot_ms
+    if not isinstance(native_telemetry.get("nativeInterTokenLatencyMs"), (int, float)):
+        native_telemetry["nativeInterTokenLatencyMs"] = native_tpot_ms
+
+
+def _metric_snapshot_rows(
+    request_id: str,
+    *,
+    source: str,
+    snapshot_phase: str,
+    snapshot: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Emit safe, queryable values while exact labels and exposition remain operator-only."""
+    rows: list[dict[str, Any]] = []
+    captured_at_utc = snapshot.get("capturedAtUtc")
+    raw_metric_text = snapshot.get("rawMetricsText")
+    raw_text_by_kind = raw_metric_text if isinstance(raw_metric_text, dict) else {}
+    for series_key, metric_source, raw_text_key in (
+        ("metricSeries", f"{source}-prometheus", "metrics"),
+        ("jsonMetricSeries", f"{source}-json", "nativeJsonMetrics"),
+        ("perfMetricSeries", f"{source}-perf-json", "nativePerfMetrics"),
+    ):
+        series = snapshot.get(series_key)
+        if not isinstance(series, list):
+            continue
+        raw_text = (
+            raw_text_by_kind.get(raw_text_key)
+            if isinstance(raw_metric_text, dict)
+            else raw_metric_text if raw_text_key == "metrics" and isinstance(raw_metric_text, str) else None
+        )
+        raw_metric_text_sha256 = _sha256_text(raw_text) if isinstance(raw_text, str) else None
+        for metric_sample_ordinal, item in enumerate(series):
+            if not isinstance(item, dict):
+                continue
+            metric_name = item.get("metricName")
+            metric_value = item.get("value")
+            if not isinstance(metric_name, str) or not isinstance(metric_value, (int, float)):
+                continue
+            labels = item.get("labels") if isinstance(item.get("labels"), dict) else {}
+            labels_sha256 = item.get("labelsSha256")
+            rows.append({
+                "surface": "serving_metric_snapshot",
+                "requestId": request_id,
+                "metricSource": metric_source,
+                "snapshotPhase": snapshot_phase,
+                "metricName": metric_name,
+                "metricLabelsSha256": labels_sha256 if isinstance(labels_sha256, str) else _sha256_json(labels),
+                "metricValue": float(metric_value),
+                "metricSampleOrdinal": metric_sample_ordinal,
+                "capturedAtUtc": captured_at_utc,
+                "rawMetricTextSha256": raw_metric_text_sha256,
+            })
+    return rows
 
 
 def _extract_token_id(item: dict[str, Any]) -> int | None:
@@ -1031,6 +1383,37 @@ elif mode == "prompt":
         except Exception:
             token_texts.append(None)
     print(json.dumps({"ok": True, "tokenIds": token_ids, "tokenTexts": token_texts, "mode": tokenization_mode}, sort_keys=True))
+elif mode == "text":
+    text = str(payload or "")
+    token_ids = []
+    tokenization_mode = "output-text"
+    if text:
+        try:
+            token_ids = coerce_token_ids(tokenizer.encode(text, add_special_tokens=False))
+        except Exception:
+            pass
+        if not token_ids:
+            try:
+                encoded = tokenizer(text, add_special_tokens=False)
+                input_ids = encoded.get("input_ids") if isinstance(encoded, dict) else None
+                token_ids = coerce_token_ids(input_ids)
+            except Exception:
+                pass
+    token_texts = []
+    for token_id_value in token_ids:
+        try:
+            value = tokenizer.convert_ids_to_tokens(token_id_value)
+            if isinstance(value, str):
+                token_texts.append(value)
+                continue
+        except Exception:
+            pass
+        try:
+            value = tokenizer.decode([token_id_value], skip_special_tokens=False)
+            token_texts.append(value if isinstance(value, str) else None)
+        except Exception:
+            token_texts.append(None)
+    print(json.dumps({"ok": True, "tokenIds": token_ids, "tokenTexts": token_texts, "mode": tokenization_mode}, sort_keys=True))
 else:
     print(json.dumps({"ok": False, "error": "unknown mode"}, sort_keys=True))
 """.strip()
@@ -1095,6 +1478,30 @@ def _external_prompt_tokens(model: str, payload: dict[str, Any], engine: dict[st
         else:
             _EXTERNAL_PROMPT_TOKENIZER_CACHE[key] = None
     return _EXTERNAL_PROMPT_TOKENIZER_CACHE[key]
+
+
+def _external_text_tokens(model: str, text: str, engine: dict[str, Any]) -> dict[str, Any] | None:
+    python_bin = _tokenizer_python_bin(engine)
+    if not python_bin or not text:
+        return None
+    key = (
+        python_bin,
+        model,
+        _sha256_text(text),
+        bool(engine.get("tokenizerTrustRemoteCode") or engine.get("trustRemoteCode")),
+    )
+    if key not in _EXTERNAL_TEXT_TOKENIZER_CACHE:
+        result = _external_hf_tokenizer(mode="text", model=model, payload=text, engine=engine)
+        token_ids = _coerce_token_ids(result.get("tokenIds") if isinstance(result, dict) else None)
+        if token_ids:
+            _EXTERNAL_TEXT_TOKENIZER_CACHE[key] = {
+                "tokenIds": token_ids,
+                "tokenTexts": result.get("tokenTexts") if isinstance(result.get("tokenTexts"), list) else [],
+                "mode": result.get("mode") if isinstance(result.get("mode"), str) else "output-text",
+            }
+        else:
+            _EXTERNAL_TEXT_TOKENIZER_CACHE[key] = None
+    return _EXTERNAL_TEXT_TOKENIZER_CACHE[key]
 
 
 def _token_id_from_tokenizer(tokenizer: Any, token: str) -> int | None:
@@ -1362,6 +1769,74 @@ def _choice_token_details(body: dict[str, Any], engine: dict[str, Any], request:
     return details
 
 
+def _token_texts_for_ids(tokenizer: Any, token_ids: list[int]) -> list[str | None]:
+    token_texts: list[str | None] = []
+    for token_id in token_ids:
+        token_texts.append(_token_text_from_id(tokenizer, token_id))
+    return token_texts
+
+
+def _output_token_details_from_text(engine: dict[str, Any], request: dict[str, Any], output_text: str) -> list[dict[str, Any]]:
+    if not output_text:
+        return []
+    tokenizer_model = engine.get("tokenizerModel") or engine.get("tokenizer_model") or request.get("tokenizerModel")
+    if not tokenizer_model and (engine.get("resolveTokenIdsWithTokenizer") or request.get("resolveTokenIdsWithTokenizer")):
+        tokenizer_model = request.get("model")
+
+    token_ids: list[int] = []
+    token_texts: list[str | None] = []
+    source: str | None = None
+    tokenization_source: str | None = None
+    tokenizer = engine.get("tokenizer")
+    if tokenizer is not None:
+        try:
+            token_ids = _coerce_token_ids(tokenizer.encode(output_text, add_special_tokens=False))
+        except Exception:
+            token_ids = []
+        if token_ids:
+            source = "configured-tokenizer"
+            tokenization_source = "configured-tokenizer-output-text"
+            token_texts = _token_texts_for_ids(tokenizer, token_ids)
+    if not token_ids and isinstance(tokenizer_model, str) and tokenizer_model:
+        tokenizer = _load_hf_tokenizer(tokenizer_model, engine)
+        if tokenizer is not None:
+            try:
+                token_ids = _coerce_token_ids(tokenizer.encode(output_text, add_special_tokens=False))
+            except Exception:
+                token_ids = []
+            if token_ids:
+                source = "hf-tokenizer"
+                tokenization_source = "hf-tokenizer-output-text"
+                token_texts = _token_texts_for_ids(tokenizer, token_ids)
+        if not token_ids:
+            external = _external_text_tokens(tokenizer_model, output_text, engine)
+            if external is not None:
+                token_ids = _coerce_token_ids(external.get("tokenIds"))
+                token_texts = [
+                    item if isinstance(item, str) else None
+                    for item in (external.get("tokenTexts") if isinstance(external.get("tokenTexts"), list) else [])
+                ]
+                source = "external-hf-tokenizer"
+                mode = external.get("mode") if isinstance(external.get("mode"), str) else "output-text"
+                tokenization_source = f"external-hf-tokenizer-{mode}"
+    if not token_ids or source is None:
+        return []
+    details: list[dict[str, Any]] = []
+    for index, token_id in enumerate(token_ids):
+        token_text = token_texts[index] if index < len(token_texts) and isinstance(token_texts[index], str) else None
+        details.append({
+            "tokenText": token_text,
+            "tokenSha256": _sha256_text(token_text) if token_text else None,
+            "tokenBytes": len(token_text.encode("utf-8")) if token_text else None,
+            "tokenId": token_id,
+            "tokenIdSource": source,
+            "logprob": None,
+            "topLogprobs": [],
+            "tokenDetailSource": tokenization_source,
+        })
+    return details
+
+
 def _redacted_token_details(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -1383,12 +1858,19 @@ def _token_detail_summary(details: list[dict[str, Any]], requested: bool) -> dic
             "tokenDetailSource": "requested-not-exposed" if requested else "not-requested",
             "tokenIdSource": None,
         }
+    detail_sources = []
+    for detail in details:
+        source = detail.get("tokenDetailSource")
+        if isinstance(source, str) and source:
+            detail_sources.append(source)
+        elif detail.get("logprob") is not None:
+            detail_sources.append("response-logprobs")
     return {
         "tokenDetailsAvailable": True,
         "tokenIdsAvailable": any(detail.get("tokenId") is not None for detail in details),
         "logprobsAvailable": any(detail.get("logprob") is not None for detail in details),
         "tokenDetailCount": len(details),
-        "tokenDetailSource": "response-logprobs",
+        "tokenDetailSource": "+".join(dict.fromkeys(detail_sources)) or "token-ids-only",
         "tokenIdSource": "+".join(dict.fromkeys(
             str(detail.get("tokenIdSource"))
             for detail in details
@@ -1502,7 +1984,13 @@ def _send_streaming_chat_completion(
         )
         native_iteration_fields = _native_iteration_fields(native_telemetry)
         hardware_telemetry = _hardware_metrics_delta(engine, hardware_before, hardware_after)
-        runtime_provenance = _runtime_provenance(engine, native_telemetry)
+        runtime_provenance = _runtime_provenance(engine, native_telemetry, request)
+        metric_snapshots = [
+            *_metric_snapshot_rows(request_id, source="native", snapshot_phase="before", snapshot=native_before),
+            *_metric_snapshot_rows(request_id, source="native", snapshot_phase="after", snapshot=native_after),
+            *_metric_snapshot_rows(request_id, source="dcgm", snapshot_phase="before", snapshot=hardware_before),
+            *_metric_snapshot_rows(request_id, source="dcgm", snapshot_phase="after", snapshot=hardware_after),
+        ]
         first_chunk = events[0] if events else None
         first_output = output_chunks[0] if output_chunks else None
         last_output = output_chunks[-1] if output_chunks else None
@@ -1512,6 +2000,7 @@ def _send_streaming_chat_completion(
         completion_tokens = _usage_value(usage, "completion_tokens", "completionTokens") or len(output_chunks)
         total_tokens = _usage_value(usage, "total_tokens", "totalTokens") or (prompt_tokens + completion_tokens)
         output_token_count = completion_tokens or len(output_chunks)
+        _enrich_native_token_timing(native_telemetry, output_token_count)
         tpot_ms = (
             (float(last_output["receivedMs"]) - float(first_output["receivedMs"])) / max(output_token_count - 1, 1)
             if first_output and last_output
@@ -1526,7 +2015,11 @@ def _send_streaming_chat_completion(
             for chunk in output_chunks
             for detail in (chunk.get("tokenDetails") or [])
         ]
-        token_summary = _token_detail_summary(raw_token_details, token_details_requested)
+        fallback_token_details = []
+        if not raw_token_details and output_text:
+            fallback_token_details = _output_token_details_from_text(engine, request, output_text)
+        token_details_for_summary = raw_token_details or fallback_token_details
+        token_summary = _token_detail_summary(token_details_for_summary, token_details_requested)
         token_timeline = _prompt_token_timeline(request_id, prompt_token_details, request_started_at_utc)
         tokenizer_provenance = {
             "tokenizerModel": runtime_provenance.get("tokenizerModel"),
@@ -1535,49 +2028,74 @@ def _send_streaming_chat_completion(
         for row in token_timeline:
             row.update(tokenizer_provenance)
         token_index = 0
-        for chunk in output_chunks:
-            chunk_details = chunk.get("tokenDetails") or []
-            if chunk_details:
-                for detail in chunk_details:
-                    top_logprobs = detail.get("topLogprobs") if isinstance(detail.get("topLogprobs"), list) else []
+        if fallback_token_details:
+            first_output_ms = float(first_output["receivedMs"]) if first_output else 0.0
+            per_token_ms = tpot_ms if isinstance(tpot_ms, (int, float)) else 0.0
+            for detail in fallback_token_details:
+                relative_ms = first_output_ms + (per_token_ms * token_index)
+                token_timeline.append({
+                    "requestId": request_id,
+                    "tokenPhase": "output",
+                    "chunkIndex": None,
+                    "tokenIndex": token_index,
+                    "receivedAtUtc": first_output.get("receivedAtUtc") if token_index == 0 and first_output else (last_output.get("receivedAtUtc") if last_output else request_completed_at_utc),
+                    "relativeMs": relative_ms,
+                    "contentBytes": detail.get("tokenBytes"),
+                    "contentSha256": detail.get("tokenSha256") or _sha256_text(output_text),
+                    "isFirstOutput": token_index == 0,
+                    "tokenId": detail.get("tokenId"),
+                    "tokenIdSource": detail.get("tokenIdSource"),
+                    "tokenLogprob": None,
+                    "tokenTextSha256": detail.get("tokenSha256"),
+                    "topLogprobsJson": None,
+                    "tokenDetailSource": detail.get("tokenDetailSource") or token_summary["tokenDetailSource"],
+                    **tokenizer_provenance,
+                })
+                token_index += 1
+        else:
+            for chunk in output_chunks:
+                chunk_details = chunk.get("tokenDetails") or []
+                if chunk_details:
+                    for detail in chunk_details:
+                        top_logprobs = detail.get("topLogprobs") if isinstance(detail.get("topLogprobs"), list) else []
+                        token_timeline.append({
+                            "requestId": request_id,
+                            "tokenPhase": "output",
+                            "chunkIndex": chunk["chunkIndex"],
+                            "tokenIndex": token_index,
+                            "receivedAtUtc": chunk["receivedAtUtc"],
+                            "relativeMs": chunk["receivedMs"],
+                            "contentBytes": detail.get("tokenBytes") or chunk["contentBytes"],
+                            "contentSha256": detail.get("tokenSha256") or chunk["contentSha256"],
+                            "isFirstOutput": token_index == 0,
+                            "tokenId": detail.get("tokenId"),
+                            "tokenIdSource": detail.get("tokenIdSource"),
+                            "tokenLogprob": detail.get("logprob"),
+                            "tokenTextSha256": detail.get("tokenSha256"),
+                            "topLogprobsJson": _stable_json(top_logprobs) if top_logprobs else None,
+                            "tokenDetailSource": token_summary["tokenDetailSource"],
+                            **tokenizer_provenance,
+                        })
+                        token_index += 1
+                else:
                     token_timeline.append({
                         "requestId": request_id,
                         "tokenPhase": "output",
                         "chunkIndex": chunk["chunkIndex"],
-                        "tokenIndex": token_index,
+                        "tokenIndex": None,
                         "receivedAtUtc": chunk["receivedAtUtc"],
                         "relativeMs": chunk["receivedMs"],
-                        "contentBytes": detail.get("tokenBytes") or chunk["contentBytes"],
-                        "contentSha256": detail.get("tokenSha256") or chunk["contentSha256"],
-                        "isFirstOutput": token_index == 0,
-                        "tokenId": detail.get("tokenId"),
-                        "tokenIdSource": detail.get("tokenIdSource"),
-                        "tokenLogprob": detail.get("logprob"),
-                        "tokenTextSha256": detail.get("tokenSha256"),
-                        "topLogprobsJson": _stable_json(top_logprobs) if top_logprobs else None,
+                        "contentBytes": chunk["contentBytes"],
+                        "contentSha256": chunk["contentSha256"],
+                        "isFirstOutput": chunk["chunkIndex"] == 0,
+                        "tokenId": None,
+                        "tokenIdSource": None,
+                        "tokenLogprob": None,
+                        "tokenTextSha256": None,
+                        "topLogprobsJson": None,
                         "tokenDetailSource": token_summary["tokenDetailSource"],
                         **tokenizer_provenance,
                     })
-                    token_index += 1
-            else:
-                token_timeline.append({
-                    "requestId": request_id,
-                    "tokenPhase": "output",
-                    "chunkIndex": chunk["chunkIndex"],
-                    "tokenIndex": None,
-                    "receivedAtUtc": chunk["receivedAtUtc"],
-                    "relativeMs": chunk["receivedMs"],
-                    "contentBytes": chunk["contentBytes"],
-                    "contentSha256": chunk["contentSha256"],
-                    "isFirstOutput": chunk["chunkIndex"] == 0,
-                    "tokenId": None,
-                    "tokenIdSource": None,
-                    "tokenLogprob": None,
-                    "tokenTextSha256": None,
-                    "topLogprobsJson": None,
-                    "tokenDetailSource": token_summary["tokenDetailSource"],
-                    **tokenizer_provenance,
-                })
         return {
             "requestId": request_id,
             "requestIndex": request_index,
@@ -1622,6 +2140,12 @@ def _send_streaming_chat_completion(
             "nativeE2eLatencyMs": native_telemetry.get("nativeE2eLatencyMs"),
             "nativeInterTokenLatencyMs": native_telemetry.get("nativeInterTokenLatencyMs"),
             **native_iteration_fields,
+            "trtllmPerfKvAllocatedBlocks": native_telemetry.get("trtllmPerfKvAllocatedBlocks"),
+            "trtllmPerfKvNewBlocks": native_telemetry.get("trtllmPerfKvNewBlocks"),
+            "trtllmPerfKvReusedBlocks": native_telemetry.get("trtllmPerfKvReusedBlocks"),
+            "trtllmPerfKvMissedBlocks": native_telemetry.get("trtllmPerfKvMissedBlocks"),
+            "trtllmPerfRecordCount": native_telemetry.get("trtllmPerfRecordCount"),
+            "trtllmPerfRequestIdSha256": native_telemetry.get("trtllmPerfRequestIdSha256"),
             "runningRequests": native_telemetry.get("runningRequests"),
             "waitingRequests": native_telemetry.get("waitingRequests"),
             "kvCacheUsagePct": native_telemetry.get("kvCacheUsagePct"),
@@ -1673,6 +2197,7 @@ def _send_streaming_chat_completion(
             **prompt_token_summary,
             **token_summary,
             "tokenTimeline": token_timeline,
+            "_metricSnapshots": metric_snapshots,
             "error": None if 200 <= status < 300 else json.dumps(last_body),
             "_rawCapture": {
                 "requestId": request_id,
@@ -1681,7 +2206,7 @@ def _send_streaming_chat_completion(
                 "responseEvents": events,
                 "outputText": output_text,
                 "promptTokenDetails": prompt_token_details,
-                "tokenDetails": raw_token_details,
+                "tokenDetails": token_details_for_summary,
                 "nativeMetricsRaw": {
                     "before": native_before,
                     "after": native_after,
@@ -1727,7 +2252,7 @@ def _send_streaming_chat_completion(
             "hardwareTelemetryAvailable": False,
             "nativeTelemetrySource": native_telemetry.get("source"),
             "hardwareTelemetrySource": hardware_telemetry.get("source"),
-            **_runtime_provenance(engine, native_telemetry),
+            **_runtime_provenance(engine, native_telemetry, request),
             "tokenDetailsAvailable": False,
             "tokenIdsAvailable": False,
             "logprobsAvailable": False,
@@ -1784,9 +2309,17 @@ def _send_non_streaming_chat_completion(
             _native_telemetry(engine, body),
             _native_metrics_delta(engine, native_before, native_after),
         )
+        completion_tokens = _usage_value(usage, "completion_tokens", "completionTokens")
+        _enrich_native_token_timing(native_telemetry, completion_tokens)
         native_iteration_fields = _native_iteration_fields(native_telemetry)
         hardware_telemetry = _hardware_metrics_delta(engine, hardware_before, hardware_after)
-        runtime_provenance = _runtime_provenance(engine, native_telemetry)
+        runtime_provenance = _runtime_provenance(engine, native_telemetry, request)
+        metric_snapshots = [
+            *_metric_snapshot_rows(request_id, source="native", snapshot_phase="before", snapshot=native_before),
+            *_metric_snapshot_rows(request_id, source="native", snapshot_phase="after", snapshot=native_after),
+            *_metric_snapshot_rows(request_id, source="dcgm", snapshot_phase="before", snapshot=hardware_before),
+            *_metric_snapshot_rows(request_id, source="dcgm", snapshot_phase="after", snapshot=hardware_after),
+        ]
         raw_token_details = _choice_token_details(body, engine, request)
         token_summary = _token_detail_summary(raw_token_details, token_details_requested)
         tokenizer_provenance = {
@@ -1832,9 +2365,9 @@ def _send_non_streaming_chat_completion(
             "tpotMs": None,
             "interTokenLatencyMs": None,
             "streamChunkCount": 0,
-            "outputTokenCount": _usage_value(usage, "completion_tokens", "completionTokens"),
+            "outputTokenCount": completion_tokens,
             "promptTokens": _usage_value(usage, "prompt_tokens", "promptTokens"),
-            "completionTokens": _usage_value(usage, "completion_tokens", "completionTokens"),
+            "completionTokens": completion_tokens,
             "totalTokens": _usage_value(usage, "total_tokens", "totalTokens"),
             "tokenCountSource": "response-usage" if usage else "none",
             "responseId": body.get("id"),
@@ -1857,6 +2390,12 @@ def _send_non_streaming_chat_completion(
             "nativeE2eLatencyMs": native_telemetry.get("nativeE2eLatencyMs"),
             "nativeInterTokenLatencyMs": native_telemetry.get("nativeInterTokenLatencyMs"),
             **native_iteration_fields,
+            "trtllmPerfKvAllocatedBlocks": native_telemetry.get("trtllmPerfKvAllocatedBlocks"),
+            "trtllmPerfKvNewBlocks": native_telemetry.get("trtllmPerfKvNewBlocks"),
+            "trtllmPerfKvReusedBlocks": native_telemetry.get("trtllmPerfKvReusedBlocks"),
+            "trtllmPerfKvMissedBlocks": native_telemetry.get("trtllmPerfKvMissedBlocks"),
+            "trtllmPerfRecordCount": native_telemetry.get("trtllmPerfRecordCount"),
+            "trtllmPerfRequestIdSha256": native_telemetry.get("trtllmPerfRequestIdSha256"),
             "runningRequests": native_telemetry.get("runningRequests"),
             "waitingRequests": native_telemetry.get("waitingRequests"),
             "kvCacheUsagePct": native_telemetry.get("kvCacheUsagePct"),
@@ -1908,6 +2447,7 @@ def _send_non_streaming_chat_completion(
             **prompt_token_summary,
             **token_summary,
             "tokenTimeline": token_timeline,
+            "_metricSnapshots": metric_snapshots,
             "error": None if 200 <= status < 300 else json.dumps(body),
             "_rawCapture": {
                 "requestId": request_id,
@@ -1963,7 +2503,7 @@ def _send_non_streaming_chat_completion(
             "hardwareTelemetryAvailable": False,
             "nativeTelemetrySource": native_telemetry.get("source"),
             "hardwareTelemetrySource": hardware_telemetry.get("source"),
-            **_runtime_provenance(engine, native_telemetry),
+            **_runtime_provenance(engine, native_telemetry, request),
             "tokenDetailsAvailable": False,
             "tokenIdsAvailable": False,
             "logprobsAvailable": False,
@@ -2117,6 +2657,49 @@ def _build_measurements(
         "powerSource": "pricing-config" if isinstance(configured_power_watts_per_gpu, (int, float)) else ("dcgm" if observed_power_watts_per_gpu is not None else "unknown"),
         "avgGpuUtilizationPct": _avg_numbers(successful, "gpuUtilizationPct"),
         "avgMemoryCopyUtilizationPct": _avg_numbers(successful, "memoryCopyUtilizationPct"),
+        "avgSmActivePct": _avg_numbers(successful, "smActivePct"),
+        "avgDramActivePct": _avg_numbers(successful, "dramActivePct"),
+        "avgTensorActivePct": _avg_numbers(successful, "tensorActivePct"),
+        "avgFp64ActivePct": _avg_numbers(successful, "fp64ActivePct"),
+        "avgFp32ActivePct": _avg_numbers(successful, "fp32ActivePct"),
+        "avgFp16ActivePct": _avg_numbers(successful, "fp16ActivePct"),
+        "avgPcieTxThroughputKiBps": _avg_numbers(successful, "pcieTxThroughputKiBps"),
+        "avgPcieRxThroughputKiBps": _avg_numbers(successful, "pcieRxThroughputKiBps"),
+        "avgPcieTxBytesDelta": _avg_numbers(successful, "pcieTxBytesDelta"),
+        "avgPcieRxBytesDelta": _avg_numbers(successful, "pcieRxBytesDelta"),
+        "avgPcieReplayDelta": _avg_numbers(successful, "pcieReplayDelta"),
+        "avgNvlinkTxBytesDelta": _avg_numbers(successful, "nvlinkTxBytesDelta"),
+        "avgNvlinkRxBytesDelta": _avg_numbers(successful, "nvlinkRxBytesDelta"),
+        "avgNvlinkBandwidthTotalMBps": _avg_numbers(successful, "nvlinkBandwidthTotalMBps"),
+        "avgEncoderUtilizationPct": _avg_numbers(successful, "encoderUtilizationPct"),
+        "avgDecoderUtilizationPct": _avg_numbers(successful, "decoderUtilizationPct"),
+        "avgGpuTemperatureC": _avg_numbers(successful, "gpuTemperatureC"),
+        "avgSmClockMHz": _avg_numbers(successful, "smClockMHz"),
+        "avgMemoryClockMHz": _avg_numbers(successful, "memoryClockMHz"),
+        "avgFbUsedMiB": _avg_numbers(successful, "fbUsedMiB"),
+        "avgFbFreeMiB": _avg_numbers(successful, "fbFreeMiB"),
+        "avgXidErrors": _avg_numbers(successful, "xidErrors"),
+        "avgXidErrorsDelta": _avg_numbers(successful, "xidErrorsDelta"),
+        "avgEccSbeVolatileTotalDelta": _avg_numbers(successful, "eccSbeVolatileTotalDelta"),
+        "avgEccDbeVolatileTotalDelta": _avg_numbers(successful, "eccDbeVolatileTotalDelta"),
+        "avgPowerViolationTimeUsDelta": _avg_numbers(successful, "powerViolationTimeUsDelta"),
+        "avgThermalViolationTimeUsDelta": _avg_numbers(successful, "thermalViolationTimeUsDelta"),
+        "hardwareRawMetricCountMin": min(
+            _number_values(successful, "hardwareRawMetricCount"),
+            default=None,
+        ),
+        "hardwareRawMetricNamesSha256": (
+            _sha256_json(sorted(
+                str(sample["hardwareRawMetricNamesSha256"])
+                for sample in successful
+                if isinstance(sample.get("hardwareRawMetricNamesSha256"), str)
+            ))
+            if successful and all(
+                isinstance(sample.get("hardwareRawMetricNamesSha256"), str)
+                for sample in successful
+            )
+            else None
+        ),
         "totalEnergyJoules": _sum(successful, "energyJoules"),
         "tokensPerWatt": (
             (total_tokens / duration_seconds) / (float(power_watts_per_gpu) * gpu_count)
@@ -2133,7 +2716,7 @@ def _build_measurements(
         "dcgmGrounded": bool(successful) and all(sample.get("hardwareTelemetryAvailable") for sample in successful),
         "streamingRequestCount": sum(1 for sample in successful if sample.get("streaming")),
         "nativeTelemetryAvailableCount": sum(1 for sample in successful if sample.get("nativeTelemetryAvailable")),
-        "nativeTelemetryRequired": bool(engine.get("requireNativeTelemetry")),
+        "nativeTelemetryRequired": _native_telemetry_expected(engine),
         "hardwareTelemetryAvailableCount": sum(1 for sample in successful if sample.get("hardwareTelemetryAvailable")),
         "hardwareTelemetryRequired": bool(engine.get("requireHardwareTelemetry") or _hardware_metrics_url(engine)),
         "tokenDetailsAvailableCount": sum(1 for sample in successful if sample.get("tokenDetailsAvailable")),
@@ -2213,12 +2796,44 @@ def _build_measurements(
             else None
         )
         required.extend([
-            row["avgPowerWatts"],
-            row["avgPowerWattsPerGpu"],
-            row["avgGpuUtilizationPct"],
-            row["avgMemoryCopyUtilizationPct"],
-            row["totalEnergyJoules"],
+            row.get({
+                "avgPowerWatts": "avgPowerWatts",
+                "avgPowerWattsPerGpu": "avgPowerWattsPerGpu",
+                "gpuUtilizationPct": "avgGpuUtilizationPct",
+                "memoryCopyUtilizationPct": "avgMemoryCopyUtilizationPct",
+                "smActivePct": "avgSmActivePct",
+                "dramActivePct": "avgDramActivePct",
+                "tensorActivePct": "avgTensorActivePct",
+                "fp64ActivePct": "avgFp64ActivePct",
+                "fp32ActivePct": "avgFp32ActivePct",
+                "fp16ActivePct": "avgFp16ActivePct",
+                "pcieTxThroughputKiBps": "avgPcieTxThroughputKiBps",
+                "pcieRxThroughputKiBps": "avgPcieRxThroughputKiBps",
+                "pcieTxBytesDelta": "avgPcieTxBytesDelta",
+                "pcieRxBytesDelta": "avgPcieRxBytesDelta",
+                "pcieReplayDelta": "avgPcieReplayDelta",
+                "nvlinkTxBytesDelta": "avgNvlinkTxBytesDelta",
+                "nvlinkRxBytesDelta": "avgNvlinkRxBytesDelta",
+                "nvlinkBandwidthTotalMBps": "avgNvlinkBandwidthTotalMBps",
+                "encoderUtilizationPct": "avgEncoderUtilizationPct",
+                "decoderUtilizationPct": "avgDecoderUtilizationPct",
+                "gpuTemperatureC": "avgGpuTemperatureC",
+                "smClockMHz": "avgSmClockMHz",
+                "memoryClockMHz": "avgMemoryClockMHz",
+                "fbUsedMiB": "avgFbUsedMiB",
+                "fbFreeMiB": "avgFbFreeMiB",
+                "xidErrors": "avgXidErrors",
+                "xidErrorsDelta": "avgXidErrorsDelta",
+                "eccSbeVolatileTotalDelta": "avgEccSbeVolatileTotalDelta",
+                "eccDbeVolatileTotalDelta": "avgEccDbeVolatileTotalDelta",
+                "powerViolationTimeUsDelta": "avgPowerViolationTimeUsDelta",
+                "thermalViolationTimeUsDelta": "avgThermalViolationTimeUsDelta",
+                "hardwareRawMetricCount": "hardwareRawMetricCountMin",
+                "energyJoules": "totalEnergyJoules",
+            }[field])
+            for field in REQUIRED_HARDWARE_TELEMETRY_NUMBER_FIELDS
         ])
+        required.append(1 if isinstance(row.get("hardwareRawMetricNamesSha256"), str) else None)
     if row["tokenDetailsRequired"]:
         required.append(
             row["logprobsAvailableCount"]
@@ -2234,19 +2849,29 @@ def _build_measurements(
     row["metricCompleteness"] = sum(isinstance(value, (int, float)) for value in required) / len(required)
     sample_rows = []
     timeline_rows = []
+    metric_snapshot_rows = []
     for sample in samples:
+        sample_native_telemetry = sample.get("nativeTelemetry") if isinstance(sample.get("nativeTelemetry"), dict) else {}
+        sample_error = sample.get("error") if isinstance(sample.get("error"), str) else None
         sample_rows.append({
             "surface": "serving_request_sample",
             "model": request["model"],
             "hardware": workload.get("hardware"),
             "runtimeFramework": engine_label,
             "runtimeEngine": engine_id,
+            "runtimeBackend": sample.get("runtimeBackend"),
             "operatingPoint": workload.get("operatingPoint", "laptop-smoke"),
             "basis": "per_request",
             "requestId": sample.get("requestId"),
             "requestIndex": sample.get("requestIndex"),
+            "requestEndpoint": sample.get("endpoint"),
+            "requestStartedAtUtc": sample.get("requestStartedAtUtc"),
+            "requestCompletedAtUtc": sample.get("requestCompletedAtUtc"),
+            "responseId": sample.get("responseId"),
+            "responseModel": sample.get("responseModel"),
             "status": sample.get("status"),
             "ok": sample.get("ok"),
+            "streaming": sample.get("streaming"),
             "e2eLatencyMs": sample.get("e2eLatencyMs"),
             "latencyMs": sample.get("latencyMs"),
             "timeToFirstByteMs": sample.get("timeToFirstByteMs"),
@@ -2258,6 +2883,7 @@ def _build_measurements(
             "completionTokens": sample.get("completionTokens"),
             "totalTokens": sample.get("totalTokens"),
             "outputTokenCount": sample.get("outputTokenCount"),
+            "outputBytes": sample.get("outputBytes"),
             "tokenCountSource": sample.get("tokenCountSource"),
             "streamChunkCount": sample.get("streamChunkCount"),
             "firstChunkAtUtc": sample.get("firstChunkAtUtc"),
@@ -2268,10 +2894,13 @@ def _build_measurements(
             "promptSha256": sample.get("promptSha256"),
             "requestPayloadSha256": sample.get("requestPayloadSha256"),
             "outputSha256": sample.get("outputSha256"),
+            "errorSha256": _sha256_text(sample_error) if sample_error else None,
             "nativeTelemetryAvailable": sample.get("nativeTelemetryAvailable"),
             "hardwareTelemetryAvailable": sample.get("hardwareTelemetryAvailable"),
             "nativeTelemetrySource": sample.get("nativeTelemetrySource"),
             "nativeMetricsUrl": sample.get("nativeMetricsUrl"),
+            "nativeJsonMetricsUrl": sample_native_telemetry.get("nativeJsonMetricsUrl"),
+            "nativePerfMetricsUrl": sample_native_telemetry.get("nativePerfMetricsUrl"),
             "nativeTtftMs": sample.get("nativeTtftMs"),
             "nativeTpotMs": sample.get("nativeTpotMs"),
             "nativeE2eLatencyMs": sample.get("nativeE2eLatencyMs"),
@@ -2280,6 +2909,12 @@ def _build_measurements(
             "nativeGpuMemoryBytes": sample.get("nativeGpuMemoryBytes"),
             "nativeKvCacheUsedBlocks": sample.get("nativeKvCacheUsedBlocks"),
             "nativeKvCacheMaxBlocks": sample.get("nativeKvCacheMaxBlocks"),
+            "trtllmPerfKvAllocatedBlocks": sample.get("trtllmPerfKvAllocatedBlocks"),
+            "trtllmPerfKvNewBlocks": sample.get("trtllmPerfKvNewBlocks"),
+            "trtllmPerfKvReusedBlocks": sample.get("trtllmPerfKvReusedBlocks"),
+            "trtllmPerfKvMissedBlocks": sample.get("trtllmPerfKvMissedBlocks"),
+            "trtllmPerfRecordCount": sample.get("trtllmPerfRecordCount"),
+            "trtllmPerfRequestIdSha256": sample.get("trtllmPerfRequestIdSha256"),
             "runningRequests": sample.get("runningRequests"),
             "waitingRequests": sample.get("waitingRequests"),
             "kvCacheUsagePct": sample.get("kvCacheUsagePct"),
@@ -2353,6 +2988,7 @@ def _build_measurements(
             "podName": sample.get("podName"),
             "nodeName": sample.get("nodeName"),
             "hostName": sample.get("hostName"),
+            "hardwareInventorySha256": sample.get("hardwareInventorySha256"),
             "rawArtifactPath": raw_artifact_path,
             "latestCapturedAtUtc": captured_at_utc,
         })
@@ -2385,17 +3021,30 @@ def _build_measurements(
                 ),
                 "latestCapturedAtUtc": captured_at_utc,
             })
-    return [row, *sample_rows, *timeline_rows]
+        for metric_snapshot in sample.get("_metricSnapshots") or []:
+            if not isinstance(metric_snapshot, dict):
+                continue
+            metric_snapshot_rows.append({
+                **metric_snapshot,
+                "model": request["model"],
+                "runtimeFramework": engine_label,
+                "runtimeEngine": engine_id,
+                "rawArtifactPath": raw_artifact_path,
+                "latestCapturedAtUtc": captured_at_utc,
+            })
+    return [row, *sample_rows, *timeline_rows, *metric_snapshot_rows]
 
 
 PRODUCER_COVERAGE_DESCRIPTIONS: dict[str, str] = {
     "clientStreamTiming": "Client stream=true timing for E2E, TTFB, TTFT, TTFOT, TPOT, and output token timeline rows.",
     "nativeRuntimeTelemetry": "Native runtime timing/cache/concurrency fields exposed by vLLM, SGLang, or TensorRT-LLM metrics.",
-    "dcgmHardwareTelemetry": "DCGM hardware counters for power, utilization, clocks, memory, temperature, and energy.",
+    "dcgmHardwareTelemetry": "DCGM hardware counters for power, profiling activity, PCIe/NVLink, clocks, memory, temperature, errors, violations, raw metric inventory, and energy.",
     "promptTokenIds": "Tokenizer-exact prompt/input token IDs and prompt token provenance.",
-    "outputTokenIdsLogprobs": "Output token IDs, token logprobs, top-logprobs, and token provenance.",
+    "outputTokenIds": "Output token IDs and token provenance from runtime logprobs or tokenizer fallback.",
+    "outputTokenLogprobs": "Output token logprobs, top-logprobs, and token-logprob provenance.",
     "operatorFullArtifacts": "Operator-full raw request/response artifacts retained outside customer-safe rows.",
     "rawMetricSnapshots": "Operator-full before/after native and DCGM metric snapshots retained outside customer-safe rows.",
+    "metricSnapshots": "Queryable per-series native and DCGM before/after metric snapshots with label and raw-exposition provenance hashes.",
     "runtimeProvenance": "Engine version, model revision, image, server args, process, container, pod, node, or host provenance.",
 }
 
@@ -2411,17 +3060,16 @@ def _coverage_status(proven: int, expected: int) -> str:
 
 
 def _has_runtime_provenance(sample: dict[str, Any]) -> bool:
-    return any(
-        sample.get(key) not in (None, "", [])
+    return all(
+        isinstance(sample.get(key), str) and bool(sample.get(key))
         for key in [
             "engineVersion",
+            "runtimeBackend",
             "modelRevision",
+            "imageTag",
             "imageDigest",
             "serverArgsSha256",
-            "processId",
             "containerId",
-            "podName",
-            "nodeName",
             "hostName",
         ]
     )
@@ -2491,10 +3139,13 @@ def _build_producer_coverage_rows(
     engine_label = serving_engine_label(engine_id)
     successful = [sample for sample in samples if sample.get("ok")]
     expected_samples = len(successful) or len(samples) or 1
-    token_required = bool(_request_payload(request, stream=bool(request.get("stream", True))).get("logprobs"))
+    token_logprobs_required = bool(_request_payload(request, stream=bool(request.get("stream", True))).get("logprobs"))
+    token_details_capability = engine.get("tokenDetailsCapability") if isinstance(engine.get("tokenDetailsCapability"), dict) else {}
+    token_requested_unsupported = (
+        token_details_capability.get("requested") is True
+        and token_details_capability.get("supported") is False
+    )
     prompt_required = bool(aggregate_row.get("promptTokenDetailsRequired"))
-    native_expected = expected_samples if aggregate_row.get("nativeTelemetryRequired") else 0
-    hardware_expected = expected_samples if aggregate_row.get("hardwareTelemetryRequired") else 0
     sample_request_ids = [
         sample.get("requestId")
         for sample in successful
@@ -2528,6 +3179,7 @@ def _build_producer_coverage_rows(
         if sample.get("nativeTelemetryAvailable") is True
         and all(isinstance(sample.get(key), (int, float)) for key in ["nativeTtftMs", "nativeTpotMs", "nativeE2eLatencyMs", "queueWaitMs", "prefillMs", "decodeMs"])
     )
+    native_expected = expected_samples if aggregate_row.get("nativeTelemetryRequired") or native_proven > 0 else 0
     coverage_specs.append((
         "nativeRuntimeTelemetry",
         native_proven,
@@ -2538,8 +3190,13 @@ def _build_producer_coverage_rows(
     hardware_proven = sum(
         1 for sample in successful
         if sample.get("hardwareTelemetryAvailable") is True
-        and all(isinstance(sample.get(key), (int, float)) for key in ["avgPowerWatts", "gpuUtilizationPct", "gpuTemperatureC", "energyJoules"])
+        and all(
+            isinstance(sample.get(key), (int, float))
+            for key in REQUIRED_HARDWARE_TELEMETRY_NUMBER_FIELDS
+        )
+        and isinstance(sample.get("hardwareRawMetricNamesSha256"), str)
     )
+    hardware_expected = expected_samples if aggregate_row.get("hardwareTelemetryRequired") or hardware_proven > 0 else 0
     coverage_specs.append((
         "dcgmHardwareTelemetry",
         hardware_proven,
@@ -2571,14 +3228,14 @@ def _build_producer_coverage_rows(
         [] if not prompt_required or prompt_proven == expected_samples else ["prompt token IDs missing"],
     ))
 
-    output_proven = sum(
+    output_id_sample_proven = sum(
         1 for sample in successful
         if sample.get("tokenDetailsAvailable") is True
         and sample.get("tokenIdsAvailable") is True
-        and sample.get("logprobsAvailable") is True
         and isinstance(sample.get("tokenIdSource"), str)
     )
-    valid_output_request_ids = set()
+    valid_output_id_request_ids = set()
+    valid_output_logprob_request_ids = set()
     for sample in successful:
         request_id = sample.get("requestId")
         if not isinstance(request_id, str):
@@ -2590,17 +3247,45 @@ def _build_producer_coverage_rows(
         if output_rows and all(
             isinstance(row.get("tokenId"), int)
             and isinstance(row.get("tokenIdSource"), str)
-            and isinstance(row.get("tokenLogprob"), (int, float))
             for row in output_rows
         ):
-            valid_output_request_ids.add(request_id)
-    output_rows_proven = sum(1 for request_id in sample_request_ids if request_id in valid_output_request_ids)
-    output_proven = min(output_proven, output_rows_proven)
+            valid_output_id_request_ids.add(request_id)
+        if output_rows and all(isinstance(row.get("tokenLogprob"), (int, float)) for row in output_rows):
+            valid_output_logprob_request_ids.add(request_id)
+    output_id_rows_proven = sum(1 for request_id in sample_request_ids if request_id in valid_output_id_request_ids)
+    output_id_proven = min(output_id_sample_proven, output_id_rows_proven)
+    output_id_expected = expected_samples if token_logprobs_required or token_requested_unsupported or output_id_proven > 0 else 0
     coverage_specs.append((
-        "outputTokenIdsLogprobs",
-        output_proven,
-        expected_samples if token_required else 0,
-        [] if not token_required or output_proven == expected_samples else ["output token IDs/logprobs missing"],
+        "outputTokenIds",
+        output_id_proven,
+        output_id_expected,
+        [] if output_id_expected == 0 or output_id_proven == expected_samples else ["output token IDs or output-token timeline rows missing"],
+    ))
+
+    output_logprob_sample_proven = sum(
+        1 for sample in successful
+        if sample.get("tokenDetailsAvailable") is True
+        and sample.get("logprobsAvailable") is True
+    )
+    output_logprob_rows_proven = sum(1 for request_id in sample_request_ids if request_id in valid_output_logprob_request_ids)
+    output_logprob_proven = min(output_logprob_sample_proven, output_logprob_rows_proven)
+    output_logprob_expected = (
+        expected_samples
+        if token_logprobs_required or token_requested_unsupported or output_logprob_proven > 0
+        else 0
+    )
+    output_logprob_missing = []
+    if output_logprob_expected > 0 and output_logprob_proven != expected_samples:
+        if token_requested_unsupported:
+            reason = token_details_capability.get("reason") or "runtime-token-logprobs-unsupported"
+            output_logprob_missing.append(f"output token logprobs were requested but unsupported by runtime: {reason}")
+        else:
+            output_logprob_missing.append("output token logprobs or token-logprob timeline rows missing")
+    coverage_specs.append((
+        "outputTokenLogprobs",
+        output_logprob_proven,
+        output_logprob_expected,
+        output_logprob_missing,
     ))
 
     raw_present = 1 if raw_artifact_path and os.path.exists(raw_artifact_path) else 0
@@ -2625,6 +3310,26 @@ def _build_producer_coverage_rows(
         raw_snapshot_proven,
         raw_snapshot_expected,
         [] if raw_snapshot_expected == 0 or raw_snapshot_proven == raw_snapshot_expected else ["operator-full native/DCGM raw metric snapshots missing"],
+    ))
+
+    metric_snapshot_request_ids = {
+        row.get("requestId")
+        for sample in successful
+        for row in (sample.get("_metricSnapshots") or [])
+        if isinstance(row, dict)
+        and isinstance(row.get("requestId"), str)
+        and isinstance(row.get("metricName"), str)
+        and isinstance(row.get("metricLabelsSha256"), str)
+        and isinstance(row.get("metricValue"), (int, float))
+        and row.get("snapshotPhase") in {"before", "after"}
+    }
+    metric_snapshot_proven = sum(1 for request_id in sample_request_ids if request_id in metric_snapshot_request_ids)
+    metric_snapshot_expected = expected_samples if native_expected > 0 or hardware_expected > 0 else 0
+    coverage_specs.append((
+        "metricSnapshots",
+        metric_snapshot_proven,
+        metric_snapshot_expected,
+        [] if metric_snapshot_expected == 0 or metric_snapshot_proven == metric_snapshot_expected else ["per-request native/DCGM metric snapshot rows missing"],
     ))
 
     runtime_proven = sum(1 for sample in successful if _has_runtime_provenance(sample))
@@ -2783,6 +3488,22 @@ def _write_raw_artifact(
                 "capturedAtUtc": captured_at_utc,
                 "engine": engine["engine"],
                 "engineLabel": serving_engine_label(engine["engine"]),
+                "runtimeConfiguration": {
+                    "frameworkVersion": engine.get("frameworkVersion"),
+                    "runtimeBackend": engine.get("runtimeBackend"),
+                    "modelRevision": engine.get("modelRevision"),
+                    "imageTag": _engine_provenance_value(engine, "imageTag", "containerImageTag"),
+                    "imageDigest": _engine_provenance_value(engine, "imageDigest", "containerImageDigest"),
+                    "serverArgs": engine.get("serverArgs"),
+                    "tokenizerModel": _tokenizer_model_value(engine, request),
+                    "processId": _engine_provenance_value(engine, "processId", "pid"),
+                    "containerId": _engine_provenance_value(engine, "containerId"),
+                    "podName": _engine_provenance_value(engine, "podName"),
+                    "nodeName": _engine_provenance_value(engine, "nodeName"),
+                    "hostName": _engine_provenance_value(engine, "hostName", "hostname"),
+                    "hardwareInventoryPath": engine.get("hardwareInventoryPath"),
+                    "hardwareInventorySha256": engine.get("hardwareInventorySha256"),
+                },
                 "requestPayload": _request_payload(request, stream=bool(request.get("stream", True))),
                 "captures": raw_captures,
             },
@@ -2882,7 +3603,7 @@ def run_serving_producer(
         "producer": {
             "repo": "performance-iq-sdk",
             "tool": f"{engine['engine']}-serving-producer",
-            "commitSha": "localservingproducer",
+            "commitSha": DEFAULT_PRODUCER_COMMIT,
             **(producer or {}),
         },
         "campaign": {
@@ -2895,8 +3616,11 @@ def run_serving_producer(
         "workload": workload,  # type: ignore[typeddict-item]
         "runtime": {
             "imageDigest": engine.get("imageDigest") or DEFAULT_IMAGE_DIGEST,
-            "imageTag": engine.get("imageTag") or (
-                f"{engine['engine']}:{engine['frameworkVersion']}" if engine.get("frameworkVersion") else ""
+            "imageTag": engine.get("imageTag")
+            or (
+                f"{engine['engine']}:{engine['frameworkVersion']}"
+                if engine.get("imageDigest") and engine.get("frameworkVersion")
+                else "uncontainerized-local"
             ),
             "framework": serving_engine_label(engine["engine"]),
         },

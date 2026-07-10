@@ -29,7 +29,7 @@ Modes:
                DCGM proof gates.
   fake-strict-smoke
                Run deterministic local fake engines through strict telemetry,
-               receipts, Kafka-ready events, proof verification, and coverage.
+               receipts, post-capture events, proof verification, and coverage.
   no-submit    Send requests and write artifacts without submitting runs.
   verify-proof Verify a saved full three-engine proof bundle offline; optionally
                dump all finest-grain proof rows with --dump-proof-rows.

@@ -15,8 +15,9 @@ import subprocess
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
-from typing import Any, Callable
+from typing import Any
 
 from performance_iq_sdk.client import PerformanceIQ
 from performance_iq_sdk.producers.serving import (
@@ -55,6 +56,11 @@ ENGINE_JSON_METRICS_URL_ENV = {
     "sglang": "PIQ_SGLANG_JSON_METRICS_URL",
     "tensorrt-llm": "PIQ_TENSORRT_LLM_JSON_METRICS_URL",
 }
+ENGINE_PERF_METRICS_URL_ENV = {
+    "vllm": "PIQ_VLLM_PERF_METRICS_URL",
+    "sglang": "PIQ_SGLANG_PERF_METRICS_URL",
+    "tensorrt-llm": "PIQ_TENSORRT_LLM_PERF_METRICS_URL",
+}
 ENGINE_HARDWARE_METRICS_URL_ENV = {
     "vllm": "PIQ_VLLM_HARDWARE_METRICS_URL",
     "sglang": "PIQ_SGLANG_HARDWARE_METRICS_URL",
@@ -69,13 +75,19 @@ QUERY_NAMES = (
     "serving_token_timeline",
     "serving_telemetry_coverage",
 )
+FINE_GRAIN_QUERY_NAMES = (
+    "serving_metric_snapshots",
+)
+QUERY_REQUEST_NAMES = (*QUERY_NAMES, *FINE_GRAIN_QUERY_NAMES)
 CAMPAIGN_ID_QUERY_COLUMN = {
     "campaign_provenance": 0,
     "run_details": 0,
     "serving_request_samples": 0,
     "serving_token_timeline": 0,
     "serving_telemetry_coverage": 0,
+    "serving_metric_snapshots": 0,
 }
+REQUIRED_CAMPAIGN_QUERY_NAMES = tuple(name for name in QUERY_NAMES if name in CAMPAIGN_ID_QUERY_COLUMN)
 ENGINE_DEFAULT_PORT = {
     "vllm": 8000,
     "sglang": 30000,
@@ -93,7 +105,6 @@ SERVING_SUMMARY_SCHEMA_VERSION = "performance-iq.serving-producer-summary.v1"
 PRODUCER_MANIFEST_SCHEMA_VERSION = "performance-iq.producer-manifest.v1"
 SERVING_EVENT_SCHEMA_VERSION = "performance-iq.serving-telemetry-event.v1"
 SERVING_EVENT_DEFAULT_TOPIC = "performance-iq.serving.telemetry.v1"
-SERVING_KAFKA_PUBLICATION_SCHEMA_VERSION = "performance-iq.serving-kafka-publication.v1"
 LOW_FREE_SPACE_BYTES = 30 * 1024 * 1024 * 1024
 SIZE_TIMEOUT_SECONDS = 15
 COMMAND_PROBE_TIMEOUT_SECONDS = 30
@@ -102,12 +113,40 @@ REQUIRED_HARDWARE_SAMPLE_COUNTERS = (
     "avgPowerWattsPerGpu",
     "gpuUtilizationPct",
     "memoryCopyUtilizationPct",
+    "smActivePct",
+    "dramActivePct",
+    "tensorActivePct",
+    "fp64ActivePct",
+    "fp32ActivePct",
+    "fp16ActivePct",
+    "pcieTxThroughputKiBps",
+    "pcieRxThroughputKiBps",
+    "pcieTxBytesDelta",
+    "pcieRxBytesDelta",
+    "pcieReplayDelta",
+    "nvlinkTxBytesDelta",
+    "nvlinkRxBytesDelta",
+    "nvlinkBandwidthTotalMBps",
+    "encoderUtilizationPct",
+    "decoderUtilizationPct",
     "gpuTemperatureC",
     "smClockMHz",
     "memoryClockMHz",
     "fbUsedMiB",
     "fbFreeMiB",
+    "xidErrors",
+    "xidErrorsDelta",
+    "eccSbeVolatileTotalDelta",
+    "eccDbeVolatileTotalDelta",
+    "powerViolationTimeUsDelta",
+    "thermalViolationTimeUsDelta",
+    "hardwareRawMetricCount",
     "energyJoules",
+)
+REQUIRED_HARDWARE_ARTIFACT_COUNTERS = (
+    "powerWatts",
+    "powerWattsPerGpu",
+    *REQUIRED_HARDWARE_SAMPLE_COUNTERS[2:],
 )
 REQUIRED_NATIVE_SAMPLE_FIELDS = (
     "nativeTtftMs",
@@ -120,9 +159,17 @@ REQUIRED_NATIVE_SAMPLE_FIELDS = (
     "waitingRequests",
     "kvCacheUsagePct",
     "cacheHitRate",
-    "promptTokensCachedDelta",
-    "promptTokensComputedDelta",
 )
+REQUIRED_NATIVE_CACHE_FIELDS = {
+    "vllm": ("promptTokensCachedDelta", "promptTokensComputedDelta"),
+    "sglang": ("promptTokensCachedDelta", "promptTokensComputedDelta"),
+    "tensorrt-llm": (
+        "trtllmPerfKvAllocatedBlocks",
+        "trtllmPerfKvReusedBlocks",
+        "trtllmPerfKvMissedBlocks",
+        "trtllmPerfRecordCount",
+    ),
+}
 STRICT_PRODUCT_TELEMETRY_CATEGORIES = (
     "clientStreamTiming",
     "requestReceipts",
@@ -130,9 +177,11 @@ STRICT_PRODUCT_TELEMETRY_CATEGORIES = (
     "nativeRuntimeTelemetry",
     "dcgmHardwareTelemetry",
     "promptTokenIds",
-    "outputTokenIdsLogprobs",
+    "outputTokenIds",
+    "outputTokenLogprobs",
     "operatorFullArtifacts",
     "rawMetricSnapshots",
+    "metricSnapshots",
     "runtimeProvenance",
     "kafkaEventLog",
 )
@@ -158,6 +207,12 @@ def default_native_json_metrics_url(engine: str, base_url: str) -> str | None:
     if engine != "tensorrt-llm":
         return None
     return f"{base_url.rstrip('/')}/metrics"
+
+
+def default_native_perf_metrics_url(engine: str, base_url: str) -> str | None:
+    if engine != "tensorrt-llm":
+        return None
+    return f"{base_url.rstrip('/')}/perf_metrics"
 
 
 def _utc_slug() -> str:
@@ -251,44 +306,71 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
         "tensorrt-llm": args.tensorrt_llm_url or _env("PIQ_TENSORRT_LLM_URL"),
     }
     missing = [f"{engine} ({ENGINE_URL_ENV[engine]})" for engine in ENGINE_IDS if not urls[engine]]
+    gpu_inventory_path = _env("PIQ_SERVING_GPU_INVENTORY_PATH")
+    gpu_inventory_sha256 = sha256_file(gpu_inventory_path) if gpu_inventory_path and os.path.isfile(gpu_inventory_path) else None
     configs: list[dict[str, Any]] = []
     for engine in ENGINE_IDS:
         url = urls[engine]
         if not url:
             continue
         api_key = _env(ENGINE_API_KEY_ENV[engine])
-        metrics_url = _env(ENGINE_METRICS_URL_ENV[engine], default_native_metrics_url(engine, url))
-        json_metrics_url = _env(ENGINE_JSON_METRICS_URL_ENV[engine], default_native_json_metrics_url(engine, url))
+        explicit_metrics_url = _env(ENGINE_METRICS_URL_ENV[engine])
+        explicit_json_metrics_url = _env(ENGINE_JSON_METRICS_URL_ENV[engine])
+        explicit_perf_metrics_url = _env(ENGINE_PERF_METRICS_URL_ENV[engine])
+        metrics_url = explicit_metrics_url or default_native_metrics_url(engine, url)
+        json_metrics_url = explicit_json_metrics_url or default_native_json_metrics_url(engine, url)
+        perf_metrics_url = explicit_perf_metrics_url or default_native_perf_metrics_url(engine, url)
+        metrics_url_auto_configured = explicit_metrics_url is None and bool(metrics_url)
+        json_metrics_url_auto_configured = explicit_json_metrics_url is None and bool(json_metrics_url)
+        perf_metrics_url_auto_configured = explicit_perf_metrics_url is None and bool(perf_metrics_url)
         hardware_metrics_url = _env(ENGINE_HARDWARE_METRICS_URL_ENV[engine])
         if getattr(args, "collect_hardware_metrics", False) and not hardware_metrics_url:
             hardware_metrics_url = metrics_url
-        framework_version = _env(_engine_env_name(engine, "FRAMEWORK_VERSION"), args.framework_version)
+        runtime_python = preferred_runtime_python(engine)
+        runtime_candidate = _runtime_candidate(engine, runtime_python) if runtime_python and engine in {"vllm", "sglang"} else None
+        discovered_framework_version = _runtime_version_from_candidate(engine, runtime_candidate)
+        framework_version = _env(_engine_env_name(engine, "FRAMEWORK_VERSION"), args.framework_version) or discovered_framework_version
+        runtime_backend = _env(_engine_env_name(engine, "RUNTIME_BACKEND"))
         model_revision = _env(_engine_env_name(engine, "MODEL_REVISION"), getattr(args, "model_revision", None))
         image_digest = _env(_engine_env_name(engine, "IMAGE_DIGEST"), args.image_digest)
         image_tag = _env(_engine_env_name(engine, "IMAGE_TAG"), args.image_tag)
         server_args = _json_or_text_env(_engine_env_name(engine, "SERVER_ARGS"))
         if server_args is None:
             server_args = getattr(args, "server_args", None)
+        if server_args is None:
+            server_args = {
+                "baseUrl": url,
+                "metricsUrl": metrics_url,
+                **({"nativeJsonMetricsUrl": json_metrics_url} if json_metrics_url else {}),
+                **({"nativePerfMetricsUrl": perf_metrics_url} if perf_metrics_url else {}),
+                **({"hardwareMetricsUrl": hardware_metrics_url} if hardware_metrics_url else {}),
+                **({"runtimePython": runtime_python} if runtime_python else {}),
+            }
         tokenizer_model = _env(_engine_env_name(engine, "TOKENIZER_MODEL"), getattr(args, "tokenizer_model", None))
         resolve_token_ids = bool(getattr(args, "resolve_token_ids_with_tokenizer", False))
-        tokenizer_python_bin = preferred_runtime_python(engine) if resolve_token_ids else None
+        tokenizer_python_bin = runtime_python if resolve_token_ids else None
         capture_token_details = _bool_env(_engine_env_name(engine, "CAPTURE_TOKEN_DETAILS"))
         top_logprobs = _int_env(_engine_env_name(engine, "TOP_LOGPROBS"))
-        process_id = _env(_engine_env_name(engine, "PROCESS_ID"), getattr(args, "process_id", None))
+        process_id = _env(_engine_env_name(engine, "PROCESS_ID"), getattr(args, "process_id", None)) or _local_endpoint_process_id(url)
         container_id = _env(_engine_env_name(engine, "CONTAINER_ID"), getattr(args, "container_id", None))
         pod_name = _env(_engine_env_name(engine, "POD_NAME"), getattr(args, "pod_name", None))
         node_name = _env(_engine_env_name(engine, "NODE_NAME"), getattr(args, "node_name", None))
-        host_name = _env(_engine_env_name(engine, "HOST_NAME"), getattr(args, "host_name", None))
+        host_name = _env(_engine_env_name(engine, "HOST_NAME"), getattr(args, "host_name", None)) or socket.gethostname()
         configs.append({
             "engine": engine,
             "baseUrl": url,
             "metricsUrl": metrics_url,
+            **({"metricsUrlAutoConfigured": True} if metrics_url_auto_configured else {}),
             **({"nativeJsonMetricsUrl": json_metrics_url} if json_metrics_url else {}),
+            **({"nativeJsonMetricsUrlAutoConfigured": True} if json_metrics_url_auto_configured else {}),
+            **({"nativePerfMetricsUrl": perf_metrics_url} if perf_metrics_url else {}),
+            **({"nativePerfMetricsUrlAutoConfigured": True} if perf_metrics_url_auto_configured else {}),
             **({"hardwareMetricsUrl": hardware_metrics_url} if hardware_metrics_url else {}),
             **({"requireNativeTelemetry": True} if getattr(args, "require_native_telemetry", False) else {}),
             **({"requireHardwareTelemetry": True} if getattr(args, "require_hardware_telemetry", False) else {}),
             **({"apiKey": api_key} if api_key else {}),
             **({"frameworkVersion": framework_version} if framework_version else {}),
+            **({"runtimeBackend": runtime_backend} if runtime_backend else {}),
             **({"modelRevision": model_revision} if model_revision else {}),
             **({"imageDigest": image_digest} if image_digest else {}),
             **({"imageTag": image_tag} if image_tag else {}),
@@ -303,6 +385,8 @@ def engine_configs_from_env(args: argparse.Namespace) -> tuple[list[dict[str, An
             **({"podName": pod_name} if pod_name else {}),
             **({"nodeName": node_name} if node_name else {}),
             **({"hostName": host_name} if host_name else {}),
+            **({"hardwareInventoryPath": gpu_inventory_path} if gpu_inventory_path else {}),
+            **({"hardwareInventorySha256": gpu_inventory_sha256} if gpu_inventory_sha256 else {}),
         })
     return configs, missing
 
@@ -408,9 +492,10 @@ def _source_roots(source_path: str | None) -> list[str]:
     if not source_path:
         return []
     absolute = os.path.abspath(os.path.expanduser(source_path))
-    roots = [absolute]
     if os.path.basename(absolute) == "python":
-        roots.append(os.path.dirname(absolute))
+        roots = [os.path.dirname(absolute), absolute]
+    else:
+        roots = [absolute]
     return _unique_paths(roots)
 
 
@@ -419,7 +504,15 @@ def runtime_python_candidates(engine: str) -> list[str]:
     explicit = _env(ENGINE_RUNTIME_PYTHON_ENV.get(engine, ""))
     candidates: list[str | None] = [explicit]
     if engine == "vllm":
-        source_roots = _source_roots(_env("PIQ_VLLM_SOURCE_PATH", "/Users/admin/vllm"))
+        configured_source = _env("PIQ_VLLM_SOURCE_PATH")
+        source_roots = (
+            _source_roots(configured_source)
+            if configured_source
+            else _unique_paths([
+                os.path.join(workspace_root, ".runtime/vllm"),
+                "/Users/admin/vllm",
+            ])
+        )
         for root in source_roots:
             candidates.extend([
                 os.path.join(root, ".venv-piq/bin/python"),
@@ -427,7 +520,7 @@ def runtime_python_candidates(engine: str) -> list[str]:
             ])
         candidates.append(os.path.join(workspace_root, ".runtime/vllm-macos/bin/python"))
     elif engine == "sglang":
-        source_roots = _source_roots(_env("PIQ_SGLANG_SOURCE_PATH", os.path.join(workspace_root, ".runtime/sglang/python")))
+        source_roots = _source_roots(_env("PIQ_SGLANG_SOURCE_PATH", os.path.join(workspace_root, ".runtime/sglang")))
         for root in source_roots:
             candidates.extend([
                 os.path.join(root, "sglang-metal/bin/python"),
@@ -537,29 +630,133 @@ def _runtime_candidate(engine: str, python_bin: str) -> dict[str, Any]:
             and candidate["extension"].get("available")
             and candidate["extension"].get("imported") is not False
         )
+        command_detail = str(candidate["command"].get("detail") or "")
+        candidate["launchReady"] = bool(
+            candidate["usable"]
+            and candidate["command"].get("available")
+            and (
+                candidate["command"].get("status") == "ok"
+                or "timed out" in command_detail
+            )
+        )
     elif engine == "sglang":
         candidate["launchModule"] = external_python_module_probe(python_bin, "sglang.launch_server")
         candidate["usable"] = bool(
             candidate["module"].get("available")
             and candidate["launchModule"].get("available")
         )
+        candidate["launchReady"] = bool(candidate["usable"])
     else:
         candidate["usable"] = False
+        candidate["launchReady"] = False
     return candidate
+
+
+def _preferred_runtime_candidate(engine: str, candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    explicit = _env(ENGINE_RUNTIME_PYTHON_ENV.get(engine, ""))
+    explicit_path = os.path.abspath(os.path.expanduser(explicit)) if explicit else None
+    if explicit_path:
+        for candidate in candidates:
+            if candidate.get("usable") and os.path.abspath(str(candidate.get("python"))) == explicit_path:
+                return candidate
+    launch_ready = [candidate for candidate in candidates if candidate.get("usable") and candidate.get("launchReady")]
+    if launch_ready:
+        return launch_ready[0]
+    usable = [candidate for candidate in candidates if candidate.get("usable")]
+    return usable[0] if usable else None
 
 
 def local_runtime_discovery() -> dict[str, Any]:
     discovered: dict[str, Any] = {}
     for engine in ("vllm", "sglang"):
         candidates = [_runtime_candidate(engine, path) for path in runtime_python_candidates(engine)]
-        usable_candidates = [candidate for candidate in candidates if candidate.get("usable")]
+        preferred = _preferred_runtime_candidate(engine, candidates)
         discovered[engine] = {
             "pythonEnv": ENGINE_RUNTIME_PYTHON_ENV[engine],
             "candidates": candidates,
-            "usable": bool(usable_candidates),
-            "preferred": usable_candidates[0] if usable_candidates else None,
+            "usable": preferred is not None,
+            "preferred": preferred,
         }
     return discovered
+
+
+def _runtime_version_from_python(python_bin: str, module: str) -> str | None:
+    if not os.path.exists(python_bin):
+        return None
+    code = """
+import importlib
+import json
+import sys
+
+module = importlib.import_module(sys.argv[1])
+version = getattr(module, "__version__", None)
+print(json.dumps({"version": version if isinstance(version, str) else None}, sort_keys=True))
+""".strip()
+    try:
+        completed = subprocess.run(
+            [python_bin, "-c", code, module],
+            text=True,
+            capture_output=True,
+            timeout=command_probe_timeout_seconds(),
+        )
+    except Exception:
+        return None
+    for line in reversed((completed.stdout or "").splitlines()):
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("version"), str) and parsed["version"]:
+            return str(parsed["version"])
+    return None
+
+
+def _runtime_version_from_candidate(engine: str, candidate: dict[str, Any] | None) -> str | None:
+    if not isinstance(candidate, dict):
+        return None
+    if engine == "vllm":
+        command = candidate.get("command") if isinstance(candidate.get("command"), dict) else {}
+        output = command.get("output") if isinstance(command.get("output"), list) else []
+        for line in reversed(output):
+            if not isinstance(line, str):
+                continue
+            value = line.strip()
+            if value and not value.startswith(("INFO ", "WARNING ", "ERROR ", "Traceback")):
+                return value
+    module = "vllm" if engine == "vllm" else "sglang"
+    python_bin = candidate.get("python")
+    if isinstance(python_bin, str):
+        return _runtime_version_from_python(python_bin, module)
+    return None
+
+
+def _local_endpoint_process_id(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return None
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"} or not parsed.port:
+        return None
+    lsof = shutil.which("lsof")
+    if not lsof:
+        return None
+    try:
+        result = subprocess.run(
+            [lsof, "-nP", f"-iTCP:{parsed.port}", "-sTCP:LISTEN", "-Fp"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    for line in (result.stdout or "").splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            return line[1:]
+    return None
 
 
 def storage_probe(path: str | None = None) -> dict[str, Any]:
@@ -718,6 +915,7 @@ def environment_diagnostics() -> dict[str, Any]:
         "PIQ_BASE_URL",
         "PIQ_TOKEN",
         "PIQ_SERVING_MODEL",
+        "PIQ_SERVING_GPU_INVENTORY_PATH",
         "PIQ_VLLM_URL",
         "PIQ_VLLM_METRICS_URL",
         "PIQ_SGLANG_URL",
@@ -725,6 +923,7 @@ def environment_diagnostics() -> dict[str, Any]:
         "PIQ_TENSORRT_LLM_URL",
         "PIQ_TENSORRT_LLM_METRICS_URL",
         "PIQ_TENSORRT_LLM_JSON_METRICS_URL",
+        "PIQ_TENSORRT_LLM_PERF_METRICS_URL",
         "PIQ_TENSORRT_LLM_IMAGE",
         "PIQ_PYTHON_BIN",
         "PIQ_SERVING_BIN_DIR",
@@ -1040,6 +1239,7 @@ def _runtime_discovery_summary(runtime_candidates: dict[str, Any], engine: str) 
     return {
         "pythonEnv": ENGINE_RUNTIME_PYTHON_ENV[engine],
         "usable": bool(engine_candidates.get("usable")),
+        "launchReady": bool(preferred.get("launchReady")),
         "preferredPython": preferred.get("python"),
         "preferredCommand": command.get("command") or command.get("path"),
     }
@@ -1063,6 +1263,8 @@ def runtime_launch_plan(model: str, runtime_candidates: dict[str, Any] | None = 
         "sglang": _runtime_discovery_summary(runtime_candidates, "sglang"),
     }
     vllm_command = runtime_discovery["vllm"].get("preferredCommand") or "vllm"
+    vllm_env_prefix = "VLLM_PLUGINS='' " if apple_silicon else ""
+    vllm_memory_args = " --gpu-memory-utilization 0.5" if apple_silicon else ""
     sglang_python = runtime_discovery["sglang"].get("preferredPython") or "python"
     return {
         "model": model,
@@ -1080,6 +1282,7 @@ def runtime_launch_plan(model: str, runtime_candidates: dict[str, Any] | None = 
             "PIQ_SGLANG_METRICS_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['sglang']}/metrics",
             "PIQ_TENSORRT_LLM_METRICS_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}/prometheus/metrics",
             "PIQ_TENSORRT_LLM_JSON_METRICS_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}/metrics",
+            "PIQ_TENSORRT_LLM_PERF_METRICS_URL": f"http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}/perf_metrics",
         },
         "runtimeDiscovery": runtime_discovery,
         "telemetryModel": {
@@ -1088,13 +1291,14 @@ def runtime_launch_plan(model: str, runtime_candidates: dict[str, Any] | None = 
                 "and timestamps first byte, first output token/content, each chunk/token row, and completion on the measuring client."
             ),
             "kafkaBoundary": (
-                "Kafka is a post-capture ingestion/export boundary for already timestamped serving events; "
-                "do not place Kafka between the producer and serving engine when measuring TTFT/TPOT."
+                "The stable SDK writes post-capture JSONL events; the optional Kafka exporter is experimental. "
+                "Do not place any broker between the producer and serving engine when measuring TTFT/TPOT."
             ),
-            "eventLog": "PIQ_SERVING_EVENT_LOG writes Kafka-ready JSONL events after capture.",
+            "eventLog": "PIQ_SERVING_EVENT_LOG writes JSONL events after capture.",
             "requestSurfaces": [
                 "serving_request_samples",
                 "serving_token_timeline",
+                "serving_metric_snapshots",
                 "serving_telemetry_coverage",
             ],
             "strictTelemetry": [
@@ -1155,8 +1359,9 @@ def runtime_launch_plan(model: str, runtime_candidates: dict[str, Any] | None = 
                     "Follow the vLLM CPU/GPU install path for this host, then run the serve command below.",
                 ],
                 "serve": (
-                    f"{shlex.quote(str(vllm_command))} serve {quoted_model} --host 127.0.0.1 "
-                    f"--port {ENGINE_DEFAULT_PORT['vllm']} --served-model-name {quoted_model}"
+                    f"{vllm_env_prefix}{shlex.quote(str(vllm_command))} serve {quoted_model} --host 127.0.0.1 "
+                    f"--port {ENGINE_DEFAULT_PORT['vllm']} --served-model-name {quoted_model} "
+                    f"--max-model-len 1024{vllm_memory_args}"
                 ),
                 "verify": f"curl -fsS http://127.0.0.1:{ENGINE_DEFAULT_PORT['vllm']}/v1/models",
             },
@@ -1194,8 +1399,10 @@ def runtime_launch_plan(model: str, runtime_candidates: dict[str, Any] | None = 
                     "Install TensorRT-LLM for this NVIDIA Linux host, then run the serve command below.",
                 ],
                 "serve": (
-                    f"trtllm-serve {quoted_model} --host 127.0.0.1 "
-                    f"--port {ENGINE_DEFAULT_PORT['tensorrt-llm']}"
+                    f"trtllm-serve {quoted_model} --backend tensorrt "
+                    f"--revision \"${{PIQ_SERVING_MODEL_REVISION:?set immutable model revision}}\" "
+                    f"--host 127.0.0.1 --port {ENGINE_DEFAULT_PORT['tensorrt-llm']} "
+                    "--config ops/serving-producers/tensorrt-llm-config.yaml"
                 ),
                 "verify": f"curl -fsS http://127.0.0.1:{ENGINE_DEFAULT_PORT['tensorrt-llm']}/v1/models",
             },
@@ -1203,19 +1410,33 @@ def runtime_launch_plan(model: str, runtime_candidates: dict[str, Any] | None = 
     }
 
 
-def runtime_preflight(engines: list[dict[str, Any]], missing_urls: list[str], model: str | None = None) -> dict[str, Any]:
+def runtime_preflight(
+    engines: list[dict[str, Any]],
+    missing_urls: list[str],
+    model: str | None = None,
+    *,
+    inspect_local_runtime: bool = True,
+) -> dict[str, Any]:
     endpoint_results = [endpoint_probe(engine, model=model) for engine in engines]
-    runtime_candidates = local_runtime_discovery()
-    local_runtime = {
-        "commandProbeTimeoutSeconds": command_probe_timeout_seconds(),
-        "vllmCommand": command_probe("vllm", "--version"),
-        "vllmModule": module_probe("vllm"),
-        "vllmExtension": vllm_extension_probe(),
-        "sglangModule": module_probe("sglang"),
-        "runtimeCandidates": runtime_candidates,
-        "tensorrtLlmServeCommand": command_probe("trtllm-serve", "--help"),
-        "nvidiaSmiCommand": command_probe("nvidia-smi"),
-    }
+    if inspect_local_runtime:
+        runtime_candidates = local_runtime_discovery()
+        local_runtime = {
+            "commandProbeTimeoutSeconds": command_probe_timeout_seconds(),
+            "vllmCommand": command_probe("vllm", "--version"),
+            "vllmModule": module_probe("vllm"),
+            "vllmExtension": vllm_extension_probe(),
+            "sglangModule": module_probe("sglang"),
+            "runtimeCandidates": runtime_candidates,
+            "tensorrtLlmServeCommand": command_probe("trtllm-serve", "--help"),
+            "nvidiaSmiCommand": command_probe("nvidia-smi"),
+        }
+    else:
+        runtime_candidates = {}
+        local_runtime = {
+            "inspectionSkipped": True,
+            "reason": "endpoint-only preflight",
+            "runtimeCandidates": runtime_candidates,
+        }
     local_runtime["servingRuntimeImportStatus"] = serving_runtime_import_status(local_runtime)
     return {
         "host": {
@@ -1259,7 +1480,7 @@ def _dashboard_rows(body: dict[str, Any], name: str) -> list[Any]:
 def query_dashboard(base_url: str, token: str | None = None, campaign_ids: list[str] | None = None) -> dict[str, Any]:
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/api/store/queries",
-        data=json.dumps({"queries": list(QUERY_NAMES)}).encode("utf-8"),
+        data=json.dumps({"queries": list(QUERY_REQUEST_NAMES)}).encode("utf-8"),
         headers={
             "content-type": "application/json",
             **({"authorization": f"Bearer {token}"} if token else {}),
@@ -1268,7 +1489,7 @@ def query_dashboard(base_url: str, token: str | None = None, campaign_ids: list[
     )
     with urllib.request.urlopen(request, timeout=60) as response:
         body = json.loads(response.read().decode("utf-8"))
-        rows = {name: _dashboard_rows(body, name) for name in QUERY_NAMES if name in body}
+        rows = {name: _dashboard_rows(body, name) for name in QUERY_REQUEST_NAMES if name in body}
         surface_campaign_ids = {
             name: sorted({
                 row[index]
@@ -1287,7 +1508,7 @@ def query_dashboard(base_url: str, token: str | None = None, campaign_ids: list[
         } if submitted_campaign_ids else {}
         return {
             "storeProvider": response.headers.get("x-piq-store-provider"),
-            "rowCounts": {name: body[name]["rowCount"] for name in QUERY_NAMES if name in body},
+            "rowCounts": {name: body[name]["rowCount"] for name in QUERY_REQUEST_NAMES if name in body},
             "rows": rows,
             "campaignIds": surface_campaign_ids.get("campaign_provenance", []),
             "surfaceCampaignIds": surface_campaign_ids,
@@ -1440,6 +1661,17 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _required_native_fields(engine: str) -> tuple[str, ...]:
+    return (*REQUIRED_NATIVE_SAMPLE_FIELDS, *REQUIRED_NATIVE_CACHE_FIELDS.get(engine, ()))
+
+
+def _native_fields_complete(engine: str, row: dict[str, Any]) -> bool:
+    return all(_is_number(row.get(key)) for key in _required_native_fields(engine)) and (
+        engine != "tensorrt-llm"
+        or isinstance(row.get("trtllmPerfRequestIdSha256"), str) and bool(row.get("trtllmPerfRequestIdSha256"))
+    )
+
+
 def _is_positive_number(value: Any) -> bool:
     return _is_number(value) and value > 0
 
@@ -1518,17 +1750,6 @@ def _validate_measurement_row(
     if row.get("promptTokenDetailsRequired") is True and isinstance(success_count, int):
         if row.get("promptTokenIdsAvailableCount") != success_count:
             errors.append(f"{engine} measurement promptTokenIdsAvailableCount must equal successCount when prompt token details are required.")
-    if (
-        (
-            row.get("nativeTelemetryRequired") is True
-            or row.get("hardwareTelemetryRequired") is True
-            or row.get("tokenDetailsRequired") is True
-            or row.get("promptTokenDetailsRequired") is True
-        )
-        and row.get("metricCompleteness") != 1
-    ):
-        errors.append(f"{engine} measurement metricCompleteness must be 1 when required telemetry is missing-sensitive.")
-
     for key in ["operatingPoint", "latestCapturedAtUtc", "solRigor", "tags"]:
         if not isinstance(row.get(key), str) or not row.get(key):
             errors.append(f"{engine} measurement {key} is required.")
@@ -1540,8 +1761,8 @@ def _validate_measurement_row(
 
 def _coverage_status(proven: int, expected: int) -> str:
     if expected <= 0:
-        return "missing"
-    if proven == expected:
+        return "not_configured"
+    if proven >= expected:
         return "proven"
     if proven > 0:
         return "partial"
@@ -1558,18 +1779,36 @@ def _coverage_item(status: str, proven: int, expected: int, missing: list[str] |
 
 
 def _engine_runtime_provenance_present(sample: dict[str, Any]) -> bool:
-    keys = [
+    required_string_keys = [
         "engineVersion",
+        "runtimeBackend",
         "modelRevision",
+        "imageTag",
         "imageDigest",
         "serverArgsSha256",
-        "processId",
         "containerId",
-        "podName",
-        "nodeName",
         "hostName",
     ]
-    return any(sample.get(key) not in (None, "", []) for key in keys)
+    return all(isinstance(sample.get(key), str) and bool(sample.get(key)) for key in required_string_keys)
+
+
+def _operator_runtime_configuration_present(raw_artifact: dict[str, Any]) -> bool:
+    runtime = raw_artifact.get("runtimeConfiguration")
+    if not isinstance(runtime, dict):
+        return False
+    required_strings = [
+        "frameworkVersion",
+        "runtimeBackend",
+        "modelRevision",
+        "imageTag",
+        "imageDigest",
+        "containerId",
+        "hostName",
+    ]
+    return (
+        all(isinstance(runtime.get(key), str) and bool(runtime.get(key)) for key in required_strings)
+        and runtime.get("serverArgs") not in (None, "", [])
+    )
 
 
 def _telemetry_coverage_from_proof(
@@ -1599,8 +1838,11 @@ def _telemetry_coverage_from_proof(
         "promptTokenIds": {
             "description": "Tokenizer-exact prompt/input token IDs with prompt token provenance.",
         },
-        "outputTokenIdsLogprobs": {
-            "description": "Output token IDs, logprobs, top-logprobs, and token-detail provenance.",
+        "outputTokenIds": {
+            "description": "Output token IDs and token provenance from runtime logprobs or tokenizer fallback.",
+        },
+        "outputTokenLogprobs": {
+            "description": "Output token logprobs, top-logprobs, and token-logprob provenance.",
         },
         "operatorFullArtifacts": {
             "description": "Operator-full raw request/response, token, native, hardware, and runtime artifacts.",
@@ -1608,11 +1850,14 @@ def _telemetry_coverage_from_proof(
         "rawMetricSnapshots": {
             "description": "Operator-full before/after native and DCGM metric snapshots for all configured telemetry endpoints.",
         },
+        "metricSnapshots": {
+            "description": "Queryable per-series native and DCGM before/after metric snapshots with label and raw-exposition provenance hashes.",
+        },
         "runtimeProvenance": {
             "description": "Runtime version/revision/image/process/container/pod/node/host/server-arg provenance when configured.",
         },
         "kafkaEventLog": {
-            "description": "Post-capture Kafka-ready event log with request-sample and token-timeline events.",
+            "description": "Post-capture JSONL event log with request-sample and token-timeline events.",
         },
     }
     coverage = {
@@ -1620,6 +1865,9 @@ def _telemetry_coverage_from_proof(
         "model": proof.get("model"),
         "expectedEngines": expected_engines,
         "categories": categories,
+        "legacyCategoryAliases": {
+            "outputTokenIdsLogprobs": ["outputTokenIds", "outputTokenLogprobs"],
+        },
         "engines": {},
         "categorySummary": {},
         "allProven": False,
@@ -1724,14 +1972,14 @@ def _telemetry_coverage_from_proof(
             if isinstance(sample, dict)
             and sample.get("nativeTelemetryAvailable") is True
             and isinstance(sample.get("requestId"), str)
-            and all(_is_number(sample.get(key)) for key in REQUIRED_NATIVE_SAMPLE_FIELDS)
+            and _native_fields_complete(engine, sample)
         }
         native_row_request_ids = {
             row.get("requestId") for row in native_telemetry
             if isinstance(row, dict)
             and row.get("available") is True
             and isinstance(row.get("requestId"), str)
-            and all(_is_number(row.get(key)) for key in REQUIRED_NATIVE_SAMPLE_FIELDS)
+            and _native_fields_complete(engine, row)
         }
         native_proven = sum(
             1 for request_id in sample_request_ids
@@ -1754,13 +2002,15 @@ def _telemetry_coverage_from_proof(
             and sample.get("hardwareTelemetryAvailable") is True
             and isinstance(sample.get("requestId"), str)
             and all(_is_number(sample.get(key)) for key in REQUIRED_HARDWARE_SAMPLE_COUNTERS)
+            and isinstance(sample.get("hardwareRawMetricNamesSha256"), str)
         }
         hardware_row_request_ids = {
             row.get("requestId") for row in hardware_telemetry
             if isinstance(row, dict)
             and row.get("available") is True
             and isinstance(row.get("requestId"), str)
-            and all(_is_number(row.get(key)) for key in ["powerWatts", "powerWattsPerGpu", "gpuUtilizationPct", "memoryCopyUtilizationPct", "gpuTemperatureC", "smClockMHz", "memoryClockMHz", "fbUsedMiB", "fbFreeMiB", "energyJoules"])
+            and all(_is_number(row.get(key)) for key in REQUIRED_HARDWARE_ARTIFACT_COUNTERS)
+            and isinstance(row.get("hardwareRawMetricNamesSha256"), str)
         }
         hardware_required = first_measurement.get("hardwareTelemetryRequired") is True
         hardware_ok_count = sum(
@@ -1807,15 +2057,15 @@ def _telemetry_coverage_from_proof(
             ],
         )
 
-        output_sample_proven = sum(
+        output_id_sample_proven = sum(
             1 for sample in samples
             if isinstance(sample, dict)
             and sample.get("tokenDetailsAvailable") is True
             and sample.get("tokenIdsAvailable") is True
-            and sample.get("logprobsAvailable") is True
             and isinstance(sample.get("tokenIdSource"), str)
         )
-        valid_output_row_request_ids = set()
+        valid_output_id_row_request_ids = set()
+        valid_output_logprob_row_request_ids = set()
         for request_id in sample_request_ids:
             rows_for_request = [
                 row for row in output_rows
@@ -1824,40 +2074,62 @@ def _telemetry_coverage_from_proof(
             if rows_for_request and all(
                 isinstance(row.get("tokenId"), int)
                 and isinstance(row.get("tokenIdSource"), str)
-                and _is_number(row.get("tokenLogprob"))
                 for row in rows_for_request
             ):
-                valid_output_row_request_ids.add(request_id)
-        output_rows_proven = len(valid_output_row_request_ids)
+                valid_output_id_row_request_ids.add(request_id)
+            if rows_for_request and all(_is_number(row.get("tokenLogprob")) for row in rows_for_request):
+                valid_output_logprob_row_request_ids.add(request_id)
+        output_id_rows_proven = len(valid_output_id_row_request_ids)
         token_requested_unsupported = (
             token_details_capability.get("requested") is True
             and token_details_capability.get("supported") is False
         )
         token_required = first_measurement.get("tokenDetailsRequired") is True or token_requested_unsupported
-        output_ok = output_sample_proven == expected_samples and output_rows_proven == expected_samples
-        output_expected = expected_samples if token_required else 0
-        output_proven = min(output_sample_proven, output_rows_proven)
-        output_missing = []
-        if not output_ok:
+        output_id_proven = min(output_id_sample_proven, output_id_rows_proven)
+        output_id_expected = expected_samples if token_required or output_id_proven > 0 else 0
+        output_id_ok = output_id_expected > 0 and output_id_proven == expected_samples
+        engine_coverage["outputTokenIds"] = _coverage_item(
+            "proven" if output_id_ok else _coverage_status(output_id_proven, output_id_expected),
+            output_id_proven,
+            output_id_expected,
+            [] if output_id_ok or output_id_expected == 0 else [
+                "output token IDs or output-token timeline rows are missing"
+                + (" even though output token details are required" if token_required else "")
+            ],
+        )
+
+        output_logprob_sample_proven = sum(
+            1 for sample in samples
+            if isinstance(sample, dict)
+            and sample.get("tokenDetailsAvailable") is True
+            and sample.get("logprobsAvailable") is True
+        )
+        output_logprob_rows_proven = len(valid_output_logprob_row_request_ids)
+        output_logprob_proven = min(output_logprob_sample_proven, output_logprob_rows_proven)
+        output_logprob_expected = expected_samples if token_required or output_logprob_proven > 0 else 0
+        output_logprob_ok = output_logprob_expected > 0 and output_logprob_proven == expected_samples
+        output_logprob_missing = []
+        if not output_logprob_ok and output_logprob_expected > 0:
             if token_requested_unsupported:
-                reason = token_details_capability.get("reason") or "runtime-token-details-unsupported"
-                output_missing.append(f"output token IDs/logprobs were requested but unsupported by runtime: {reason}")
+                reason = token_details_capability.get("reason") or "runtime-token-logprobs-unsupported"
+                output_logprob_missing.append(f"output token logprobs were requested but unsupported by runtime: {reason}")
             else:
-                output_missing.append(
-                    "output token IDs/logprobs or token timeline details are missing"
+                output_logprob_missing.append(
+                    "output token logprobs or token-logprob timeline rows are missing"
                     + (" even though output token details are required" if token_required else "")
                 )
-        engine_coverage["outputTokenIdsLogprobs"] = _coverage_item(
-            "proven" if output_ok else _coverage_status(output_proven, output_expected),
-            output_proven,
-            output_expected,
-            [] if output_ok else output_missing,
+        engine_coverage["outputTokenLogprobs"] = _coverage_item(
+            "proven" if output_logprob_ok else _coverage_status(output_logprob_proven, output_logprob_expected),
+            output_logprob_proven,
+            output_logprob_expected,
+            [] if output_logprob_ok else output_logprob_missing,
         )
 
         raw_path = _resolve_proof_member_path(capture_policy.get("rawArtifactPath"), proof_dir)
         raw_present = capture_policy.get("mode") == "operator-full" and bool(raw_path) and os.path.exists(raw_path or "")
         raw_artifact = _read_json_object(raw_path or "") if raw_present else {}
         raw_captures = raw_artifact.get("captures") if isinstance(raw_artifact.get("captures"), list) else []
+        operator_runtime_present = raw_present and _operator_runtime_configuration_present(raw_artifact)
         engine_coverage["operatorFullArtifacts"] = _coverage_item(
             "proven" if raw_present else "missing",
             1 if raw_present else 0,
@@ -1881,15 +2153,17 @@ def _telemetry_coverage_from_proof(
             )
             return before_has_metrics and after_has_metrics
 
+        native_snapshot_required = native_required or native_proven > 0
+        hardware_snapshot_required = hardware_required or hardware_ok_count > 0
         raw_metric_request_ids = {
             capture.get("requestId") for capture in raw_captures
             if isinstance(capture, dict)
             and isinstance(capture.get("requestId"), str)
-            and (not native_required or raw_snapshot_available(capture, "nativeMetricsRaw"))
-            and (not hardware_required or raw_snapshot_available(capture, "hardwareMetricsRaw"))
+            and (not native_snapshot_required or raw_snapshot_available(capture, "nativeMetricsRaw"))
+            and (not hardware_snapshot_required or raw_snapshot_available(capture, "hardwareMetricsRaw"))
         }
         raw_metric_proven = sum(1 for request_id in sample_request_ids if request_id in raw_metric_request_ids)
-        raw_metric_expected = expected_samples if native_required or hardware_required else 0
+        raw_metric_expected = expected_samples if native_snapshot_required or hardware_snapshot_required else 0
         engine_coverage["rawMetricSnapshots"] = _coverage_item(
             _coverage_status(raw_metric_proven, raw_metric_expected),
             raw_metric_proven,
@@ -1897,30 +2171,75 @@ def _telemetry_coverage_from_proof(
             [] if raw_metric_expected == 0 or raw_metric_proven == raw_metric_expected else ["operator-full raw native/DCGM metric snapshots are missing"],
         )
 
+        metric_snapshot_rows = [
+            row for row in measurements
+            if isinstance(row, dict) and row.get("surface") == "serving_metric_snapshot"
+        ]
+        metric_snapshot_request_ids = {
+            row.get("requestId") for row in metric_snapshot_rows
+            if isinstance(row.get("requestId"), str)
+            and isinstance(row.get("metricName"), str)
+            and _is_number(row.get("metricValue"))
+            and isinstance(row.get("metricLabelsSha256"), str)
+            and row.get("snapshotPhase") in {"before", "after"}
+        }
+        metric_snapshot_proven = sum(
+            1 for request_id in sample_request_ids
+            if request_id in metric_snapshot_request_ids
+        )
+        metric_snapshot_expected = expected_samples if native_snapshot_required or hardware_snapshot_required else 0
+        metric_snapshot_dashboard_rows = submitted_dashboard_row_count("serving_metric_snapshots", campaign_id)
+        metric_snapshot_missing = []
+        if metric_snapshot_expected and metric_snapshot_proven != metric_snapshot_expected:
+            metric_snapshot_missing.append("per-request native/DCGM metric snapshot measurements are missing")
+        if metric_snapshot_expected and metric_snapshot_dashboard_rows <= 0:
+            metric_snapshot_missing.append("dashboard serving_metric_snapshots rows are missing for this engine campaign")
+        engine_coverage["metricSnapshots"] = _coverage_item(
+            _coverage_status(
+                metric_snapshot_proven + int(metric_snapshot_dashboard_rows > 0),
+                metric_snapshot_expected + (1 if metric_snapshot_expected else 0),
+            ),
+            metric_snapshot_proven + int(metric_snapshot_dashboard_rows > 0),
+            metric_snapshot_expected + (1 if metric_snapshot_expected else 0),
+            metric_snapshot_missing,
+        )
+
         runtime_proven = sum(
             1 for sample in samples
             if isinstance(sample, dict) and _engine_runtime_provenance_present(sample)
         )
+        runtime_proven_with_operator = runtime_proven + int(operator_runtime_present)
+        runtime_expected_with_operator = expected_samples + 1
         engine_coverage["runtimeProvenance"] = _coverage_item(
-            _coverage_status(runtime_proven, expected_samples),
-            runtime_proven,
-            expected_samples,
-            [] if runtime_proven == expected_samples else ["runtime version/image/process/container/node provenance is absent or partial"],
+            _coverage_status(runtime_proven_with_operator, runtime_expected_with_operator),
+            runtime_proven_with_operator,
+            runtime_expected_with_operator,
+            [] if runtime_proven_with_operator == runtime_expected_with_operator else [
+                "complete runtime version/model/image/argv/container/host/backend provenance is absent or partial"
+            ],
         )
 
         engine_event_counts = event_counts_by_engine.get(engine, {})
         request_sample_events = engine_event_counts.get("serving.measurement.serving_request_sample", 0)
         token_timeline_events = engine_event_counts.get("serving.measurement.serving_token_timeline", 0)
-        event_log_proven = int(request_sample_events >= expected_samples) + int(token_timeline_events >= expected_samples)
+        metric_snapshot_events = engine_event_counts.get("serving.measurement.serving_metric_snapshot", 0)
+        metric_snapshot_event_expected = int(metric_snapshot_expected > 0)
+        event_log_proven = (
+            int(request_sample_events >= expected_samples)
+            + int(token_timeline_events >= expected_samples)
+            + (int(metric_snapshot_events >= expected_samples) if metric_snapshot_event_expected else 0)
+        )
         event_log_missing = []
         if request_sample_events < expected_samples:
-            event_log_missing.append("Kafka-ready event log is missing request-sample events for this engine")
+            event_log_missing.append("Post-capture event log is missing request-sample events for this engine")
         if token_timeline_events < expected_samples:
-            event_log_missing.append("Kafka-ready event log is missing token-timeline events for this engine")
+            event_log_missing.append("Post-capture event log is missing token-timeline events for this engine")
+        if metric_snapshot_expected and metric_snapshot_events < expected_samples:
+            event_log_missing.append("Post-capture event log is missing metric-snapshot events for this engine")
         engine_coverage["kafkaEventLog"] = _coverage_item(
-            _coverage_status(event_log_proven, 2),
+            _coverage_status(event_log_proven, 2 + metric_snapshot_event_expected),
             event_log_proven,
-            2,
+            2 + metric_snapshot_event_expected,
             event_log_missing,
         )
         coverage["engines"][engine] = engine_coverage
@@ -1937,14 +2256,14 @@ def _telemetry_coverage_from_proof(
         ]
         expected_count = len(expected_items)
         proven = sum(1 for item in expected_items if item.get("status") == "proven")
-        status = "proven" if expected_count == 0 or proven == expected_count else "partial" if proven else "missing"
+        status = _coverage_status(proven, expected_count)
         coverage["categorySummary"][category] = {
             "status": status,
             "provenEngines": proven,
             "expectedEngines": expected_count,
         }
     coverage["allProven"] = all(
-        summary.get("status") == "proven"
+        summary.get("status") in ("proven", "not_configured")
         for summary in coverage["categorySummary"].values()
     ) if coverage["categorySummary"] else False
     return coverage
@@ -2474,16 +2793,20 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                                 continue
                             if sample.get("nativeTelemetryAvailable") is not True:
                                 errors.append(f"{engine} samples[{index}].nativeTelemetryAvailable must be true when native telemetry is required.")
-                            for key in REQUIRED_NATIVE_SAMPLE_FIELDS:
+                            for key in _required_native_fields(engine):
                                 if not _is_number(sample.get(key)):
                                     errors.append(f"{engine} samples[{index}].{key} must be numeric when native telemetry is required.")
+                            if engine == "tensorrt-llm" and not isinstance(sample.get("trtllmPerfRequestIdSha256"), str):
+                                errors.append(f"{engine} samples[{index}].trtllmPerfRequestIdSha256 must be present when native telemetry is required.")
                         for index, telemetry in enumerate(native_telemetry if isinstance(native_telemetry, list) else []):
                             if isinstance(telemetry, dict) and telemetry.get("available") is not True:
                                 errors.append(f"{engine} nativeTelemetry[{index}].available must be true when native telemetry is required.")
                             if isinstance(telemetry, dict):
-                                for key in REQUIRED_NATIVE_SAMPLE_FIELDS:
+                                for key in _required_native_fields(engine):
                                     if not _is_number(telemetry.get(key)):
                                         errors.append(f"{engine} nativeTelemetry[{index}].{key} must be numeric when native telemetry is required.")
+                                if engine == "tensorrt-llm" and not isinstance(telemetry.get("trtllmPerfRequestIdSha256"), str):
+                                    errors.append(f"{engine} nativeTelemetry[{index}].trtllmPerfRequestIdSha256 must be present when native telemetry is required.")
                     if first_measurement.get("hardwareTelemetryRequired") is True:
                         for index, sample in enumerate(samples):
                             if isinstance(sample, dict) and sample.get("hardwareTelemetryAvailable") is not True:
@@ -2613,7 +2936,7 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
             errors.append("dashboard surfaceCampaignIds is required.")
         else:
             required_campaign_ids = set(campaign_ids)
-            for name in CAMPAIGN_ID_QUERY_COLUMN:
+            for name in REQUIRED_CAMPAIGN_QUERY_NAMES:
                 ids = surface_campaign_ids.get(name)
                 if not isinstance(ids, list) or not required_campaign_ids.issubset(set(ids)):
                     errors.append(f"dashboard {name} is missing submitted campaign IDs.")
@@ -2622,7 +2945,8 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
             errors.append("dashboard submittedCampaignRows is required.")
         else:
             required_campaign_ids = set(campaign_ids)
-            for name, index in CAMPAIGN_ID_QUERY_COLUMN.items():
+            for name in REQUIRED_CAMPAIGN_QUERY_NAMES:
+                index = CAMPAIGN_ID_QUERY_COLUMN[name]
                 rows = submitted_campaign_rows.get(name)
                 if not isinstance(rows, list):
                     errors.append(f"dashboard {name} submittedCampaignRows must be a list.")
@@ -2640,7 +2964,7 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                 continue
             evidence_dashboard = evidence.get("dashboard") if isinstance(evidence.get("dashboard"), dict) else {}
             evidence_surfaces = evidence_dashboard.get("surfaces") if isinstance(evidence_dashboard.get("surfaces"), dict) else {}
-            for name in CAMPAIGN_ID_QUERY_COLUMN:
+            for name in REQUIRED_CAMPAIGN_QUERY_NAMES:
                 surface = evidence_surfaces.get(name) if isinstance(evidence_surfaces.get(name), dict) else {}
                 rows = surface.get("submittedRows")
                 if not isinstance(rows, list) or not rows:
@@ -2668,16 +2992,6 @@ def verify_proof_summary(proof_path: str, *, require_all_engines: bool = True) -
                     f"{engine} event log must include at least {expected_timeline_events} "
                     "serving.measurement.serving_token_timeline events."
                 )
-
-    kafka_publication = proof.get("kafkaPublication")
-    if isinstance(kafka_publication, dict):
-        if kafka_publication.get("schemaVersion") != SERVING_KAFKA_PUBLICATION_SCHEMA_VERSION:
-            errors.append(f"kafkaPublication schemaVersion must be {SERVING_KAFKA_PUBLICATION_SCHEMA_VERSION}.")
-        published_count = kafka_publication.get("publishedCount")
-        if not isinstance(published_count, int) or published_count < 0:
-            errors.append("kafkaPublication publishedCount must be a non-negative integer.")
-        elif event_counts and published_count != sum(event_counts.values()):
-            errors.append("kafkaPublication publishedCount must equal event log event count.")
 
     telemetry_coverage = _telemetry_coverage_from_proof(
         proof=proof,
@@ -2964,8 +3278,9 @@ def strict_telemetry_gate(verification: dict[str, Any]) -> dict[str, Any]:
     required_engine_count = len(required_engines) if isinstance(required_engines, list) else 0
     missing = {
         category
-        for category, item in sorted(category_summary.items())
-        if isinstance(item, dict) and item.get("status") != "proven"
+        for category in STRICT_PRODUCT_TELEMETRY_CATEGORIES
+        for item in [category_summary.get(category)]
+        if not isinstance(item, dict) or item.get("status") != "proven"
     }
     not_configured = set()
     for category in STRICT_PRODUCT_TELEMETRY_CATEGORIES:
@@ -3196,67 +3511,6 @@ def write_serving_event_log(summary: dict[str, Any], event_log_path: str, *, top
     return event_log_path
 
 
-KafkaProducerFactory = Callable[..., Any]
-
-
-def publish_serving_event_log(
-    event_log_path: str,
-    *,
-    bootstrap_servers: str,
-    topic: str | None = None,
-    client_id: str = "performance-iq-serving-producer",
-    producer_factory: KafkaProducerFactory | None = None,
-) -> dict[str, Any]:
-    if not bootstrap_servers:
-        raise ValueError("bootstrap_servers is required to publish serving events to Kafka.")
-    events = load_serving_event_log(event_log_path)
-    if not events:
-        raise ValueError(f"event log contains no publishable events: {event_log_path}")
-    if producer_factory is None:
-        try:
-            from kafka import KafkaProducer  # type: ignore
-        except ImportError as exc:
-            raise RuntimeError(
-                "Kafka publication requires kafka-python. Install with `pip install './python[kafka]'` "
-                "or omit --publish-kafka and use the JSONL event log as the durable handoff."
-            ) from exc
-        producer_factory = KafkaProducer
-    producer = producer_factory(
-        bootstrap_servers=bootstrap_servers,
-        client_id=client_id,
-    )
-    event_counts: dict[str, int] = {}
-    topic_counts: dict[str, int] = {}
-    try:
-        for event in events:
-            event_topic = topic or str(event.get("topic") or SERVING_EVENT_DEFAULT_TOPIC)
-            event_type = str(event.get("eventType") or "unknown")
-            event_counts[event_type] = event_counts.get(event_type, 0) + 1
-            topic_counts[event_topic] = topic_counts.get(event_topic, 0) + 1
-            future = producer.send(
-                event_topic,
-                key=str(event.get("partitionKey") or "").encode("utf-8"),
-                value=_stable_json(event).encode("utf-8"),
-            )
-            if hasattr(future, "get"):
-                future.get(timeout=30)
-        if hasattr(producer, "flush"):
-            producer.flush(timeout=30)
-    finally:
-        if hasattr(producer, "close"):
-            producer.close(timeout=30)
-    return {
-        "schemaVersion": SERVING_KAFKA_PUBLICATION_SCHEMA_VERSION,
-        "eventLogPath": event_log_path,
-        "bootstrapServers": bootstrap_servers,
-        "clientId": client_id,
-        "publishedAtUtc": _utc_now_iso(),
-        "publishedCount": len(events),
-        "eventCounts": event_counts,
-        "topicCounts": topic_counts,
-    }
-
-
 def run_serving_smoke(
     *,
     engines: list[dict[str, Any]],
@@ -3296,7 +3550,7 @@ def run_serving_smoke(
             engine_for_run["captureTokenDetails"] = False
             capability_gaps.append({
                 "engine": engine_id,
-                "category": "outputTokenIdsLogprobs",
+                "category": "outputTokenLogprobs",
                 **token_detail_policy,
             })
         engine_top_logprobs = engine.get("topLogprobs", top_logprobs)
@@ -3365,6 +3619,7 @@ def _fake_dashboard(summary: dict[str, Any]) -> dict[str, Any]:
     })
     request_sample_count = 0
     token_timeline_count = 0
+    metric_snapshot_count = 0
     telemetry_coverage_rows = []
     run_detail_rows = []
     for item in submissions:
@@ -3372,6 +3627,7 @@ def _fake_dashboard(summary: dict[str, Any]) -> dict[str, Any]:
         measurements = artifact.get("measurements") if isinstance(artifact.get("measurements"), list) else []
         request_sample_count += sum(1 for row in measurements if isinstance(row, dict) and row.get("surface") == "serving_request_sample")
         token_timeline_count += sum(1 for row in measurements if isinstance(row, dict) and row.get("surface") == "serving_token_timeline")
+        metric_snapshot_count += sum(1 for row in measurements if isinstance(row, dict) and row.get("surface") == "serving_metric_snapshot")
         telemetry_coverage_rows.extend([
             [
                 item.get("campaignId"),
@@ -3408,6 +3664,7 @@ def _fake_dashboard(summary: dict[str, Any]) -> dict[str, Any]:
             "run_details": engine_count,
             "serving_request_samples": request_sample_count,
             "serving_token_timeline": token_timeline_count,
+            "serving_metric_snapshots": metric_snapshot_count,
             "serving_telemetry_coverage": len(telemetry_coverage_rows),
         },
         "rows": {
@@ -3423,6 +3680,7 @@ def _fake_dashboard(summary: dict[str, Any]) -> dict[str, Any]:
             "run_details": run_detail_rows,
             "serving_request_samples": campaign_rows,
             "serving_token_timeline": campaign_rows,
+            "serving_metric_snapshots": campaign_rows,
             "serving_telemetry_coverage": telemetry_coverage_rows,
         },
         "campaignIds": campaign_ids,
@@ -3431,6 +3689,7 @@ def _fake_dashboard(summary: dict[str, Any]) -> dict[str, Any]:
             "run_details": campaign_ids,
             "serving_request_samples": campaign_ids,
             "serving_token_timeline": campaign_ids,
+            "serving_metric_snapshots": campaign_ids,
             "serving_telemetry_coverage": campaign_ids if telemetry_coverage_rows else [],
         },
         "submittedCampaignRows": {
@@ -3438,6 +3697,7 @@ def _fake_dashboard(summary: dict[str, Any]) -> dict[str, Any]:
             "run_details": campaign_rows,
             "serving_request_samples": campaign_rows,
             "serving_token_timeline": campaign_rows,
+            "serving_metric_snapshots": campaign_rows,
             "serving_telemetry_coverage": telemetry_coverage_rows,
         },
         "runtimeFrameworks": runtime_frameworks,
@@ -3479,12 +3739,14 @@ def _start_fake_engine_servers(model: str) -> tuple[list[dict[str, Any]], list[d
             "baseUrl": base_url,
             "metricsUrl": f"{base_url}/prometheus/metrics" if engine_id == "tensorrt-llm" else f"{base_url}/metrics",
             **({"nativeJsonMetricsUrl": f"{base_url}/metrics"} if engine_id == "tensorrt-llm" else {}),
+            **({"nativePerfMetricsUrl": f"{base_url}/perf_metrics"} if engine_id == "tensorrt-llm" else {}),
             "hardwareMetricsUrl": f"{base_url}/prometheus/metrics" if engine_id == "tensorrt-llm" else f"{base_url}/metrics",
             "requireNativeTelemetry": True,
             "requireHardwareTelemetry": True,
             "promptTokenIds": [11, 22, 33, 44],
             "tokenizerModel": model,
             "frameworkVersion": f"{engine_id}-fake-1.0",
+            "runtimeBackend": "fake-full-telemetry",
             "modelRevision": "fake-model-revision",
             "imageDigest": f"sha256:{str(index) * 64}",
             "imageTag": f"performance-iq/{engine_id}:fake",
@@ -3520,7 +3782,12 @@ def run_fake_full_telemetry_smoke(args: argparse.Namespace) -> dict[str, Any]:
             receipt_log,
             listen_host=args.receipt_proxy_host,
         )
-        preflight = runtime_preflight(proxied_engines, [], model=args.model)
+        preflight = runtime_preflight(
+            proxied_engines,
+            [],
+            model=args.model,
+            inspect_local_runtime=False,
+        )
         if not preflight["ready"]:
             raise ValueError("fake full telemetry preflight failed: " + json.dumps(preflight, indent=2))
         summary = run_serving_smoke(
@@ -3550,7 +3817,7 @@ def run_fake_full_telemetry_smoke(args: argparse.Namespace) -> dict[str, Any]:
         summary["receiptLogPath"] = receipt_log
         summary["eventLogPath"] = event_log
         proof_path = write_proof_summary(summary, args.artifact_dir, summary_out=args.summary_out)
-        write_serving_event_log(summary, event_log, topic=args.kafka_topic)
+        write_serving_event_log(summary, event_log, topic=args.event_topic)
         verification = verify_proof_summary(proof_path)
         return {
             **summary,
@@ -3600,11 +3867,14 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--host-name", help="Global serving-engine host name; per-engine PIQ_<ENGINE>_HOST_NAME overrides it.")
     parser.add_argument("--run-suffix", default=_env("PIQ_SERVING_RUN_SUFFIX"))
     parser.add_argument("--summary-out", default=_env("PIQ_SERVING_SUMMARY_OUT"), help="Write the overall smoke proof summary to this JSON path.")
-    parser.add_argument("--event-log", default=_env("PIQ_SERVING_EVENT_LOG"), help="Write Kafka-ready post-capture serving telemetry events to this JSONL path.")
-    parser.add_argument("--kafka-topic", default=_env("PIQ_SERVING_KAFKA_TOPIC", SERVING_EVENT_DEFAULT_TOPIC), help="Topic name embedded in post-capture serving telemetry events.")
-    parser.add_argument("--publish-kafka", action="store_true", default=_env("PIQ_SERVING_PUBLISH_KAFKA", "false").lower() == "true", help="Publish post-capture serving telemetry events to Kafka after writing the JSONL event log.")
-    parser.add_argument("--kafka-bootstrap-servers", default=_env("PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS"), help="Kafka bootstrap servers for --publish-kafka; env PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS.")
-    parser.add_argument("--kafka-client-id", default=_env("PIQ_SERVING_KAFKA_CLIENT_ID", "performance-iq-serving-producer"), help="Kafka client ID for post-capture event publication.")
+    parser.add_argument("--event-log", default=_env("PIQ_SERVING_EVENT_LOG"), help="Write post-capture serving telemetry events to this JSONL path.")
+    parser.add_argument(
+        "--event-topic",
+        "--kafka-topic",
+        dest="event_topic",
+        default=_env("PIQ_SERVING_EVENT_TOPIC", _env("PIQ_SERVING_KAFKA_TOPIC", SERVING_EVENT_DEFAULT_TOPIC)),
+        help="Topic metadata embedded in post-capture event records. This command does not publish to a broker.",
+    )
     parser.add_argument("--receipt-log", default=_env("PIQ_SERVING_RECEIPT_LOG"), help="JSONL receipt log produced by the serving request recorder.")
     parser.add_argument("--record-receipts", action="store_true", help="Start in-process receipt proxies and route engine traffic through them.")
     parser.add_argument("--receipt-proxy-host", default=_env("PIQ_SERVING_RECEIPT_PROXY_HOST", "127.0.0.1"))
@@ -3636,10 +3906,8 @@ def main(argv: list[str] | None = None) -> int:
                 verification=report,
             )
             report["proofRowsPath"] = os.path.abspath(args.dump_proof_rows)
-        if args.require_telemetry_coverage:
-            report["strictTelemetryGate"] = strict_telemetry_gate(report)
-        if args.require_real_runtime_proof:
-            report["realRuntimeProofGate"] = real_runtime_proof_gate(report)
+        report["strictTelemetryGate"] = strict_telemetry_gate(report)
+        report["realRuntimeProofGate"] = real_runtime_proof_gate(report)
         print(json.dumps(report, indent=2))
         if not report["ok"]:
             return 1
@@ -3673,6 +3941,7 @@ def main(argv: list[str] | None = None) -> int:
             engines,
             [] if args.allow_missing_engines else missing,
             model=args.model,
+            inspect_local_runtime=False,
         )
         print(json.dumps(preflight, indent=2))
         return 0 if preflight["ready"] else 1
@@ -3689,14 +3958,6 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_submit and not args.piq_base_url:
         print("PIQ_BASE_URL or --piq-base-url is required unless --no-submit is set.", file=sys.stderr)
         return 2
-    if args.publish_kafka:
-        if not args.event_log:
-            print("--publish-kafka requires --event-log or PIQ_SERVING_EVENT_LOG so publication happens after durable capture.", file=sys.stderr)
-            return 2
-        if not args.kafka_bootstrap_servers:
-            print("--publish-kafka requires --kafka-bootstrap-servers or PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS.", file=sys.stderr)
-            return 2
-
     client = None if args.no_submit else PerformanceIQ(args.piq_base_url, token=args.piq_token)
     pricing = {
         **({"usdPerGpuHour": args.usd_per_gpu_hour} if args.usd_per_gpu_hour is not None else {}),
@@ -3717,7 +3978,12 @@ def main(argv: list[str] | None = None) -> int:
 
         preflight = None
         if not args.skip_preflight:
-            preflight = runtime_preflight(engines, [], model=args.model)
+            preflight = runtime_preflight(
+                engines,
+                [],
+                model=args.model,
+                inspect_local_runtime=False,
+            )
             if not preflight["ready"]:
                 print(json.dumps(preflight, indent=2))
                 print("Serving engine preflight failed; pass --skip-preflight only for targeted debugging.", file=sys.stderr)
@@ -3757,20 +4023,13 @@ def main(argv: list[str] | None = None) -> int:
             summary["eventLogPath"] = args.event_log
         proof_path = write_proof_summary(summary, args.artifact_dir, summary_out=args.summary_out)
         if args.event_log:
-            write_serving_event_log(summary, args.event_log, topic=args.kafka_topic)
-        if args.publish_kafka:
-            summary["kafkaPublication"] = publish_serving_event_log(
-                args.event_log,
-                bootstrap_servers=args.kafka_bootstrap_servers,
-                topic=args.kafka_topic,
-                client_id=args.kafka_client_id,
-            )
-            proof_path = write_proof_summary(summary, args.artifact_dir, summary_out=args.summary_out)
+            write_serving_event_log(summary, args.event_log, topic=args.event_topic)
         if args.verify_after_capture or args.require_telemetry_coverage or args.require_real_runtime_proof:
             verification = verify_proof_summary(proof_path, require_all_engines=not args.allow_missing_engines)
             summary["verification"] = verification
             summary["strictTelemetryGate"] = strict_telemetry_gate(verification)
             summary["realRuntimeProofGate"] = real_runtime_proof_gate(verification)
+            proof_path = write_proof_summary(summary, args.artifact_dir, summary_out=args.summary_out)
         print(json.dumps(summary, indent=2))
         if args.verify_after_capture and not summary.get("verification", {}).get("ok"):
             return 1

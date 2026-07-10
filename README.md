@@ -177,7 +177,7 @@ latency portable across vLLM, SGLang, and TensorRT-LLM.
 Kafka should not sit between the producer and the serving engine for those
 measurements, because that would change the request path being measured.
 Kafka is supported as a post-capture ingestion/export boundary: the smoke
-runner writes Kafka-ready JSONL events after it has already captured request
+runner writes post-capture JSONL events after it has already captured request
 timings, token details, raw operator artifacts, DCGM/native metrics, request
 receipts, hashes, and provenance.
 
@@ -193,18 +193,19 @@ export PIQ_SERVING_REQUIRE_HARDWARE_TELEMETRY=true
 export PIQ_SERVING_EVENT_LOG=./performance-iq-output/serving-producers/serving-events.jsonl
 ```
 
-Enable Kafka publication only after local event-log capture is working:
-
-```bash
-export PIQ_SERVING_PUBLISH_KAFKA=true
-export PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS=kafka-1:9092,kafka-2:9092
-export PIQ_SERVING_KAFKA_TOPIC=performance-iq.serving.telemetry.v1
-```
+Kafka publication is an experimental, post-capture exporter and is not part of
+the product ingestion path. Its isolated package and promotion gate are in
+[`experimental/kafka/README.md`](experimental/kafka/README.md).
 
 The finest-grain dashboard surfaces are `serving_request_samples`,
-`serving_token_timeline`, and `serving_telemetry_coverage`.
+`serving_token_timeline`, `serving_metric_snapshots`, and
+`serving_telemetry_coverage`.
 `serving_request_samples` is one row per request with latency, native/DCGM,
 token-summary, provenance, and artifact fields. The request row exposes core
+request/response IDs and timestamps, endpoint, streaming mode, output bytes,
+runtime backend, operating point, native endpoint URLs, redacted error hash,
+TensorRT-LLM retained per-request KV block counts/request hash, and GPU
+inventory hash. It also exposes core
 DCGM power/utilization/temperature/clock/memory/energy fields plus PCIe,
 NVLink, encoder/decoder, SM/DRAM/tensor/FP pipe activity, XID/ECC, violation
 time, and raw-metric-name provenance fields. `serving_token_timeline` is prompt
@@ -212,9 +213,11 @@ and output token/chunk detail with `tokenPhase`, token IDs, logprobs, hashes,
 timing, and provenance. `serving_telemetry_coverage` is one row per
 engine/category showing whether producer-local telemetry categories were
 proven, missing, partial, or not configured. Restricted operator-full artifacts
-also retain the full before/after native metrics and DCGM Prometheus snapshots;
-dashboard rows expose bounded derived fields, raw metric counts/name hashes, and
-artifact links rather than raw metric maps.
+also retain the exact before/after native metrics and DCGM Prometheus exposition,
+including per-device labels. `serving_metric_snapshots` exposes every parsed
+numeric native/DCGM series per request and capture phase, with label and
+raw-exposition hashes plus an operator-artifact link. Dashboard rows remain
+customer-safe: exact labels and raw exposition stay in the operator artifact.
 
 To exercise the full telemetry contract without real serving runtimes, use the
 deterministic fake strict path:
@@ -229,7 +232,7 @@ bash ops/serving-producers/run-smoke.sh fake-strict-smoke \
 This starts local fake OpenAI-compatible vLLM, SGLang, and TensorRT-LLM
 endpoints, routes them through receipt proxies, captures stream timings,
 token IDs/logprobs, native metrics, DCGM counters, prompt token IDs, raw
-operator artifacts, raw native/DCGM metric snapshots, Kafka-ready events, and
+operator artifacts, raw native/DCGM metric snapshots, post-capture events, and
 proof rows, then verifies `strictTelemetryGate.ok`. It is CI/local
 contract proof only and fails `realRuntimeProofGate.ok` when that gate is
 required; real product proof still requires `strict-recorded-smoke` against
@@ -306,9 +309,9 @@ telemetry categories configured by the run are proven across required engines.
 Coverage categories include client stream timing, request receipts, dashboard
 fine-grain rows, native runtime telemetry, DCGM hardware telemetry, prompt token
 IDs, output token IDs/logprobs, operator-full artifacts, raw native/DCGM metric
-snapshots, runtime provenance, and Kafka-ready event rows. `--dump-proof-rows`
+snapshots, runtime provenance, and post-capture event-log rows. `--dump-proof-rows`
 also emits `telemetryCoverageRows`, one row per engine/category from the verifier.
-Dashboard and Kafka-ready event-log coverage is evaluated per required engine
+Dashboard and post-capture event-log coverage is evaluated per required engine
 campaign, not from global row totals alone.
 Native runtime telemetry, DCGM hardware telemetry, token timeline rows, and
 operator-full raw metric snapshots are matched by request ID.

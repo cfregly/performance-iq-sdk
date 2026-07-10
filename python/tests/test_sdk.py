@@ -2,8 +2,10 @@ import json
 import hashlib
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import urllib.request
 import unittest
@@ -16,6 +18,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 from performance_iq_sdk import PerformanceIQ, build_manifest, laptop_smoke_model, run_serving_producer, validate_run
+import performance_iq_sdk.serving_smoke as serving_smoke
 from performance_iq_sdk.serving_smoke import (
     engine_configs_from_env,
     endpoint_probe,
@@ -25,10 +28,11 @@ from performance_iq_sdk.serving_smoke import (
     huggingface_model_cache_name,
     main as serving_smoke_main,
     parser as serving_smoke_parser,
-    publish_serving_event_log,
     query_dashboard,
     real_runtime_proof_gate,
+    local_runtime_discovery,
     run_serving_smoke,
+    runtime_python_candidates,
     runtime_diagnostics,
     runtime_launch_plan,
     runtime_preflight,
@@ -57,6 +61,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
         "PIQ_TOKEN",
         "PIQ_BASE_URL",
         "PIQ_SERVING_MODEL",
+        "PIQ_SERVING_GPU_INVENTORY_PATH",
         "PIQ_SERVING_REPETITIONS",
         "PIQ_SERVING_MAX_TOKENS",
         "PIQ_SERVING_USD_PER_GPU_HOUR",
@@ -65,10 +70,8 @@ class PerformanceIQSdkTest(unittest.TestCase):
         "PIQ_ARTIFACT_DIR",
         "PIQ_SERVING_SUMMARY_OUT",
         "PIQ_SERVING_EVENT_LOG",
-        "PIQ_SERVING_PUBLISH_KAFKA",
-        "PIQ_SERVING_KAFKA_BOOTSTRAP_SERVERS",
-        "PIQ_SERVING_KAFKA_CLIENT_ID",
         "PIQ_SERVING_KAFKA_TOPIC",
+        "PIQ_SERVING_EVENT_TOPIC",
         "PIQ_SERVING_CAPTURE_TOKEN_DETAILS",
         "PIQ_SERVING_TOP_LOGPROBS",
         "PIQ_SERVING_RESOLVE_TOKEN_IDS_WITH_TOKENIZER",
@@ -84,12 +87,18 @@ class PerformanceIQSdkTest(unittest.TestCase):
         "PIQ_VLLM_JSON_METRICS_URL",
         "PIQ_SGLANG_JSON_METRICS_URL",
         "PIQ_TENSORRT_LLM_JSON_METRICS_URL",
+        "PIQ_VLLM_PERF_METRICS_URL",
+        "PIQ_SGLANG_PERF_METRICS_URL",
+        "PIQ_TENSORRT_LLM_PERF_METRICS_URL",
         "PIQ_VLLM_HARDWARE_METRICS_URL",
         "PIQ_SGLANG_HARDWARE_METRICS_URL",
         "PIQ_TENSORRT_LLM_HARDWARE_METRICS_URL",
         "PIQ_VLLM_FRAMEWORK_VERSION",
         "PIQ_SGLANG_FRAMEWORK_VERSION",
         "PIQ_TENSORRT_LLM_FRAMEWORK_VERSION",
+        "PIQ_VLLM_RUNTIME_BACKEND",
+        "PIQ_SGLANG_RUNTIME_BACKEND",
+        "PIQ_TENSORRT_LLM_RUNTIME_BACKEND",
         "PIQ_VLLM_MODEL_REVISION",
         "PIQ_SGLANG_MODEL_REVISION",
         "PIQ_TENSORRT_LLM_MODEL_REVISION",
@@ -450,8 +459,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
         self.assertEqual(manifest["artifacts"][0]["kind"], "normalized-summary")
         self.assertEqual(manifest["artifacts"][0]["sha256"], "e5f1eb4d806641698a35efe20e098efd20d7d57a9b90ee69079d5bb650920726")
         self.assertEqual(manifest["store"]["sourceTables"], [
-            "platform_store.object_store.producer_runner_result_bundles",
-            "platform_store.iceberg.intake_store.producer_runner_results",
+            "platform_store.iceberg.intake_platform_store.hpc_perftest_raw",
         ])
         self.assertEqual(manifest["store"]["rowProof"][0]["campaignId"], "campaign-python-test")
 
@@ -612,6 +620,13 @@ class PerformanceIQSdkTest(unittest.TestCase):
                 "engine": "vllm",
                 "baseUrl": "http://127.0.0.1:8000",
                 "frameworkVersion": "unit-test-runtime",
+                "runtimeBackend": "unit-test-backend",
+                "modelRevision": "unit-test-model-revision",
+                "imageTag": "unit-test/vllm:1",
+                "imageDigest": "sha256:unit-test-runtime-image",
+                "serverArgs": ["vllm", "serve", laptop_smoke_model()],
+                "containerId": "unit-test-container",
+                "hostName": "unit-test-host",
             },
             request={
                 "model": laptop_smoke_model(),
@@ -642,8 +657,20 @@ class PerformanceIQSdkTest(unittest.TestCase):
         token_rows = [row for row in result["measurements"] if row.get("surface") == "serving_token_timeline"]
         coverage_rows = [row for row in result["measurements"] if row.get("surface") == "serving_telemetry_coverage"]
         self.assertEqual(len(sample_rows), 1)
+        self.assertEqual(sample_rows[0]["requestEndpoint"], "http://127.0.0.1:8000/v1/chat/completions")
+        self.assertIsInstance(sample_rows[0]["requestStartedAtUtc"], str)
+        self.assertIsInstance(sample_rows[0]["requestCompletedAtUtc"], str)
+        self.assertEqual(sample_rows[0]["responseId"], "chatcmpl-stream")
+        self.assertEqual(sample_rows[0]["responseModel"], laptop_smoke_model())
+        self.assertEqual(sample_rows[0]["runtimeBackend"], "unit-test-backend")
+        self.assertEqual(sample_rows[0]["operatingPoint"], "laptop-smoke")
+        self.assertEqual(sample_rows[0]["basis"], "per_request")
+        self.assertTrue(sample_rows[0]["streaming"])
+        self.assertEqual(sample_rows[0]["latencyMs"], sample_rows[0]["e2eLatencyMs"])
+        self.assertEqual(sample_rows[0]["outputBytes"], 2)
+        self.assertIsNone(sample_rows[0]["errorSha256"])
         self.assertEqual(len(token_rows), 2)
-        self.assertEqual(len(coverage_rows), 8)
+        self.assertEqual(len(coverage_rows), 10)
         self.assertIn("clientStreamTiming", {row["coverageCategory"] for row in coverage_rows})
         with open(result["artifactPath"], encoding="utf-8") as handle:
             artifact = json.load(handle)
@@ -700,6 +727,7 @@ class PerformanceIQSdkTest(unittest.TestCase):
         coverage_rows = [row for row in result["measurements"] if row.get("surface") == "serving_telemetry_coverage"]
         self.assertEqual(sample_rows[0]["ok"], False)
         self.assertIsNone(sample_rows[0]["ttftMs"])
+        self.assertRegex(sample_rows[0]["errorSha256"], r"^[0-9a-f]{64}$")
         self.assertTrue(os.path.exists(sample_rows[0]["rawArtifactPath"]))
         self.assertEqual(token_rows, [])
         self.assertEqual(
@@ -749,6 +777,13 @@ class PerformanceIQSdkTest(unittest.TestCase):
                 "tokenizer": tokenizer,
                 "tokenizerModel": "unit-tokenizer",
                 "frameworkVersion": "unit-test-runtime",
+                "runtimeBackend": "unit-test-backend",
+                "modelRevision": "unit-test-model-revision",
+                "imageTag": "unit-test/vllm:1",
+                "imageDigest": "sha256:unit-test-runtime-image",
+                "serverArgs": ["vllm", "serve", laptop_smoke_model()],
+                "containerId": "unit-test-container",
+                "hostName": "unit-test-host",
             },
             request={
                 "model": laptop_smoke_model(),
@@ -1028,6 +1063,105 @@ sglang:uncached_prompt_tokens_histogram_sum 41
         self.assertEqual(sample["promptTokensCachedDelta"], 33)
         self.assertEqual(sample["promptTokensComputedDelta"], 1)
 
+    def test_serving_producer_derives_late_emitted_sglang_native_metrics(self):
+        metric_snapshots = [
+            """
+sglang:num_running_reqs 0
+sglang:num_queue_reqs 0
+sglang:token_usage 0
+sglang:cache_hit_rate 0
+""",
+            """
+sglang:time_to_first_token_seconds_count 1
+sglang:time_to_first_token_seconds_sum 0.11
+sglang:inter_token_latency_seconds_count 3
+sglang:inter_token_latency_seconds_sum 0.03
+sglang:e2e_request_latency_seconds_count 1
+sglang:e2e_request_latency_seconds_sum 0.14
+sglang:queue_time_seconds_count 1
+sglang:queue_time_seconds_sum 0.005
+sglang:per_stage_req_latency_seconds_count{stage="prefill_forward"} 1
+sglang:per_stage_req_latency_seconds_sum{stage="prefill_forward"} 0.1
+sglang:num_running_reqs 0
+sglang:num_queue_reqs 0
+sglang:token_usage 0
+sglang:cache_hit_rate 0
+sglang:uncached_prompt_tokens_histogram_sum 32
+""",
+        ]
+
+        def http_get_text(url, headers):
+            self.assertEqual(url, "http://127.0.0.1:30000/metrics")
+            return metric_snapshots.pop(0)
+
+        def http_stream_json(url, headers, payload):
+            return {
+                "status": 200,
+                "events": [
+                    {
+                        "receivedMs": 10,
+                        "receivedAtUtc": "2026-07-09T12:00:00.010Z",
+                        "body": {"id": "chatcmpl-stream", "model": laptop_smoke_model(), "choices": [{"delta": {"content": "ok"}}]},
+                    },
+                    {
+                        "receivedMs": 20,
+                        "receivedAtUtc": "2026-07-09T12:00:00.020Z",
+                        "body": {
+                            "id": "chatcmpl-stream",
+                            "model": laptop_smoke_model(),
+                            "choices": [{"delta": {}, "finish_reason": "stop"}],
+                            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+                        },
+                    },
+                ],
+            }
+
+        result = run_serving_producer(
+            engine={
+                "engine": "sglang",
+                "baseUrl": "http://127.0.0.1:30000",
+                "metricsUrl": "http://127.0.0.1:30000/metrics",
+            },
+            request={
+                "model": laptop_smoke_model(),
+                "messages": [{"role": "user", "content": "Say ok."}],
+                "maxTokens": 16,
+            },
+            artifact_dir=self.tmp_dir,
+            workload={"hardware": "local stream engine", "operatingPoint": "laptop-smoke"},
+            pricing={"usdPerGpuHour": 1, "gpuCount": 1, "powerWattsPerGpu": 100},
+            http_stream_json=http_stream_json,
+            http_get_text=http_get_text,
+        )
+
+        self.assertEqual(metric_snapshots, [])
+        sample = result["samples"][0]
+        self.assertTrue(sample["nativeTelemetryAvailable"])
+        self.assertAlmostEqual(sample["nativeTtftMs"], 110)
+        self.assertAlmostEqual(sample["nativeTpotMs"], 10)
+        self.assertAlmostEqual(sample["nativeInterTokenLatencyMs"], 10)
+        self.assertAlmostEqual(sample["nativeE2eLatencyMs"], 140)
+        self.assertAlmostEqual(sample["queueWaitMs"], 5)
+        self.assertAlmostEqual(sample["prefillMs"], 100)
+        self.assertAlmostEqual(sample["decodeMs"], 30)
+        self.assertEqual(sample["promptTokensCachedDelta"], 0)
+        self.assertEqual(sample["promptTokensComputedDelta"], 32)
+        aggregate = result["measurements"][0]
+        self.assertTrue(aggregate["nativeTelemetryRequired"])
+        coverage = {
+            row["coverageCategory"]: row
+            for row in result["measurements"]
+            if row.get("surface") == "serving_telemetry_coverage"
+        }
+        self.assertEqual(coverage["nativeRuntimeTelemetry"]["coverageStatus"], "proven")
+        self.assertEqual(coverage["nativeRuntimeTelemetry"]["expectedCount"], 1)
+        self.assertEqual(coverage["rawMetricSnapshots"]["coverageStatus"], "proven")
+        self.assertEqual(coverage["rawMetricSnapshots"]["expectedCount"], 1)
+        with open(coverage["rawMetricSnapshots"]["proofPath"], encoding="utf-8") as handle:
+            raw_artifact = json.load(handle)
+        self.assertTrue(raw_artifact["captures"][0]["nativeMetricsRaw"]["before"]["available"])
+        self.assertTrue(raw_artifact["captures"][0]["nativeMetricsRaw"]["after"]["available"])
+
     def test_serving_producer_derives_tensorrt_prometheus_and_json_metrics(self):
         prometheus_snapshots = [
             """
@@ -1060,12 +1194,34 @@ trtllm_kv_cache_utilization{model_name="qwen"} 0.3
             '[{"gpuMemUsage": 1000, "iterLatencyMS": 5, "kvCacheStats": {"usedNumBlocks": 2, "maxNumBlocks": 10, "cacheHitRate": 0.1}, "numActiveRequests": 0}]',
             '[{"gpuMemUsage": 2000, "iterLatencyMS": 7, "kvCacheStats": {"usedNumBlocks": 4, "maxNumBlocks": 10, "cacheHitRate": 0.4}, "numActiveRequests": 1}]',
         ]
+        perf_snapshots = [
+            "[]",
+            json.dumps([{
+                "request_id": 99,
+                "perf_metrics": {
+                    "timing_metrics": {
+                        "arrival_time": 100.0,
+                        "first_scheduled_time": 100.005,
+                        "first_token_time": 100.2,
+                        "last_token_time": 100.7,
+                    },
+                    "kv_cache_metrics": {
+                        "num_total_allocated_blocks": 10,
+                        "num_new_allocated_blocks": 8,
+                        "num_reused_blocks": 2,
+                        "num_missed_blocks": 8,
+                    },
+                },
+            }]),
+        ]
 
         def http_get_combined(url, headers):
             if url == "http://127.0.0.1:8001/prometheus/metrics":
                 return prometheus_snapshots.pop(0)
-            self.assertEqual(url, "http://127.0.0.1:8001/metrics")
-            return json_snapshots.pop(0)
+            if url == "http://127.0.0.1:8001/metrics":
+                return json_snapshots.pop(0)
+            self.assertEqual(url, "http://127.0.0.1:8001/perf_metrics")
+            return perf_snapshots.pop(0)
 
         def http_stream_json(url, headers, payload):
             return {
@@ -1109,12 +1265,15 @@ trtllm_kv_cache_utilization{model_name="qwen"} 0.3
 
         self.assertEqual(prometheus_snapshots, [])
         self.assertEqual(json_snapshots, [])
+        self.assertEqual(perf_snapshots, [])
         sample = result["samples"][0]
         self.assertTrue(sample["nativeTelemetryAvailable"])
         self.assertAlmostEqual(sample["nativeTtftMs"], 200)
         self.assertAlmostEqual(sample["nativeTpotMs"], 30)
         self.assertAlmostEqual(sample["nativeE2eLatencyMs"], 700)
         self.assertAlmostEqual(sample["queueWaitMs"], 5)
+        self.assertAlmostEqual(sample["prefillMs"], 195)
+        self.assertAlmostEqual(sample["decodeMs"], 500)
         self.assertAlmostEqual(sample["kvCacheUsagePct"], 0.3)
         self.assertAlmostEqual(sample["cacheHitRate"], 0.2)
         self.assertAlmostEqual(sample["nativeIterationLatencyMs"], 7)
@@ -1123,10 +1282,16 @@ trtllm_kv_cache_utilization{model_name="qwen"} 0.3
         self.assertAlmostEqual(sample["nativeKvCacheMaxBlocks"], 10)
         self.assertAlmostEqual(sample["nativeTelemetry"]["trtllmIterationLatencyMs"], 7)
         self.assertAlmostEqual(sample["nativeTelemetry"]["trtllmGpuMemoryBytes"], 2000)
+        self.assertEqual(sample["nativeTelemetry"]["trtllmPerfKvAllocatedBlocks"], 10)
+        self.assertEqual(sample["nativeTelemetry"]["trtllmPerfKvReusedBlocks"], 2)
+        self.assertEqual(sample["trtllmPerfRecordCount"], 1)
+        self.assertEqual(sample["trtllmPerfRequestIdSha256"], hashlib.sha256(b"99").hexdigest())
         sample_rows = [row for row in result["measurements"] if row.get("surface") == "serving_request_sample"]
         self.assertAlmostEqual(sample_rows[0]["nativeIterationLatencyMs"], 7)
         self.assertAlmostEqual(sample_rows[0]["nativeGpuMemoryBytes"], 2000)
         self.assertAlmostEqual(result["measurements"][0]["avgNativeIterationLatencyMs"], 7)
+        metric_rows = [row for row in result["measurements"] if row.get("surface") == "serving_metric_snapshot"]
+        self.assertTrue(any(row["metricSource"] == "native-perf-json" for row in metric_rows))
 
         json_snapshots = [
             '[{"gpuMemUsage": 1000, "iterLatencyMS": 5, "kvCacheStats": {"usedNumBlocks": 2, "maxNumBlocks": 10, "cacheHitRate": 0.1}, "numActiveRequests": 0}]',
@@ -1179,6 +1344,8 @@ DCGM_FI_DEV_POWER_USAGE{gpu="0"} 100
 DCGM_FI_DEV_GPU_UTIL{gpu="0"} 40
 DCGM_FI_DEV_MEM_COPY_UTIL{gpu="0"} 12
 DCGM_FI_DEV_GPU_TEMP{gpu="0"} 60
+DCGM_FI_DEV_MEMORY_TEMP{gpu="0"} 9223372036854775794
+DCGM_EXP_GPU_HEALTH_STATUS{gpu="0"} 0
 DCGM_FI_DEV_SM_CLOCK{gpu="0"} 1800
 DCGM_FI_DEV_MEM_CLOCK{gpu="0"} 5000
 DCGM_FI_DEV_FB_USED{gpu="0"} 4096
@@ -1211,6 +1378,8 @@ DCGM_FI_DEV_POWER_USAGE{gpu="0"} 120
 DCGM_FI_DEV_GPU_UTIL{gpu="0"} 50
 DCGM_FI_DEV_MEM_COPY_UTIL{gpu="0"} 20
 DCGM_FI_DEV_GPU_TEMP{gpu="0"} 61
+DCGM_FI_DEV_MEMORY_TEMP{gpu="0"} 9223372036854775794
+DCGM_EXP_GPU_HEALTH_STATUS{gpu="0"} 0
 DCGM_FI_DEV_SM_CLOCK{gpu="0"} 1801
 DCGM_FI_DEV_MEM_CLOCK{gpu="0"} 5001
 DCGM_FI_DEV_FB_USED{gpu="0"} 4097
@@ -1296,6 +1465,14 @@ DCGM_FI_DEV_THERMAL_VIOLATION{gpu="0"} 240
                 "engine": "vllm",
                 "baseUrl": "http://127.0.0.1:8000",
                 "hardwareMetricsUrl": "http://127.0.0.1:9400/metrics",
+                "frameworkVersion": "0.23.0",
+                "runtimeBackend": "cuda",
+                "modelRevision": "model-revision",
+                "imageTag": "vllm/vllm-openai:v0.23.0",
+                "imageDigest": "sha256:runtime-image",
+                "serverArgs": ["--model", laptop_smoke_model(), "--gpu-memory-utilization", "0.20"],
+                "containerId": "container-vllm",
+                "hostName": "gpu-host",
             },
             request={
                 "model": laptop_smoke_model(),
@@ -1355,7 +1532,7 @@ DCGM_FI_DEV_THERMAL_VIOLATION{gpu="0"} 240
         self.assertAlmostEqual(sample["eccDbeVolatileTotalDelta"], 1)
         self.assertAlmostEqual(sample["powerViolationTimeUsDelta"], 30)
         self.assertAlmostEqual(sample["thermalViolationTimeUsDelta"], 40)
-        self.assertEqual(sample["hardwareRawMetricCount"], 30)
+        self.assertEqual(sample["hardwareRawMetricCount"], 31)
         self.assertEqual(len(sample["hardwareRawMetricNamesSha256"]), 64)
         aggregate = result["measurements"][0]
         self.assertTrue(aggregate["dcgmGrounded"])
@@ -1377,8 +1554,33 @@ DCGM_FI_DEV_THERMAL_VIOLATION{gpu="0"} 240
         self.assertAlmostEqual(sample_rows[0]["pcieTxBytesDelta"], 6000)
         self.assertAlmostEqual(sample_rows[0]["nvlinkRxBytesDelta"], 13000)
         self.assertAlmostEqual(sample_rows[0]["eccDbeVolatileTotalDelta"], 1)
-        self.assertEqual(sample_rows[0]["hardwareRawMetricCount"], 30)
+        self.assertEqual(sample_rows[0]["hardwareRawMetricCount"], 31)
         self.assertEqual(sample_rows[0]["hardwareRawMetricNamesSha256"], sample["hardwareRawMetricNamesSha256"])
+        metric_rows = [row for row in result["measurements"] if row.get("surface") == "serving_metric_snapshot"]
+        self.assertEqual(len(metric_rows), 62)
+        self.assertIn("DCGM_EXP_GPU_HEALTH_STATUS", {row["metricName"] for row in metric_rows})
+        self.assertNotIn("DCGM_FI_DEV_MEMORY_TEMP", {row["metricName"] for row in metric_rows})
+        self.assertEqual({row["metricSource"] for row in metric_rows}, {"dcgm-prometheus"})
+        self.assertEqual({row["snapshotPhase"] for row in metric_rows}, {"before", "after"})
+        self.assertTrue(all(len(row["metricLabelsSha256"]) == 64 for row in metric_rows))
+        self.assertTrue(all(len(row["rawMetricTextSha256"]) == 64 for row in metric_rows))
+        metric_coverage = next(
+            row for row in result["measurements"]
+            if row.get("surface") == "serving_telemetry_coverage" and row.get("coverageCategory") == "metricSnapshots"
+        )
+        self.assertEqual(metric_coverage["coverageStatus"], "proven")
+        with open(result["artifactPath"], encoding="utf-8") as handle:
+            summary_artifact = json.load(handle)
+        with open(summary_artifact["capturePolicy"]["rawArtifactPath"], encoding="utf-8") as handle:
+            raw_artifact = json.load(handle)
+        hardware_before = raw_artifact["captures"][0]["hardwareMetricsRaw"]["before"]
+        self.assertIn("DCGM_FI_DEV_POWER_USAGE{gpu=\"0\"} 100", hardware_before["rawMetricsText"])
+        self.assertIn("DCGM_FI_DEV_MEMORY_TEMP{gpu=\"0\"} 9223372036854775794", hardware_before["rawMetricsText"])
+        self.assertEqual(hardware_before["invalidMetricCount"], 1)
+        self.assertEqual(hardware_before["invalidMetricSeries"][0]["invalidReason"], "dcgm-blank-sentinel")
+        self.assertEqual(raw_artifact["runtimeConfiguration"]["runtimeBackend"], "cuda")
+        self.assertEqual(raw_artifact["runtimeConfiguration"]["serverArgs"][0], "--model")
+        self.assertEqual(raw_artifact["runtimeConfiguration"]["containerId"], "container-vllm")
 
     def test_serving_producer_resolves_missing_token_ids_with_configured_token_map(self):
         def http_stream_json(url, headers, payload):
@@ -1564,6 +1766,92 @@ else:
         self.assertEqual(output_measurement_rows[0]["tokenizerModel"], laptop_smoke_model())
         self.assertEqual(output_measurement_rows[0]["tokenizerPythonBinSha256"], tokenizer_python_sha256)
 
+    def test_serving_producer_tokenizes_output_text_when_logprobs_are_unavailable(self):
+        tokenizer_python = os.path.join(self.tmp_dir, "fake-output-tokenizer-python")
+        with open(tokenizer_python, "w", encoding="utf-8") as handle:
+            handle.write("""#!/usr/bin/env python3
+import json
+import sys
+
+mode = sys.argv[3]
+payload = json.loads(sys.argv[5])
+if mode == "prompt":
+    print(json.dumps({"ok": True, "tokenIds": [501, 502], "tokenTexts": ["Return", " ok"], "mode": "chat-template"}))
+elif mode == "text":
+    print(json.dumps({"ok": True, "tokenIds": [101, 202], "tokenTexts": ["o", "k"], "mode": "output-text"}))
+else:
+    print(json.dumps({"ok": False}))
+""")
+        os.chmod(tokenizer_python, 0o755)
+
+        def http_stream_json(url, headers, payload):
+            return {
+                "status": 200,
+                "events": [
+                    {
+                        "receivedMs": 5,
+                        "receivedAtUtc": "2026-07-09T12:00:00.005Z",
+                        "body": {
+                            "id": "chatcmpl-tokenizer-output",
+                            "model": laptop_smoke_model(),
+                            "choices": [{"delta": {"content": "o"}, "finish_reason": None}],
+                        },
+                    },
+                    {
+                        "receivedMs": 8,
+                        "receivedAtUtc": "2026-07-09T12:00:00.008Z",
+                        "body": {
+                            "id": "chatcmpl-tokenizer-output",
+                            "model": laptop_smoke_model(),
+                            "choices": [{"delta": {"content": "k"}, "finish_reason": "stop"}],
+                            "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
+                        },
+                    },
+                ],
+            }
+
+        with patch("performance_iq_sdk.producers.serving._load_hf_tokenizer", return_value=None):
+            result = run_serving_producer(
+                engine={
+                    "engine": "sglang",
+                    "baseUrl": "http://127.0.0.1:30000",
+                    "tokenizerModel": laptop_smoke_model(),
+                    "tokenizerPythonBin": tokenizer_python,
+                    "resolveTokenIdsWithTokenizer": True,
+                },
+                request={
+                    "model": laptop_smoke_model(),
+                    "messages": [{"role": "user", "content": "Return ok."}],
+                    "resolveTokenIdsWithTokenizer": True,
+                },
+                artifact_dir=self.tmp_dir,
+                workload={"hardware": "local tokenizer runtime", "operatingPoint": "laptop-smoke"},
+                pricing={"usdPerGpuHour": 1, "gpuCount": 1, "powerWattsPerGpu": 100},
+                http_stream_json=http_stream_json,
+            )
+
+        sample = result["samples"][0]
+        self.assertTrue(sample["tokenDetailsAvailable"])
+        self.assertTrue(sample["tokenIdsAvailable"])
+        self.assertFalse(sample["logprobsAvailable"])
+        self.assertEqual(sample["tokenIdSource"], "external-hf-tokenizer")
+        self.assertEqual(sample["tokenDetailSource"], "external-hf-tokenizer-output-text")
+        self.assertEqual(sample["tokenizerModel"], laptop_smoke_model())
+        output_rows = [
+            row for row in sample["tokenTimeline"]
+            if row.get("tokenPhase", "output") == "output"
+        ]
+        self.assertEqual([row["tokenId"] for row in output_rows], [101, 202])
+        self.assertTrue(all(row["tokenIdSource"] == "external-hf-tokenizer" for row in output_rows))
+        self.assertTrue(all(row["tokenizerModel"] == laptop_smoke_model() for row in output_rows))
+        self.assertTrue(all(row["tokenLogprob"] is None for row in output_rows))
+        self.assertTrue(all(row["chunkIndex"] is None for row in output_rows))
+        token_rows = [
+            row for row in result["measurements"]
+            if row.get("surface") == "serving_token_timeline" and row.get("tokenPhase") == "output"
+        ]
+        self.assertEqual([row["tokenId"] for row in token_rows], [101, 202])
+
     def test_serving_smoke_runs_all_configured_engines(self):
         calls = []
         submissions = []
@@ -1672,7 +1960,7 @@ else:
         self.assertFalse(capability["supported"])
         self.assertFalse(capability["safeToRequest"])
         self.assertEqual(capability["reason"], "sglang-mps-mlx-logprobs-crash")
-        self.assertEqual(summary["telemetryCapabilityGaps"][0]["category"], "outputTokenIdsLogprobs")
+        self.assertEqual(summary["telemetryCapabilityGaps"][0]["category"], "outputTokenLogprobs")
 
     def test_serving_smoke_verifies_full_proof_bundle(self):
         proof_path, summary = self.write_full_serving_proof()
@@ -1690,15 +1978,19 @@ else:
         self.assertEqual(coverage["categorySummary"]["requestReceipts"]["status"], "proven")
         self.assertEqual(coverage["categorySummary"]["dashboardFineGrainRows"]["status"], "proven")
         self.assertEqual(coverage["categorySummary"]["operatorFullArtifacts"]["status"], "proven")
-        self.assertEqual(coverage["categorySummary"]["rawMetricSnapshots"]["status"], "proven")
+        self.assertEqual(coverage["categorySummary"]["rawMetricSnapshots"]["status"], "not_configured")
         self.assertEqual(coverage["categorySummary"]["rawMetricSnapshots"]["expectedEngines"], 0)
         self.assertEqual(coverage["categorySummary"]["nativeRuntimeTelemetry"]["status"], "missing")
         self.assertEqual(coverage["categorySummary"]["dcgmHardwareTelemetry"]["status"], "missing")
-        self.assertEqual(coverage["categorySummary"]["promptTokenIds"]["status"], "proven")
+        self.assertEqual(coverage["categorySummary"]["promptTokenIds"]["status"], "not_configured")
         self.assertEqual(coverage["categorySummary"]["promptTokenIds"]["expectedEngines"], 0)
-        self.assertEqual(coverage["categorySummary"]["outputTokenIdsLogprobs"]["status"], "proven")
-        self.assertEqual(coverage["categorySummary"]["outputTokenIdsLogprobs"]["expectedEngines"], 0)
+        self.assertEqual(coverage["categorySummary"]["outputTokenIds"]["status"], "not_configured")
+        self.assertEqual(coverage["categorySummary"]["outputTokenIds"]["expectedEngines"], 0)
+        self.assertEqual(coverage["categorySummary"]["outputTokenLogprobs"]["status"], "not_configured")
+        self.assertEqual(coverage["categorySummary"]["outputTokenLogprobs"]["expectedEngines"], 0)
         self.assertEqual(coverage["engines"]["vllm"]["clientStreamTiming"]["status"], "proven")
+        self.assertEqual(coverage["engines"]["vllm"]["rawMetricSnapshots"]["status"], "not_configured")
+        self.assertEqual(coverage["engines"]["vllm"]["rawMetricSnapshots"]["expectedCount"], 0)
         with open(proof_path, encoding="utf-8") as handle:
             proof = json.load(handle)
         self.assertEqual(set(proof["evidenceIndex"]["engines"].keys()), {"vllm", "sglang", "tensorrt-llm"})
@@ -1706,15 +1998,19 @@ else:
             proof["evidenceIndex"]["engines"]["vllm"]["artifact"]["sha256"],
             summary["submissions"][0]["artifactSha256"],
         )
-        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+        stdout = StringIO()
+        with redirect_stdout(stdout), redirect_stderr(StringIO()):
             self.assertEqual(serving_smoke_main(["--verify-proof", proof_path]), 0)
+        verify_output = json.loads(stdout.getvalue())
+        self.assertIn("strictTelemetryGate", verify_output)
+        self.assertIn("realRuntimeProofGate", verify_output)
 
         rows = extract_proof_rows(proof_path, verification=verification)
         self.assertEqual(rows["rowCounts"]["submissions"], 3)
         self.assertEqual(rows["rowCounts"]["servingRequestSamples"], 3)
         self.assertEqual(rows["rowCounts"]["servingTokenTimeline"], 6)
         self.assertEqual(rows["rowCounts"]["requestReceipts"], 3)
-        self.assertEqual(rows["rowCounts"]["telemetryCoverageRows"], 33)
+        self.assertEqual(rows["rowCounts"]["telemetryCoverageRows"], 39)
         self.assertEqual({row["engine"] for row in rows["servingRequestSamples"]}, {"vllm", "sglang", "tensorrt-llm"})
         self.assertEqual({row["coverageSource"] for row in rows["telemetryCoverageRows"]}, {"proof-verifier"})
         self.assertTrue(all(row.get("campaignId") for row in rows["servingTokenTimeline"]))
@@ -1725,11 +2021,11 @@ else:
             persisted_rows = json.load(handle)
         self.assertEqual(persisted_rows["schemaVersion"], "performance-iq.serving-proof-rows.v1")
         self.assertEqual(persisted_rows["telemetryCoverage"]["schemaVersion"], "performance-iq.serving-telemetry-coverage.v1")
-        self.assertEqual(persisted_rows["rowCounts"]["telemetryCoverageRows"], 33)
+        self.assertEqual(persisted_rows["rowCounts"]["telemetryCoverageRows"], 39)
         self.assertEqual(persisted_rows["rowCounts"]["servingTokenTimeline"], 6)
         self.assertEqual(write_proof_rows(proof_path, rows_path)["rowCounts"]["servingRequestSamples"], 3)
 
-    def test_serving_smoke_writes_kafka_ready_event_log(self):
+    def test_serving_smoke_writes_post_capture_event_log(self):
         proof_path, summary = self.write_full_serving_proof()
         event_log_path = os.path.join(self.tmp_dir, "serving-events.jsonl")
         summary["eventLogPath"] = event_log_path
@@ -1752,46 +2048,6 @@ else:
         with open(event_log_path, encoding="utf-8") as handle:
             lines = [json.loads(line) for line in handle if line.strip()]
         self.assertEqual(len(lines), len(events))
-        published: list[dict[str, object]] = []
-
-        class FakeFuture:
-            def get(self, timeout=None):
-                return {"timeout": timeout}
-
-        class FakeKafkaProducer:
-            def __init__(self, **kwargs):
-                self.kwargs = kwargs
-
-            def send(self, topic, key=None, value=None):
-                published.append({
-                    "topic": topic,
-                    "key": key.decode("utf-8"),
-                    "value": json.loads(value.decode("utf-8")),
-                })
-                return FakeFuture()
-
-            def flush(self, timeout=None):
-                published.append({"flush": timeout})
-
-            def close(self, timeout=None):
-                published.append({"close": timeout})
-
-        publication = publish_serving_event_log(
-            event_log_path,
-            bootstrap_servers="kafka:9092",
-            producer_factory=FakeKafkaProducer,
-        )
-        self.assertEqual(publication["schemaVersion"], "performance-iq.serving-kafka-publication.v1")
-        self.assertEqual(publication["publishedCount"], len(events))
-        self.assertEqual(
-            publication["eventCounts"]["serving.measurement.serving_token_timeline"],
-            event_types.count("serving.measurement.serving_token_timeline"),
-        )
-        sent_events = [item for item in published if "value" in item]
-        self.assertEqual(len(sent_events), len(events))
-        self.assertTrue(all(item["topic"] == "performance-iq.serving.telemetry.v1" for item in sent_events))
-        summary["kafkaPublication"] = publication
-        write_proof_summary(summary, self.tmp_dir, summary_out=proof_path)
         verification = verify_proof_summary(proof_path)
         self.assertTrue(verification["ok"], json.dumps(verification, indent=2))
         self.assertGreaterEqual(verification["eventCounts"]["serving.measurement.serving_request_sample"], 3)
@@ -1884,7 +2140,7 @@ else:
         self.assertEqual(coverage["engines"]["sglang"]["kafkaEventLog"]["status"], "proven")
         self.assertEqual(coverage["engines"]["tensorrt-llm"]["kafkaEventLog"]["status"], "partial")
         self.assertIn(
-            "Kafka-ready event log is missing token-timeline events for this engine",
+            "Post-capture event log is missing token-timeline events for this engine",
             coverage["engines"]["tensorrt-llm"]["kafkaEventLog"]["missing"],
         )
         self.assertEqual(coverage["categorySummary"]["kafkaEventLog"]["status"], "partial")
@@ -2151,9 +2407,11 @@ else:
         self.assertFalse(report["strictTelemetryGate"]["ok"])
         self.assertTrue(report["strictTelemetryGate"]["configuredTelemetryAllProven"])
         self.assertIn("promptTokenIds", report["strictTelemetryGate"]["notConfiguredCategories"])
-        self.assertIn("outputTokenIdsLogprobs", report["strictTelemetryGate"]["notConfiguredCategories"])
+        self.assertIn("outputTokenIds", report["strictTelemetryGate"]["notConfiguredCategories"])
+        self.assertIn("outputTokenLogprobs", report["strictTelemetryGate"]["notConfiguredCategories"])
         self.assertIn("promptTokenIds", report["strictTelemetryGate"]["missingCategories"])
-        self.assertIn("outputTokenIdsLogprobs", report["strictTelemetryGate"]["missingCategories"])
+        self.assertIn("outputTokenIds", report["strictTelemetryGate"]["missingCategories"])
+        self.assertIn("outputTokenLogprobs", report["strictTelemetryGate"]["missingCategories"])
 
     def test_serving_smoke_require_real_runtime_proof_rejects_fake_full_telemetry(self):
         proof_path = os.path.join(self.tmp_dir, "fake-full-real-runtime-rejected-proof.json")
@@ -2203,7 +2461,7 @@ else:
         self.assertFalse(verify_report["realRuntimeProofGate"]["ok"], json.dumps(verify_report["realRuntimeProofGate"], indent=2))
         self.assertEqual(verify_report["realRuntimeProofGate"]["classification"], "synthetic-or-fixture")
 
-    def test_serving_smoke_fake_full_telemetry_proves_all_coverage(self):
+    def test_serving_smoke_fake_full_telemetry_proves_and_enforces_all_coverage(self):
         proof_path = os.path.join(self.tmp_dir, "fake-full-proof.json")
         event_log_path = os.path.join(self.tmp_dir, "fake-events.jsonl")
         receipt_log_path = os.path.join(self.tmp_dir, "fake-receipts.jsonl")
@@ -2240,13 +2498,14 @@ else:
             self.assertEqual(summary["status"], "proven", category)
         self.assertEqual(coverage["engines"]["tensorrt-llm"]["dcgmHardwareTelemetry"]["status"], "proven")
         self.assertEqual(coverage["engines"]["tensorrt-llm"]["rawMetricSnapshots"]["status"], "proven")
+        self.assertEqual(coverage["engines"]["tensorrt-llm"]["metricSnapshots"]["status"], "proven")
         self.assertEqual(verification["eventCounts"]["serving.measurement.serving_request_sample"], 3)
         self.assertGreaterEqual(verification["eventCounts"]["serving.request_receipt"], 3)
 
         rows = write_proof_rows(proof_path, rows_path, verification=verification)
         self.assertTrue(rows["telemetryCoverage"]["allProven"])
         self.assertEqual(rows["rowCounts"]["servingRequestSamples"], 3)
-        self.assertEqual(rows["rowCounts"]["telemetryCoverageRows"], 33)
+        self.assertEqual(rows["rowCounts"]["telemetryCoverageRows"], 39)
         self.assertGreaterEqual(rows["rowCounts"]["servingTokenTimeline"], 18)
         first_sample_row = rows["servingRequestSamples"][0]
         self.assertIn(first_sample_row["runtimeEngine"], {"vllm", "sglang", "tensorrt-llm"})
@@ -2263,6 +2522,21 @@ else:
         self.assertIn("hardwareMetricsRaw", raw_artifact["captures"][0])
         self.assertTrue(raw_artifact["captures"][0]["nativeMetricsRaw"]["before"]["available"])
         self.assertTrue(raw_artifact["captures"][0]["hardwareMetricsRaw"]["after"]["available"])
+
+        trt_submission = next(item for item in report["submissions"] if item["engine"] == "tensorrt-llm")
+        with open(trt_submission["artifactPath"], encoding="utf-8") as handle:
+            trt_artifact = json.load(handle)
+        trt_artifact["samples"][0]["smActivePct"] = None
+        with open(trt_submission["artifactPath"], "w", encoding="utf-8") as handle:
+            json.dump(trt_artifact, handle, indent=2)
+            handle.write("\n")
+        self.refresh_proof_artifact_hashes(proof_path, "tensorrt-llm")
+
+        degraded = verify_proof_summary(proof_path)
+        degraded_dcgm = degraded["telemetryCoverage"]["engines"]["tensorrt-llm"]["dcgmHardwareTelemetry"]
+        self.assertEqual(degraded_dcgm["status"], "missing")
+        self.assertEqual(degraded_dcgm["provenCount"], 0)
+        self.assertFalse(serving_smoke.strict_telemetry_gate(degraded)["ok"])
 
     def test_serving_smoke_verifies_partial_proof_only_when_allowed(self):
         proof_path, summary = self.write_full_serving_proof()
@@ -2459,6 +2733,67 @@ else:
         self.assertIn("tokenIdsAvailableCount must equal successCount", joined)
         self.assertIn("tokenTimeline[0].tokenId must be an integer", joined)
 
+    def test_serving_smoke_verify_proof_allows_fractional_metric_completeness_when_required_token_details_present(self):
+        proof_path, summary = self.write_full_serving_proof()
+        submission = summary["submissions"][0]
+        artifact_path = submission["artifactPath"]
+        with open(artifact_path, encoding="utf-8") as handle:
+            artifact = json.load(handle)
+
+        success_count = artifact["measurements"][0]["successCount"]
+        artifact["measurements"][0].update({
+            "tokenDetailsRequired": True,
+            "tokenDetailsAvailableCount": success_count,
+            "tokenIdsAvailableCount": success_count,
+            "logprobsAvailableCount": success_count,
+            "metricCompleteness": 0.9,
+        })
+        for sample in artifact["samples"]:
+            sample.update({
+                "tokenDetailsAvailable": True,
+                "tokenIdsAvailable": True,
+                "logprobsAvailable": True,
+                "tokenDetailCount": 2,
+                "tokenDetailSource": "response-logprobs",
+                "tokenIdSource": "response-logprobs",
+            })
+        for index, row in enumerate(artifact["tokenTimeline"]):
+            row.update({
+                "tokenIndex": index,
+                "tokenId": 1000 + index,
+                "tokenIdSource": "response-logprobs",
+                "tokenLogprob": -0.1,
+                "tokenDetailSource": "response-logprobs",
+            })
+        with open(artifact_path, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2)
+            handle.write("\n")
+
+        artifact_sha = sha256_file(artifact_path)
+        submission["artifactSha256"] = artifact_sha
+        with open(submission["manifestPath"], encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        for item in manifest["artifacts"]:
+            if item.get("path") == artifact_path:
+                item["sha256"] = artifact_sha
+        with open(submission["manifestPath"], "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2)
+            handle.write("\n")
+        summary.pop("evidenceIndex", None)
+        write_proof_summary(summary, self.tmp_dir, summary_out=proof_path)
+
+        verification = verify_proof_summary(proof_path)
+
+        self.assertTrue(verification["ok"], json.dumps(verification, indent=2))
+        self.assertEqual(
+            verification["telemetryCoverage"]["engines"]["vllm"]["outputTokenIds"]["status"],
+            "proven",
+        )
+        self.assertEqual(
+            verification["telemetryCoverage"]["engines"]["vllm"]["outputTokenLogprobs"]["status"],
+            "proven",
+        )
+
     def test_serving_smoke_coverage_respects_engine_token_detail_not_required(self):
         proof_path, summary = self.write_full_serving_proof()
 
@@ -2482,12 +2817,19 @@ else:
         self.rewrite_engine_artifact(summary, "sglang", disable_sglang_output_token_details)
 
         verification = verify_proof_summary(proof_path)
-        sglang_coverage = verification["telemetryCoverage"]["engines"]["sglang"]["outputTokenIdsLogprobs"]
-        output_summary = verification["telemetryCoverage"]["categorySummary"]["outputTokenIdsLogprobs"]
+        sglang_id_coverage = verification["telemetryCoverage"]["engines"]["sglang"]["outputTokenIds"]
+        sglang_logprob_coverage = verification["telemetryCoverage"]["engines"]["sglang"]["outputTokenLogprobs"]
+        output_id_summary = verification["telemetryCoverage"]["categorySummary"]["outputTokenIds"]
+        output_logprob_summary = verification["telemetryCoverage"]["categorySummary"]["outputTokenLogprobs"]
 
-        self.assertEqual(sglang_coverage["expectedCount"], 0)
-        self.assertEqual(output_summary["expectedEngines"], 0)
-        self.assertEqual(output_summary["status"], "proven")
+        self.assertEqual(sglang_id_coverage["expectedCount"], 0)
+        self.assertEqual(sglang_id_coverage["status"], "not_configured")
+        self.assertEqual(sglang_logprob_coverage["expectedCount"], 0)
+        self.assertEqual(sglang_logprob_coverage["status"], "not_configured")
+        self.assertEqual(output_id_summary["expectedEngines"], 0)
+        self.assertEqual(output_id_summary["status"], "not_configured")
+        self.assertEqual(output_logprob_summary["expectedEngines"], 0)
+        self.assertEqual(output_logprob_summary["status"], "not_configured")
         self.assertNotIn("sglang measurement tokenIdsAvailableCount must equal successCount", " ".join(verification["errors"]))
 
     def test_serving_smoke_coverage_flags_unsupported_requested_token_details(self):
@@ -2521,14 +2863,20 @@ else:
         self.rewrite_engine_artifact(summary, "sglang", mark_sglang_output_token_details_unsupported)
 
         verification = verify_proof_summary(proof_path)
-        sglang_coverage = verification["telemetryCoverage"]["engines"]["sglang"]["outputTokenIdsLogprobs"]
-        output_summary = verification["telemetryCoverage"]["categorySummary"]["outputTokenIdsLogprobs"]
+        sglang_id_coverage = verification["telemetryCoverage"]["engines"]["sglang"]["outputTokenIds"]
+        sglang_logprob_coverage = verification["telemetryCoverage"]["engines"]["sglang"]["outputTokenLogprobs"]
+        output_id_summary = verification["telemetryCoverage"]["categorySummary"]["outputTokenIds"]
+        output_logprob_summary = verification["telemetryCoverage"]["categorySummary"]["outputTokenLogprobs"]
 
-        self.assertEqual(sglang_coverage["expectedCount"], 1)
-        self.assertEqual(sglang_coverage["status"], "missing")
-        self.assertIn("unsupported by runtime", " ".join(sglang_coverage["missing"]))
-        self.assertEqual(output_summary["expectedEngines"], 1)
-        self.assertEqual(output_summary["status"], "missing")
+        self.assertEqual(sglang_id_coverage["expectedCount"], 1)
+        self.assertEqual(sglang_id_coverage["status"], "missing")
+        self.assertEqual(sglang_logprob_coverage["expectedCount"], 1)
+        self.assertEqual(sglang_logprob_coverage["status"], "missing")
+        self.assertIn("unsupported by runtime", " ".join(sglang_logprob_coverage["missing"]))
+        self.assertEqual(output_id_summary["expectedEngines"], 1)
+        self.assertEqual(output_id_summary["status"], "missing")
+        self.assertEqual(output_logprob_summary["expectedEngines"], 1)
+        self.assertEqual(output_logprob_summary["status"], "missing")
 
     def test_serving_smoke_verify_proof_rejects_missing_dashboard_rows(self):
         proof_path, _summary = self.write_full_serving_proof()
@@ -2564,6 +2912,42 @@ else:
 
         self.assertEqual([config["engine"] for config in configs], ["vllm"])
         self.assertEqual(missing, ["sglang (PIQ_SGLANG_URL)", "tensorrt-llm (PIQ_TENSORRT_LLM_URL)"])
+
+    def test_serving_smoke_hashes_gpu_inventory_for_every_engine(self):
+        class Args:
+            vllm_url = "http://127.0.0.1:8000"
+            sglang_url = "http://127.0.0.1:30000"
+            tensorrt_llm_url = "http://127.0.0.1:8001"
+            framework_version = None
+            model_revision = None
+            image_digest = None
+            image_tag = None
+            server_args = None
+            tokenizer_model = None
+            resolve_token_ids_with_tokenizer = False
+            collect_hardware_metrics = False
+            require_native_telemetry = False
+            require_hardware_telemetry = False
+            process_id = None
+            container_id = None
+            pod_name = None
+            node_name = None
+            host_name = None
+
+        with tempfile.NamedTemporaryFile("wb", delete=False) as inventory:
+            inventory.write(b"0, NVIDIA Fixture GPU, GPU-fixture, 00000000:01:00.0, 81920, 999.1\n")
+            inventory_path = inventory.name
+        self.addCleanup(lambda: os.path.exists(inventory_path) and os.unlink(inventory_path))
+        os.environ["PIQ_SERVING_GPU_INVENTORY_PATH"] = inventory_path
+
+        configs, missing = engine_configs_from_env(Args())
+
+        expected_sha256 = sha256_file(inventory_path)
+        self.assertEqual(missing, [])
+        self.assertEqual(len(configs), 3)
+        for config in configs:
+            self.assertEqual(config["hardwareInventoryPath"], inventory_path)
+            self.assertEqual(config["hardwareInventorySha256"], expected_sha256)
 
     def test_serving_smoke_reads_per_engine_token_detail_overrides(self):
         class Args:
@@ -2624,6 +3008,45 @@ else:
         self.assertEqual(configs[0]["tokenizerPythonBin"], "/tmp/runtime-python")
         self.assertTrue(configs[0]["resolveTokenIdsWithTokenizer"])
 
+    def test_serving_smoke_defaults_runtime_provenance_from_runtime_discovery(self):
+        class Args:
+            vllm_url = "http://127.0.0.1:8000"
+            sglang_url = None
+            tensorrt_llm_url = None
+            framework_version = None
+            model_revision = None
+            image_digest = None
+            image_tag = None
+            server_args = None
+            tokenizer_model = None
+            resolve_token_ids_with_tokenizer = False
+            collect_hardware_metrics = False
+            require_native_telemetry = False
+            require_hardware_telemetry = False
+            process_id = None
+            container_id = None
+            pod_name = None
+            node_name = None
+            host_name = None
+
+        runtime_candidate = {
+            "python": "/tmp/runtime-python",
+            "usable": True,
+            "command": {"output": ["vllm 1.2.3", "1.2.3"]},
+        }
+        with patch("performance_iq_sdk.serving_smoke.preferred_runtime_python", return_value="/tmp/runtime-python"), \
+            patch("performance_iq_sdk.serving_smoke._runtime_candidate", return_value=runtime_candidate), \
+            patch("performance_iq_sdk.serving_smoke._runtime_version_from_candidate", return_value="1.2.3"), \
+            patch("performance_iq_sdk.serving_smoke._local_endpoint_process_id", return_value="12345"), \
+            patch("performance_iq_sdk.serving_smoke.socket.gethostname", return_value="local-host"):
+            configs, _missing = engine_configs_from_env(Args())
+
+        self.assertEqual(configs[0]["frameworkVersion"], "1.2.3")
+        self.assertEqual(configs[0]["processId"], "12345")
+        self.assertEqual(configs[0]["hostName"], "local-host")
+        self.assertEqual(configs[0]["serverArgs"]["baseUrl"], "http://127.0.0.1:8000")
+        self.assertEqual(configs[0]["serverArgs"]["runtimePython"], "/tmp/runtime-python")
+
     def test_serving_smoke_preflight_reports_missing_without_requests(self):
         os.environ["PIQ_COMMAND_PROBE_TIMEOUT_SECONDS"] = "2.5"
         preflight = runtime_preflight([], ["vllm (PIQ_VLLM_URL)"], model=laptop_smoke_model())
@@ -2643,6 +3066,21 @@ else:
         self.assertEqual(preflight["launchPlan"]["model"], laptop_smoke_model())
         self.assertEqual(preflight["launchPlan"]["endpointEnv"]["PIQ_VLLM_URL"], "http://127.0.0.1:8000")
 
+    def test_serving_smoke_endpoint_only_preflight_skips_local_runtime_discovery(self):
+        with patch(
+            "performance_iq_sdk.serving_smoke.local_runtime_discovery",
+            side_effect=AssertionError("local runtime discovery must not run"),
+        ):
+            preflight = runtime_preflight(
+                [],
+                [],
+                model=laptop_smoke_model(),
+                inspect_local_runtime=False,
+            )
+
+        self.assertTrue(preflight["localRuntime"]["inspectionSkipped"])
+        self.assertEqual(preflight["localRuntime"]["runtimeCandidates"], {})
+
     def test_external_python_module_probe_imports_from_selected_interpreter(self):
         probe = external_python_module_probe(sys.executable, "json", import_module=True)
 
@@ -2650,18 +3088,122 @@ else:
         self.assertTrue(probe["imported"])
         self.assertEqual(probe["python"], sys.executable)
 
+    def test_serving_smoke_runtime_candidates_prefer_workspace_runtimes(self):
+        workspace = os.path.join(self.tmp_dir, "workspace")
+
+        with patch("performance_iq_sdk.serving_smoke._workspace_root", return_value=workspace):
+            vllm_candidates = runtime_python_candidates("vllm")
+            sglang_candidates = runtime_python_candidates("sglang")
+
+        self.assertEqual(vllm_candidates[:3], [
+            os.path.join(workspace, ".runtime/vllm/.venv-piq/bin/python"),
+            os.path.join(workspace, ".runtime/vllm/.venv/bin/python"),
+            "/Users/admin/vllm/.venv-piq/bin/python",
+        ])
+        self.assertIn(os.path.join(workspace, ".runtime/vllm-macos/bin/python"), vllm_candidates)
+        self.assertEqual(sglang_candidates[:3], [
+            os.path.join(workspace, ".runtime/sglang/sglang-metal/bin/python"),
+            os.path.join(workspace, ".runtime/sglang/.venv/bin/python"),
+            os.path.join(workspace, ".runtime/sglang/.venv-piq/bin/python"),
+        ])
+        self.assertNotIn(os.path.join(workspace, ".runtime/sglang/python/sglang-metal/bin/python"), sglang_candidates)
+
+    def test_serving_smoke_runtime_discovery_prefers_launch_ready_candidate(self):
+        def fake_python_candidates(engine):
+            return [f"/legacy/{engine}/bin/python", f"/workspace/{engine}/bin/python"]
+
+        def fake_runtime_candidate(engine, python_bin):
+            launch_ready = python_bin.startswith("/workspace/")
+            result = {
+                "python": python_bin,
+                "module": {"available": True},
+                "usable": True,
+                "launchReady": launch_ready,
+            }
+            if engine == "vllm":
+                result["command"] = {
+                    "command": os.path.join(os.path.dirname(python_bin), "vllm"),
+                    "status": "ok" if launch_ready else "error",
+                }
+                result["extension"] = {"available": True, "imported": True}
+            else:
+                result["launchModule"] = {"available": True}
+            return result
+
+        with (
+            patch("performance_iq_sdk.serving_smoke.runtime_python_candidates", side_effect=fake_python_candidates),
+            patch("performance_iq_sdk.serving_smoke._runtime_candidate", side_effect=fake_runtime_candidate),
+        ):
+            discovery = local_runtime_discovery()
+
+        self.assertEqual(discovery["vllm"]["preferred"]["python"], "/workspace/vllm/bin/python")
+        self.assertTrue(discovery["vllm"]["preferred"]["launchReady"])
+        self.assertEqual(discovery["sglang"]["preferred"]["python"], "/workspace/sglang/bin/python")
+
+    def test_serving_smoke_vllm_runtime_candidate_treats_version_timeout_as_launch_ready(self):
+        with (
+            patch("performance_iq_sdk.serving_smoke.external_python_module_probe") as module_probe,
+            patch("performance_iq_sdk.serving_smoke.command_probe", return_value={
+                "command": "/tmp/vllm/bin/vllm",
+                "available": True,
+                "status": "error",
+                "detail": "Command '['/tmp/vllm/bin/vllm', '--version']' timed out after 5.0 seconds",
+            }),
+        ):
+            module_probe.side_effect = [
+                {"available": True, "module": "vllm"},
+                {"available": True, "module": "vllm._C", "imported": True},
+            ]
+            candidate = serving_smoke._runtime_candidate("vllm", "/tmp/vllm/bin/python")
+
+        self.assertTrue(candidate["usable"])
+        self.assertTrue(candidate["launchReady"])
+
+    def test_serving_smoke_runtime_discovery_keeps_explicit_python_override(self):
+        os.environ["PIQ_VLLM_PYTHON_BIN"] = "/explicit/vllm/bin/python"
+
+        def fake_python_candidates(engine):
+            if engine == "vllm":
+                return ["/explicit/vllm/bin/python", "/workspace/vllm/bin/python"]
+            return ["/workspace/sglang/bin/python"]
+
+        def fake_runtime_candidate(engine, python_bin):
+            result = {
+                "python": python_bin,
+                "module": {"available": True},
+                "usable": True,
+                "launchReady": python_bin.startswith("/workspace/"),
+            }
+            if engine == "vllm":
+                result["command"] = {
+                    "command": os.path.join(os.path.dirname(python_bin), "vllm"),
+                    "status": "ok" if result["launchReady"] else "error",
+                }
+                result["extension"] = {"available": True, "imported": True}
+            else:
+                result["launchModule"] = {"available": True}
+            return result
+
+        with (
+            patch("performance_iq_sdk.serving_smoke.runtime_python_candidates", side_effect=fake_python_candidates),
+            patch("performance_iq_sdk.serving_smoke._runtime_candidate", side_effect=fake_runtime_candidate),
+        ):
+            discovery = local_runtime_discovery()
+
+        self.assertEqual(discovery["vllm"]["preferred"]["python"], "/explicit/vllm/bin/python")
+
     def test_serving_smoke_diagnostics_uses_local_runtime_candidates(self):
         runtime_candidates = {
             "vllm": {
                 "pythonEnv": "PIQ_VLLM_PYTHON_BIN",
                 "usable": True,
-                "preferred": {"python": "/tmp/vllm/bin/python", "usable": True},
+                "preferred": {"python": "/tmp/vllm/bin/python", "usable": True, "launchReady": True},
                 "candidates": [{"python": "/tmp/vllm/bin/python", "usable": True}],
             },
             "sglang": {
                 "pythonEnv": "PIQ_SGLANG_PYTHON_BIN",
                 "usable": True,
-                "preferred": {"python": "/tmp/sglang/bin/python", "usable": True},
+                "preferred": {"python": "/tmp/sglang/bin/python", "usable": True, "launchReady": True},
                 "candidates": [{"python": "/tmp/sglang/bin/python", "usable": True}],
             },
         }
@@ -2770,6 +3312,10 @@ else:
         self.assertIn("vllm serve", plan["engines"]["vllm"]["serve"])
         self.assertIn("sglang.launch_server", plan["engines"]["sglang"]["serve"])
         self.assertIn("trtllm-serve", plan["engines"]["tensorrt-llm"]["serve"])
+        if sys.platform == "darwin":
+            self.assertIn("VLLM_PLUGINS=''", plan["engines"]["vllm"]["serve"])
+            self.assertIn("--gpu-memory-utilization 0.5", plan["engines"]["vllm"]["serve"])
+            self.assertIn("--max-model-len 1024", plan["engines"]["vllm"]["serve"])
         self.assertEqual(plan["runtimeDiscovery"]["vllm"]["pythonEnv"], "PIQ_VLLM_PYTHON_BIN")
         self.assertEqual(plan["runtimeDiscovery"]["sglang"]["pythonEnv"], "PIQ_SGLANG_PYTHON_BIN")
         self.assertIn("usable", plan["runtimeDiscovery"]["vllm"])
@@ -3300,6 +3846,10 @@ else:
                             "rowCount": 6,
                             "rows": [[campaign] for campaign in submitted_campaigns],
                         },
+                        "serving_metric_snapshots": {
+                            "rowCount": 3,
+                            "rows": [[campaign] for campaign in submitted_campaigns],
+                        },
                         "serving_telemetry_coverage": {
                             "rowCount": 3,
                             "rows": [[campaign] for campaign in submitted_campaigns],
@@ -3342,6 +3892,7 @@ else:
                     "--receipt-log", receipt_log,
                     "--record-receipts",
                     "--query-dashboard",
+                    "--verify-after-capture",
                 ])
         finally:
             for server in [*engine_servers, piq_server]:
@@ -3355,6 +3906,11 @@ else:
         self.assertTrue(verification["ok"], json.dumps(verification, indent=2))
         self.assertEqual(verification["receiptCounts"], {"vllm": 1, "sglang": 1, "tensorrt-llm": 1})
         self.assertTrue(os.path.exists(receipt_log))
+        with open(proof_path, encoding="utf-8") as handle:
+            persisted = json.load(handle)
+        self.assertTrue(persisted["verification"]["ok"], json.dumps(persisted["verification"], indent=2))
+        self.assertTrue(persisted["strictTelemetryGate"]["proofOk"], json.dumps(persisted["strictTelemetryGate"], indent=2))
+        self.assertTrue(persisted["realRuntimeProofGate"]["proofOk"], json.dumps(persisted["realRuntimeProofGate"], indent=2))
 
     def test_serving_smoke_dashboard_query_reports_campaign_surfaces(self):
         class Handler(BaseHTTPRequestHandler):
@@ -3402,6 +3958,7 @@ else:
             "run_details": ["campaign-a"],
             "serving_request_samples": ["campaign-a"],
             "serving_token_timeline": ["campaign-a"],
+            "serving_metric_snapshots": [],
             "serving_telemetry_coverage": ["campaign-a"],
         })
         self.assertEqual(result["submittedCampaignRows"], {})
@@ -3453,8 +4010,226 @@ else:
             "run_details": [["campaign-a"]],
             "serving_request_samples": [["campaign-a"]],
             "serving_token_timeline": [["campaign-a"]],
+            "serving_metric_snapshots": [],
             "serving_telemetry_coverage": [["campaign-a"]],
         })
+
+    def test_nvidia_e2e_runner_captures_live_container_provenance(self):
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+        runner = os.path.join(repo_root, "ops/serving-producers/run-nvidia-e2e.sh")
+        counters_path = os.path.join(repo_root, "ops/serving-producers/dcgm-counters.csv")
+        with open(counters_path, encoding="utf-8") as handle:
+            dcgm_metrics = [
+                line.split(",", 1)[0]
+                for line in handle
+                if line.strip() and not line.startswith("#")
+            ]
+
+        fake_command = textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import hashlib
+            import json
+            import os
+            import sys
+
+            name = os.path.basename(sys.argv[0])
+            args = sys.argv[1:]
+            with open(os.environ["PIQ_FAKE_COMMAND_LOG"], "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"command": name, "args": args}) + "\\n")
+
+            if name == "uname":
+                print("Linux")
+            elif name == "nvidia-smi":
+                if "--query-gpu=index,name,uuid,pci.bus_id,memory.total,driver_version" in args:
+                    print("0, NVIDIA Fixture GPU, GPU-fixture, 00000000:01:00.0, 81920, 999.1")
+                else:
+                    print("GPU 0: NVIDIA Fixture GPU (UUID: GPU-fixture)")
+            elif name == "curl":
+                url = args[-1]
+                if url.endswith("/v1/models"):
+                    print(json.dumps({
+                        "object": "list",
+                        "data": [{"id": os.environ["PIQ_SERVING_MODEL"], "object": "model"}],
+                    }))
+                else:
+                    for metric in json.loads(os.environ["PIQ_FAKE_DCGM_METRICS"]):
+                        print(f'{metric}{{gpu="0"}} 1')
+            elif name == "bash":
+                if not args or not args[0].endswith("run-smoke.sh"):
+                    raise SystemExit(f"Unexpected nested bash command: {args}")
+                keys = [
+                    "PIQ_VLLM_FRAMEWORK_VERSION", "PIQ_SGLANG_FRAMEWORK_VERSION",
+                    "PIQ_TENSORRT_LLM_FRAMEWORK_VERSION", "PIQ_VLLM_MODEL_REVISION",
+                    "PIQ_SGLANG_MODEL_REVISION", "PIQ_TENSORRT_LLM_MODEL_REVISION",
+                    "PIQ_VLLM_RUNTIME_BACKEND", "PIQ_SGLANG_RUNTIME_BACKEND",
+                    "PIQ_TENSORRT_LLM_RUNTIME_BACKEND", "PIQ_VLLM_CONTAINER_ID",
+                    "PIQ_SGLANG_CONTAINER_ID", "PIQ_TENSORRT_LLM_CONTAINER_ID",
+                    "PIQ_VLLM_PROCESS_ID", "PIQ_SGLANG_PROCESS_ID",
+                    "PIQ_TENSORRT_LLM_PROCESS_ID", "PIQ_VLLM_IMAGE_TAG",
+                    "PIQ_SGLANG_IMAGE_TAG", "PIQ_TENSORRT_LLM_IMAGE_TAG",
+                    "PIQ_VLLM_IMAGE_DIGEST", "PIQ_SGLANG_IMAGE_DIGEST",
+                    "PIQ_TENSORRT_LLM_IMAGE_DIGEST", "PIQ_VLLM_SERVER_ARGS",
+                    "PIQ_SGLANG_SERVER_ARGS", "PIQ_TENSORRT_LLM_SERVER_ARGS",
+                    "PIQ_VLLM_HOST_NAME", "PIQ_SGLANG_HOST_NAME",
+                    "PIQ_TENSORRT_LLM_HOST_NAME",
+                    "PIQ_SERVING_HARDWARE", "PIQ_SERVING_OPERATING_POINT",
+                    "PIQ_SERVING_GPU_INVENTORY_PATH",
+                ]
+                payload = {key: os.environ.get(key) for key in keys}
+                payload["argv"] = args
+                with open(os.environ["PIQ_FAKE_SMOKE_ENV_OUT"], "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle)
+                raise SystemExit(int(os.environ.get("PIQ_FAKE_SMOKE_EXIT", "0")))
+            elif name == "docker":
+                if args[:2] == ["compose", "version"]:
+                    pass
+                elif args and args[0] == "info":
+                    print('{"nvidia": {}}')
+                elif args and args[0] == "exec":
+                    service = args[1].removesuffix("-cid")
+                    print({
+                        "vllm": "0.23.0",
+                        "sglang": "0.5.12",
+                        "tensorrt-llm": "1.2.1",
+                    }[service])
+                elif args and args[0] == "inspect":
+                    fmt = args[args.index("--format") + 1]
+                    service = args[-1].removesuffix("-cid")
+                    image_tags = {
+                        "vllm": "vllm/vllm-openai:v0.23.0",
+                        "sglang": "lmsysorg/sglang:v0.5.12",
+                        "tensorrt-llm": "nvcr.io/nvidia/tensorrt-llm/release:1.2.1",
+                    }
+                    if fmt == "{{json .Config.Entrypoint}}":
+                        print('["/usr/bin/tini", "--"]')
+                    elif fmt == "{{json .Config.Cmd}}":
+                        print(json.dumps([service, "serve"]))
+                    elif fmt == "{{.State.Pid}}":
+                        print({"vllm": 4101, "sglang": 4102, "tensorrt-llm": 4103}[service])
+                    elif fmt == "{{.Config.Image}}":
+                        print(image_tags[service])
+                    elif fmt == "{{.Image}}":
+                        print("sha256:" + hashlib.sha256(service.encode()).hexdigest())
+                    else:
+                        raise SystemExit(f"Unexpected docker inspect format: {fmt}")
+                elif args and args[0] == "compose":
+                    if "ps" in args and "-q" in args:
+                        print(args[-1] + "-cid")
+                else:
+                    raise SystemExit(f"Unexpected docker command: {args}")
+            else:
+                raise SystemExit(f"Unexpected fixture command: {name} {args}")
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_bin = os.path.join(temp_dir, "bin")
+            os.makedirs(fake_bin)
+            fixture_command = os.path.join(fake_bin, "fixture-command")
+            with open(fixture_command, "w", encoding="utf-8") as handle:
+                handle.write(fake_command)
+            os.chmod(fixture_command, 0o755)
+            for name in ("bash", "curl", "docker", "nvidia-smi", "uname"):
+                os.symlink(fixture_command, os.path.join(fake_bin, name))
+
+            artifact_dir = os.path.join(temp_dir, "artifacts")
+            env_file = os.path.join(temp_dir, "serving.env")
+            model_revision = "7ae557604adf67be50417f59c2c2f167def9a775"
+            with open(env_file, "w", encoding="utf-8") as handle:
+                handle.write("\n".join([
+                    "PIQ_SERVING_MODEL=Qwen/Qwen2.5-0.5B-Instruct",
+                    f"PIQ_SERVING_MODEL_REVISION={model_revision}",
+                    "PIQ_TENSORRT_LLM_BACKEND=tensorrt",
+                    "PIQ_BASE_URL=http://performance-iq.fixture",
+                    "PIQ_SERVING_USD_PER_GPU_HOUR=1.25",
+                    f"PIQ_ARTIFACT_DIR={artifact_dir}",
+                    "PIQ_VLLM_URL=http://127.0.0.1:8000",
+                    "PIQ_SGLANG_URL=http://127.0.0.1:30000",
+                    "PIQ_TENSORRT_LLM_URL=http://127.0.0.1:8001",
+                    "PIQ_VLLM_HARDWARE_METRICS_URL=http://127.0.0.1:9400/metrics",
+                ]) + "\n")
+
+            command_log = os.path.join(temp_dir, "commands.jsonl")
+            smoke_env_out = os.path.join(temp_dir, "smoke-env.json")
+            env = os.environ.copy()
+            env.update({
+                "PATH": os.pathsep.join([fake_bin, env.get("PATH", "")]),
+                "PIQ_FAKE_COMMAND_LOG": command_log,
+                "PIQ_FAKE_SMOKE_ENV_OUT": smoke_env_out,
+                "PIQ_FAKE_DCGM_METRICS": json.dumps(dcgm_metrics),
+            })
+            result = subprocess.run(
+                [
+                    "/bin/bash", runner, "run", "--env-file", env_file,
+                    "--skip-pull", "--skip-manifests",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            with open(command_log, encoding="utf-8") as handle:
+                commands = [json.loads(line) for line in handle]
+            self.assertIn(
+                "Strict NVIDIA serving proof completed",
+                result.stdout,
+                json.dumps({"stdout": result.stdout, "stderr": result.stderr, "commands": commands}, indent=2),
+            )
+            with open(smoke_env_out, encoding="utf-8") as handle:
+                captured = json.load(handle)
+            self.assertEqual(captured["argv"][1], "strict-recorded-smoke")
+            self.assertEqual(captured["PIQ_VLLM_FRAMEWORK_VERSION"], "0.23.0")
+            self.assertEqual(captured["PIQ_SGLANG_FRAMEWORK_VERSION"], "0.5.12")
+            self.assertEqual(captured["PIQ_TENSORRT_LLM_FRAMEWORK_VERSION"], "1.2.1")
+            self.assertEqual(captured["PIQ_VLLM_RUNTIME_BACKEND"], "cuda")
+            self.assertEqual(captured["PIQ_SGLANG_RUNTIME_BACKEND"], "cuda")
+            self.assertEqual(captured["PIQ_TENSORRT_LLM_RUNTIME_BACKEND"], "tensorrt")
+            self.assertEqual(captured["PIQ_SERVING_HARDWARE"], "NVIDIA Fixture GPU")
+            self.assertEqual(captured["PIQ_SERVING_OPERATING_POINT"], "single-gpu-co-resident-three-engine")
+            self.assertTrue(os.path.exists(captured["PIQ_SERVING_GPU_INVENTORY_PATH"]))
+            for prefix, service in (
+                ("PIQ_VLLM", "vllm"),
+                ("PIQ_SGLANG", "sglang"),
+                ("PIQ_TENSORRT_LLM", "tensorrt-llm"),
+            ):
+                self.assertEqual(captured[f"{prefix}_MODEL_REVISION"], model_revision)
+                self.assertEqual(captured[f"{prefix}_CONTAINER_ID"], f"{service}-cid")
+                self.assertTrue(captured[f"{prefix}_IMAGE_DIGEST"].startswith("sha256:"))
+                self.assertTrue(captured[f"{prefix}_HOST_NAME"])
+                self.assertEqual(json.loads(captured[f"{prefix}_SERVER_ARGS"]), {
+                    "entrypoint": ["/usr/bin/tini", "--"],
+                    "command": [service, "serve"],
+                })
+            compose_commands = [item["args"] for item in commands if item["command"] == "docker"]
+            self.assertTrue(any("up" in args for args in compose_commands))
+            self.assertTrue(any("down" in args for args in compose_commands))
+
+            env["PIQ_FAKE_SMOKE_EXIT"] = "17"
+            failed_result = subprocess.run(
+                [
+                    "/bin/bash", runner, "run", "--env-file", env_file,
+                    "--skip-pull", "--skip-manifests", "--",
+                    "--repetitions", "2",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(failed_result.returncode, 17, failed_result.stdout + failed_result.stderr)
+            self.assertNotIn("Strict NVIDIA serving proof completed", failed_result.stdout)
+            with open(smoke_env_out, encoding="utf-8") as handle:
+                failed_capture = json.load(handle)
+            self.assertEqual(failed_capture["argv"][2:], ["--repetitions", "2"])
+            self.assertTrue(os.path.exists(os.path.join(artifact_dir, "nvidia-compose-ps.txt")))
+            self.assertTrue(os.path.exists(os.path.join(artifact_dir, "nvidia-compose.log")))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "performance-iq-kafka-experimental"
+version = "0.1.0a1"
+description = "Experimental post-capture Kafka exporter for Performance IQ serving event logs."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "kafka-python>=2.0.2,<3",
+]
+
+[project.scripts]
+piq-kafka-publish-serving-events = "performance_iq_kafka.publisher:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

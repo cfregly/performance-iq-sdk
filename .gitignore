@@ -4,6 +4,10 @@ coverage/
 .pytest_cache/
 __pycache__/
 *.pyc
+*.egg-info/
+build/
 .venv/
 .env
 .DS_Store
+.performance-iq/
+output/
