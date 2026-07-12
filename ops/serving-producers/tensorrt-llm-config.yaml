@@ -1,2 +1,0 @@
-return_perf_metrics: true
-perf_metrics_max_requests: 1024
